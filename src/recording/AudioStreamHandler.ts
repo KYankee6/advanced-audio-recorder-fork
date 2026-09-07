@@ -18,6 +18,14 @@ export interface TrackAudioSource {
 	deviceId: string;
 	/** Channel mode captured atomically with the selected device. */
 	channelMode: ChannelMode;
+	/**
+	 * Level applied to this track at the mix, in decibels. Absent means the
+	 * track as captured, which is what every session recorded before the
+	 * mixer could place a track was.
+	 */
+	gainDb?: number;
+	/** Where this track sits in the mix, from -1 (left) to 1 (right). */
+	pan?: number;
 }
 
 /**
@@ -33,11 +41,31 @@ export interface AudioInputDeviceSnapshot {
 }
 
 /**
+ * The browser's device API, or null where this environment has none.
+ *
+ * `navigator.mediaDevices` is absent outside a secure context - a vault opened
+ * over plain HTTP - and in some embedded WebViews. Whether it is there is one
+ * question, and every caller asks it here rather than each deciding for itself:
+ * the answer used to be a guard in two places and an assumption in a third, and
+ * the assumption was in the first row the settings tab renders, so its absence
+ * emptied the whole tab.
+ * @returns The device API, or null when the environment does not expose it
+ */
+export function audioDeviceApi(): MediaDevices | null {
+	return navigator.mediaDevices ?? null;
+}
+
+/**
  * Gets all available audio input devices.
  * @returns Promise resolving to array of audio input devices
+ * @throws Error when this environment exposes no device API
  */
 export async function getAudioInputDevices(): Promise<MediaDeviceInfo[]> {
-	const devices = await navigator.mediaDevices.enumerateDevices();
+	const api = audioDeviceApi();
+	if (!api) {
+		throw new Error('This environment exposes no audio device list.');
+	}
+	const devices = await api.enumerateDevices();
 	return devices.filter((device) => device.kind === 'audioinput');
 }
 
@@ -303,6 +331,8 @@ export function getOrderedTrackSources(
 				trackNumber: i,
 				deviceId: source.deviceId,
 				channelMode: normalizeChannelMode(source.channelMode),
+				gainDb: source.gainDb ?? 0,
+				pan: source.pan ?? 0,
 			});
 		}
 	}

@@ -8,11 +8,7 @@
  */
 
 import { setIcon } from 'obsidian';
-import {
-	PLAYER_ICONS,
-	PLAYER_SKIP_SECONDS,
-	PLAYER_VOLUME_SLIDER_STEP,
-} from '../../constants';
+import { PLAYER_ICONS, PLAYER_VOLUME_SLIDER_STEP } from '../../constants';
 import { MARKER_KIND, type MarkerKind } from '../../markers/markerModel';
 import { formatTimecode } from '../../utils/TimeUtils';
 import { formatPlaybackRate } from '../playbackRate';
@@ -30,6 +26,10 @@ export interface PlayerControlsState {
 	loop: boolean;
 	/** Render the marker/chapter buttons. */
 	markersEnabled: boolean;
+	/** Seconds the skip buttons move by, and the number their labels name. */
+	skipSeconds: number;
+	/** Whether playback is repeating the chapter it is inside. */
+	chapterLoop: boolean;
 }
 
 /** What each control does (owned by the player). */
@@ -45,6 +45,13 @@ export interface PlayerControlsCallbacks {
 	onAddMarker(kind: MarkerKind): void;
 	onPreviousChapter(): void;
 	onNextChapter(): void;
+	/**
+	 * Toggles repeating of the current chapter. Nothing is returned, and the
+	 * button is repainted by {@link PlayerControlsView.setChapterLoop}: the
+	 * status bar drives the same toggle, so the button has to follow the
+	 * player's state rather than its own click.
+	 */
+	onToggleChapterLoop(): void;
 	onCopyTimestampLink(): void;
 }
 
@@ -59,6 +66,22 @@ export interface PlayerControlsHost {
 }
 
 /**
+ * Shows a toggle button's state, to the eye and to a screen reader.
+ *
+ * The styling class alone left the state visible and unannounced: nothing said
+ * whether looping was on or the sound was off, so a listener using a reader
+ * had to play the track to find out. `aria-pressed` is what a button that
+ * stays pressed reports itself with, and it is set here rather than at each
+ * call site so the class and the attribute cannot drift apart.
+ * @param button - The toggle button
+ * @param active - Whether it is currently engaged
+ */
+function setToggleState(button: HTMLElement, active: boolean): void {
+	button.toggleClass('is-active', active);
+	button.setAttribute('aria-pressed', String(active));
+}
+
+/**
  * Builds and updates the control row. One instance per render pass; the
  * DOM it owns is recreated by the player's containerEl.empty().
  */
@@ -66,6 +89,7 @@ export class PlayerControlsView {
 	private playButton: HTMLElement | null = null;
 	private speedButton: HTMLElement | null = null;
 	private muteButton: HTMLElement | null = null;
+	private chapterLoopButton: HTMLElement | null = null;
 	private timeEl: HTMLElement | null = null;
 
 	constructor(
@@ -86,30 +110,36 @@ export class PlayerControlsView {
 
 		this.playButton = this.createIconButton(
 			controls,
-			// Reflect the shared audio's current state, so a player rendered
-			// while playback is already running (e.g. after a mode switch)
-			// shows the pause icon rather than a stale play icon
-			state.paused ? PLAYER_ICONS.play : PLAYER_ICONS.pause,
+			PLAYER_ICONS.play,
 			'Play / pause',
 			() => {
 				this.callbacks.onTogglePlay();
 			},
 		);
+		// Reflect the shared audio's current state, so a player rendered while
+		// playback is already running (e.g. after a mode switch) shows the
+		// pause icon and reports it, rather than a stale play icon. Through
+		// setPlaying rather than as arguments here, the way setMuted below
+		// already does it, so the icon and the state have one place to be set.
+		this.setPlaying(!state.paused);
 
+		// The label names the step so the button says what it will do, and the
+		// handler uses the same number rather than a second copy of it.
+		const skip = state.skipSeconds;
 		this.createIconButton(
 			controls,
 			PLAYER_ICONS.skipBack,
-			`Back ${String(PLAYER_SKIP_SECONDS)}s`,
+			`Back ${String(skip)}s`,
 			() => {
-				this.callbacks.onSkip(-PLAYER_SKIP_SECONDS);
+				this.callbacks.onSkip(-skip);
 			},
 		);
 		this.createIconButton(
 			controls,
 			PLAYER_ICONS.skipForward,
-			`Forward ${String(PLAYER_SKIP_SECONDS)}s`,
+			`Forward ${String(skip)}s`,
 			() => {
-				this.callbacks.onSkip(PLAYER_SKIP_SECONDS);
+				this.callbacks.onSkip(skip);
 			},
 		);
 
@@ -155,13 +185,10 @@ export class PlayerControlsView {
 			PLAYER_ICONS.loop,
 			'Loop',
 			() => {
-				loopButton.toggleClass(
-					'is-active',
-					this.callbacks.onToggleLoop(),
-				);
+				setToggleState(loopButton, this.callbacks.onToggleLoop());
 			},
 		);
-		loopButton.toggleClass('is-active', state.loop);
+		setToggleState(loopButton, state.loop);
 
 		if (state.markersEnabled) {
 			// Adding markers/chapters is edit-only; hidden in reading view
@@ -197,6 +224,15 @@ export class PlayerControlsView {
 					this.callbacks.onNextChapter();
 				},
 			);
+			this.chapterLoopButton = this.createIconButton(
+				controls,
+				PLAYER_ICONS.chapterLoop,
+				'Repeat current chapter',
+				() => {
+					this.callbacks.onToggleChapterLoop();
+				},
+			);
+			setToggleState(this.chapterLoopButton, state.chapterLoop);
 		}
 
 		this.timeEl = controls.createDiv({ cls: 'aar-player-time' });
@@ -216,6 +252,14 @@ export class PlayerControlsView {
 
 	/**
 	 * Reflects the playing state on the play/pause button.
+	 *
+	 * The same gap loop and mute had, and the same answer: the icon said which
+	 * of the two states the audio was in and said it to nobody else, so a
+	 * listener using a screen reader heard one name whether the track was
+	 * running or stopped. Not through {@link setToggleState}, though, because
+	 * that also raises the accent class those two wear to show they are
+	 * engaged, and a play button is not engaged - it is the one control of the
+	 * row whose icon already carries its state to the eye.
 	 * @param playing - True while the shared audio is playing
 	 */
 	setPlaying(playing: boolean): void {
@@ -224,6 +268,7 @@ export class PlayerControlsView {
 				this.playButton,
 				playing ? PLAYER_ICONS.pause : PLAYER_ICONS.play,
 			);
+			this.playButton.setAttribute('aria-pressed', String(playing));
 		}
 	}
 
@@ -245,7 +290,19 @@ export class PlayerControlsView {
 				this.muteButton,
 				muted ? PLAYER_ICONS.muted : PLAYER_ICONS.volume,
 			);
-			this.muteButton.toggleClass('is-active', muted);
+			setToggleState(this.muteButton, muted);
+		}
+	}
+
+	/**
+	 * Reflects chapter repeating on its button. Driven by the player rather
+	 * than by the click, because the status-bar control toggles the same
+	 * state and this button has to show it either way.
+	 * @param active - True while the current chapter repeats
+	 */
+	setChapterLoop(active: boolean): void {
+		if (this.chapterLoopButton) {
+			setToggleState(this.chapterLoopButton, active);
 		}
 	}
 

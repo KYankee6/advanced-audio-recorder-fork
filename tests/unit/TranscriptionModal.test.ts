@@ -797,7 +797,6 @@ describe('TranscriptionModal per-run options', () => {
 
 	it.each([
 		{ name: 'Speaker diarization', key: 'transcriptionDiarize' },
-		{ name: 'Word-level timestamps', key: 'transcriptionWordTimestamps' },
 		{ name: 'Include timestamps', key: 'transcriptIncludeTimestamps' },
 		{ name: 'Include speakers', key: 'transcriptIncludeSpeakers' },
 		{ name: 'LLM post-processing', key: 'llmPostProcessEnabled' },
@@ -814,6 +813,20 @@ describe('TranscriptionModal per-run options', () => {
 		expect((runSettings as unknown as Record<string, unknown>)[key]).toBe(
 			!before,
 		);
+	});
+
+	// Out of the table above, which opens on Deepgram: that engine returns
+	// per-word timing whatever the switch says, so its switch is locked and
+	// there is nothing to flip. Whisper API is where the choice is the user's.
+	it('Word-level timestamps flips transcriptionWordTimestamps on the run snapshot', () => {
+		const { modal, runSettings } = openWithEverything({
+			transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.WHISPER_API,
+			transcriptionWordTimestamps: false,
+		});
+
+		rowToggle(settingRow(modal.contentEl, 'Word-level timestamps')).click();
+
+		expect(runSettings.transcriptionWordTimestamps).toBe(true);
 	});
 
 	it('picks another engine for this run alone', () => {
@@ -890,6 +903,46 @@ describe('TranscriptionModal per-run options', () => {
 
 		expect(rowToggleOn(row)).toBe(true);
 	});
+
+	it('leaves the word-timestamp toggle live on the engine that reads it', () => {
+		const { modal } = openWithEverything({
+			transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.WHISPER_API,
+			transcriptionWordTimestamps: true,
+		});
+
+		const row = settingRow(modal.contentEl, 'Word-level timestamps');
+
+		expect(rowToggle(row)).not.toBeDisabledControl();
+		expect(rowToggleOn(row)).toBe(true);
+	});
+
+	// Off and unclickable: the transcript will carry no words, so a switch
+	// left on would promise a JSON field that never arrives.
+	it('leaves the word-timestamp toggle inert for an engine that returns none', () => {
+		const { modal } = openWithEverything({
+			transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.GEMINI,
+			transcriptionWordTimestamps: true,
+		});
+
+		const row = settingRow(modal.contentEl, 'Word-level timestamps');
+
+		expect(rowToggle(row)).toBeDisabledControl();
+		expect(rowToggleOn(row)).toBe(false);
+	});
+
+	// On and unclickable: Deepgram returns the words whatever the stored
+	// value says, so showing it off would be the same lie the other way.
+	it('shows the word-timestamp toggle on for an engine that always returns words', () => {
+		const { modal } = openWithEverything({
+			transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+			transcriptionWordTimestamps: false,
+		});
+
+		const row = settingRow(modal.contentEl, 'Word-level timestamps');
+
+		expect(rowToggle(row)).toBeDisabledControl();
+		expect(rowToggleOn(row)).toBe(true);
+	});
 });
 
 /** What a finished transcription run resolves to. */
@@ -913,7 +966,7 @@ describe('TranscriptionModal running the job', () => {
 	): {
 		modal: TranscriptionModal;
 		internals: TranscriptionModalInternals;
-		addCost: jest.Mock;
+		recordRun: jest.Mock;
 		generateChapters: jest.Mock;
 	} {
 		const settings: AudioRecorderSettings = {
@@ -922,11 +975,13 @@ describe('TranscriptionModal running the job', () => {
 			transcriptionShowCostEstimates: true,
 			...overrides,
 		};
-		const addCost = jest.fn();
+		const recordRun = jest.fn().mockReturnValue(0.12);
 		// The dialog also reads the tracker to draw the session total line, so
-		// the double answers the whole surface it uses, not only add().
+		// the double answers the whole surface it uses, not only the run it
+		// records. What a run is priced at is the counter's own rule, so the
+		// double answers with a figure rather than working one out.
 		const costTracker = {
-			add: addCost,
+			recordRun,
 			hasEntries: (): boolean => false,
 			unpricedRuns: (): number => 0,
 			totalUsd: (): number => 0.12,
@@ -949,7 +1004,7 @@ describe('TranscriptionModal running the job', () => {
 		return {
 			modal,
 			internals: internalsOf<TranscriptionModalInternals>(modal),
-			addCost,
+			recordRun,
 			generateChapters,
 		};
 	}
@@ -968,33 +1023,22 @@ describe('TranscriptionModal running the job', () => {
 		expect(close).toHaveBeenCalled();
 	});
 
-	it('counts what the run cost against the session total', async () => {
-		const { internals, addCost } = openRunnable();
+	// What the dialog owes is handing the finished run to the session counter
+	// with the length it probed. Which runs are counted and at what figure is
+	// the counter's own rule, shared with the queue and the top-up so the same
+	// recording cannot reach the total differently depending on what started it.
+	it('hands the finished run to the session counter', async () => {
+		const { internals, recordRun } = openRunnable();
 
 		await internals.startRun();
 
-		expect(addCost).toHaveBeenCalledWith('deepgram', 0.12);
-	});
-
-	it('counts nothing for a local run, which is billed to nobody', async () => {
-		jest.mocked(transcribeFile).mockResolvedValue(
-			runResult({ cost: { engineId: 'local-whisper', usd: 0 } as never }),
+		// The third figure is the duration the dialog probed, which is null
+		// until the probe answers; it only ever sizes a fallback estimate
+		expect(recordRun).toHaveBeenCalledWith(
+			expect.objectContaining({ engineId: 'deepgram' }),
+			expect.anything(),
+			null,
 		);
-		const { internals, addCost } = openRunnable();
-
-		await internals.startRun();
-
-		expect(addCost).not.toHaveBeenCalled();
-	});
-
-	it('counts nothing while cost estimates are switched off', () => {
-		const { internals, addCost } = openRunnable({
-			transcriptionShowCostEstimates: false,
-		});
-
-		return internals.startRun().then(() => {
-			expect(addCost).not.toHaveBeenCalled();
-		});
 	});
 
 	it('generates chapters from the transcript it just produced', async () => {
@@ -1071,11 +1115,15 @@ describe('TranscriptionModal running the job', () => {
 				throw new Error('vault is read-only');
 			},
 		);
-		const { internals, addCost } = openRunnable();
+		const { internals, recordRun } = openRunnable();
 
 		await internals.startRun();
 
-		expect(addCost).toHaveBeenCalledWith('deepgram', 0.5);
+		expect(recordRun).toHaveBeenCalledWith(
+			{ engineId: 'deepgram', usd: 0.5 },
+			expect.anything(),
+			null,
+		);
 	});
 
 	it('runs once however often the button is pressed', async () => {

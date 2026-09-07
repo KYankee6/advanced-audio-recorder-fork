@@ -69,6 +69,7 @@ function provider(extraArgs: string[] = []): LocalWhisperProvider {
 		modelPath: '/models/ggml.bin',
 		extraArgs,
 		ffmpegPath: 'ffmpeg',
+		processTimeoutMs: 60_000,
 	});
 }
 

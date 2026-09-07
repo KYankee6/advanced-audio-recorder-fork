@@ -44,6 +44,7 @@ function createSut(): LocalWhisperProvider {
 		modelPath: '/models/ggml.bin',
 		extraArgs: [],
 		ffmpegPath: 'ffmpeg',
+		processTimeoutMs: 60_000,
 	});
 }
 
@@ -52,10 +53,36 @@ function options(): TranscribeOptions {
 	return { diarize: false, wordTimestamps: false };
 }
 
-/** A minimal audio payload; the provider only writes it to a temp file. */
+/**
+ * A minimal audio payload: a canonical 44-byte PCM WAV header with no
+ * samples. The provider only writes it to a temp file, and the RIFF magic
+ * keeps it on the direct WAV path rather than the ffmpeg conversion pass
+ * (a container payload would make every binary-run test exercise ffmpeg
+ * instead of whisper.cpp).
+ */
 function payload(): AudioPayload {
+	const bytes = new Uint8Array(44);
+	const view = new DataView(bytes.buffer);
+	const fourCC = (offset: number, text: string): void => {
+		for (let i = 0; i < 4; i++) {
+			bytes[offset + i] = text.charCodeAt(i);
+		}
+	};
+	fourCC(0, 'RIFF');
+	view.setUint32(4, 36, true);
+	fourCC(8, 'WAVE');
+	fourCC(12, 'fmt ');
+	view.setUint32(16, 16, true);
+	view.setUint16(20, 1, true);
+	view.setUint16(22, 1, true);
+	view.setUint32(24, 16000, true);
+	view.setUint32(28, 32000, true);
+	view.setUint16(32, 2, true);
+	view.setUint16(34, 16, true);
+	fourCC(36, 'data');
+	view.setUint32(40, 0, true);
 	return {
-		data: new ArrayBuffer(8),
+		data: bytes.buffer,
 		contentType: 'audio/wav',
 		filename: 'rec.wav',
 		offsetSeconds: 0,
@@ -114,6 +141,39 @@ describe('running the binary', () => {
 		).rejects.toThrow('model file not found');
 	});
 
+	// Node's error for a non-zero exit says "Command failed with exit code 1"
+	// and no more, while the binary has already written the reason on stderr.
+	// Reporting the status code alone sends a user with a mistyped model path
+	// hunting through the console for a sentence that was there all along. The
+	// last line is the one that names the failure; the lines above it are the
+	// trace that led to it.
+	it('reports the reason the binary printed rather than its exit status', async () => {
+		installNode({
+			execError: new Error('Command failed with exit code 1'),
+			stderr:
+				'whisper_init_from_file: loading model\n' +
+				'error: failed to initialize whisper context',
+		});
+
+		await expect(
+			createSut().transcribe(payload(), options()),
+		).rejects.toThrow('failed to initialize whisper context');
+	});
+
+	it('keeps what Node saw as the cause of the error it reports', async () => {
+		const exitFailure = new Error('Command failed with exit code 1');
+		installNode({
+			execError: exitFailure,
+			stderr: 'error: unknown argument: --nonsense',
+		});
+
+		const settled = await createSut()
+			.transcribe(payload(), options())
+			.catch((error: unknown) => error);
+
+		expect(settled).toHaveProperty('cause', exitFailure);
+	});
+
 	it('says the binary wrote no output rather than that the audio was empty', async () => {
 		installNode({
 			writesNoOutput: true,
@@ -154,6 +214,155 @@ describe('running the binary', () => {
 			.catch(() => undefined);
 
 		expect(surface.removed).toHaveLength(2);
+	});
+});
+
+// A binary the plugin only knows by the path a user typed can hang, and until
+// it was bounded nothing could end it: the promise stayed pending, the dialog
+// stayed busy until Obsidian restarted, and the process kept the CPU. Cancel
+// did nothing either, because the run's token is read between parts and this
+// engine has one part.
+describe('a run that does not come back', () => {
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	/** The temp files a run leaves behind, whichever way it ended. */
+	function removedFiles(): string[] {
+		return node?.removed ?? [];
+	}
+
+	it('asks Node to stop the process at the configured limit', async () => {
+		installNode();
+
+		await createSut().transcribe(payload(), options());
+
+		expect(node?.lastOptions()?.timeout).toBe(60_000);
+	});
+
+	it('hands the run cancel to the process it starts', async () => {
+		installNode();
+		const signal = new AbortController().signal;
+
+		await createSut().transcribe(payload(), { ...options(), signal });
+
+		expect(node?.lastOptions()?.signal).toBe(signal);
+	});
+
+	it('fails a run that outlives its limit, naming the setting that raises it', async () => {
+		jest.useFakeTimers();
+		installNode({ neverSettles: true });
+
+		const settled = createSut()
+			.transcribe(payload(), options())
+			.catch((error: unknown) => error);
+		await jest.advanceTimersByTimeAsync(60_000);
+
+		expect(await settled).toHaveProperty(
+			'message',
+			expect.stringContaining('Local run timeout'),
+		);
+	});
+
+	it('removes both temp files when the run is stopped at its limit', async () => {
+		jest.useFakeTimers();
+		installNode({ neverSettles: true });
+
+		const settled = createSut()
+			.transcribe(payload(), options())
+			.catch((error: unknown) => error);
+		await jest.advanceTimersByTimeAsync(60_000);
+		await settled;
+
+		expect(removedFiles()).toEqual([
+			expect.stringMatching(/\.wav$/),
+			expect.stringMatching(/\.json$/),
+		]);
+	});
+
+	it('reports a cancelled run as cancelled rather than as a failed binary', async () => {
+		installNode({ neverSettles: true });
+		const controller = new AbortController();
+
+		const settled = createSut()
+			.transcribe(payload(), { ...options(), signal: controller.signal })
+			.catch((error: unknown) => error);
+		controller.abort();
+
+		expect(await settled).toHaveProperty(
+			'message',
+			'Local whisper.cpp run was cancelled.',
+		);
+	});
+
+	it('removes both temp files when the run is cancelled', async () => {
+		installNode({ neverSettles: true });
+		const controller = new AbortController();
+
+		const settled = createSut()
+			.transcribe(payload(), { ...options(), signal: controller.signal })
+			.catch((error: unknown) => error);
+		controller.abort();
+		await settled;
+
+		expect(removedFiles()).toEqual([
+			expect.stringMatching(/\.wav$/),
+			expect.stringMatching(/\.json$/),
+		]);
+	});
+
+	// A run stopped for writing too much is killed by Node exactly like one
+	// stopped for taking too long, so reading `killed` alone sends the user to
+	// raise a time limit that was never reached and would change nothing.
+	it('tells a run that wrote too much from one that took too long', async () => {
+		installNode({
+			execError: Object.assign(
+				new Error('stdout maxBuffer length exceeded'),
+				{ killed: true, code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' },
+			),
+		});
+
+		const settled = await createSut()
+			.transcribe(payload(), options())
+			.catch((error: unknown) => error);
+
+		expect(settled).toHaveProperty(
+			'message',
+			expect.stringContaining('more output'),
+		);
+		expect(settled).not.toHaveProperty(
+			'message',
+			expect.stringContaining('Local run timeout'),
+		);
+	});
+
+	// The run can now end while the binary still holds its input open, since
+	// Node kills the child on the cancel and on the limit, and Windows refuses
+	// to unlink a file with a live handle. Cleanup throwing there would answer
+	// the user's Cancel with a temp path they can do nothing about.
+	it('keeps a cleanup failure from replacing the reason the run ended', async () => {
+		const reported = jest
+			.spyOn(console, 'warn')
+			.mockImplementation(() => undefined);
+		installNode({
+			neverSettles: true,
+			removalFails: Object.assign(new Error('EPERM'), { code: 'EPERM' }),
+		});
+		const controller = new AbortController();
+
+		const settled = createSut()
+			.transcribe(payload(), { ...options(), signal: controller.signal })
+			.catch((error: unknown) => error);
+		controller.abort();
+
+		expect(await settled).toHaveProperty(
+			'message',
+			'Local whisper.cpp run was cancelled.',
+		);
+		// Both were attempted: a first path that will not go must not take the
+		// second one down with it.
+		expect(removedFiles()).toHaveLength(2);
+		expect(reported).toHaveBeenCalledTimes(2);
 	});
 });
 

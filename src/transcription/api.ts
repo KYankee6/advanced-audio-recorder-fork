@@ -10,9 +10,12 @@ export { transcribeFile } from './runTranscription';
 export type { TranscriptOutputSidecar } from './runTranscription';
 export {
 	effectiveDiarize,
+	effectiveWordTimestamps,
 	isProviderAvailableOnPlatform,
 	providerSupportsDiarization,
 	providerSupportsDictionary,
+	wordTimestampsNote,
+	wordTimestampsSelectable,
 } from './providers/capabilities';
 export { effectiveTranscriptDestination } from './transcriptOutput';
 export { TranscriptionCancelledError } from './TranscriptionService';
@@ -25,6 +28,7 @@ export {
 	costEstimateNeedsDuration,
 	estimateStepCost,
 	formatUsd,
+	runCostToRecord,
 } from './costs';
 export type { CostEstimate, CostEstimateLine, RunCostStepId } from './costs';
 export { advancedTwoPassWillRun } from './advanced/advancedBias';

@@ -120,6 +120,7 @@ describe('settings definitions', () => {
 		},
 		renderDocumentationLink: renderDocs as (host: HTMLElement) => void,
 		devices: {
+			enumerated: true,
 			inputs: {
 				'mic-1': 'Built-in microphone',
 				'iface-1': 'Audio interface',
@@ -559,6 +560,21 @@ describe('settings definitions', () => {
 			expect(isVisible('Request timeout')).toBe(false);
 		});
 
+		// Its mirror: the local engine still runs something of unpredictable
+		// length, and that something is a process rather than a request. One of
+		// the two rows is always on screen, and never both.
+		it('offers the local run timeout only to the engine that runs a process', () => {
+			settings.transcriptionEnabled = true;
+			settings.transcriptionProvider =
+				TRANSCRIPTION_PROVIDER_IDS.WHISPER_API;
+			expect(isVisible('Local run timeout')).toBe(false);
+
+			settings.transcriptionProvider =
+				TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER;
+
+			expect(isVisible('Local run timeout')).toBe(true);
+		});
+
 		it('lists every engine and refuses the ones this device cannot run', () => {
 			// The list reads the same on every device; picking an engine this
 			// one cannot run is refused with the reason, rather than silently
@@ -618,6 +634,42 @@ describe('settings definitions', () => {
 				TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM;
 
 			expect(typeof disabled === 'function' && disabled()).toBe(false);
+		});
+
+		// Same shape as the diarization row above, for the same reason: an
+		// engine decides this for itself, so the switch is shown and locked
+		// with its description saying what the engine does instead.
+		it('leaves word timestamps selectable on the engine that reads them', () => {
+			settings.transcriptionEnabled = true;
+			settings.transcriptionProvider =
+				TRANSCRIPTION_PROVIDER_IDS.WHISPER_API;
+			const row = rowOf(build(), TRANSCRIPTION, 'Word-level timestamps');
+			const disabled = row.control?.disabled;
+
+			expect(isVisible('Word-level timestamps')).toBe(true);
+			expect(typeof disabled === 'function' && disabled()).toBe(false);
+			expect(row.desc).toMatch(/Request per-word/);
+		});
+
+		it('locks word timestamps on an engine that returns none', () => {
+			settings.transcriptionEnabled = true;
+			settings.transcriptionProvider = TRANSCRIPTION_PROVIDER_IDS.GEMINI;
+			const row = rowOf(build(), TRANSCRIPTION, 'Word-level timestamps');
+			const disabled = row.control?.disabled;
+
+			expect(typeof disabled === 'function' && disabled()).toBe(true);
+			expect(row.desc).toMatch(/segment-level/);
+		});
+
+		it('locks word timestamps on an engine that returns them anyway', () => {
+			settings.transcriptionEnabled = true;
+			settings.transcriptionProvider =
+				TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM;
+			const row = rowOf(build(), TRANSCRIPTION, 'Word-level timestamps');
+			const disabled = row.control?.disabled;
+
+			expect(typeof disabled === 'function' && disabled()).toBe(true);
+			expect(row.desc).toMatch(/on every run/);
 		});
 
 		it('hosts a provider key on that provider\u2019s page', () => {
@@ -728,6 +780,33 @@ describe('settings definitions', () => {
 
 			expect(typeof disabled === 'function' && disabled()).toBe(false);
 		});
+
+		it.each(['Track 1 level', 'Track 1 position'])(
+			'disables %s while the track has no device',
+			(name) => {
+				// The writer refuses a place in the mix for a track with no
+				// input, exactly as it refuses a channel layout, so a row that
+				// took the edit anyway accepted a number and then showed the
+				// old one back.
+				settings.enableMultiTrack = true;
+				settings.outputMode = 'single';
+				// A track with no input at all, which is what every track
+				// starts as and what the writer refuses a placement for.
+				settings.trackAudioSources.delete(1);
+				const disabled = rowOf(build(), MULTI, name).control?.disabled;
+
+				expect(typeof disabled === 'function' && disabled()).toBe(true);
+
+				settings.trackAudioSources.set(1, {
+					deviceId: 'mic-1',
+					channelMode: 'source',
+				});
+
+				expect(typeof disabled === 'function' && disabled()).toBe(
+					false,
+				);
+			},
+		);
 	});
 
 	describe('the audio splitting section', () => {
@@ -1463,6 +1542,7 @@ describe('settings definitions', () => {
 				'Enhanced audio player',
 				'Show waveform',
 				'Markers and chapters',
+				'Skip step',
 			]);
 			expect(rowOf(build(), PLAYER, 'Show waveform').control).toEqual({
 				type: 'toggle',
@@ -1671,6 +1751,22 @@ describe('settings definitions', () => {
 			]);
 
 			expect(keys).toEqual(new Set(['filePrefix', 'llmPrompt']));
+		});
+
+		it('walks past a group that declares no children', () => {
+			// Obsidian's own `SettingDefinitionGroup` leaves `items` optional,
+			// so a heading with nothing under it is a shape the API allows and
+			// a page can legitimately produce. The scan has to step over it
+			// rather than read a length off undefined.
+			const keys = collectDebouncedControlKeys([
+				{ type: 'group', heading: 'Nothing here yet' },
+				{
+					name: 'Prefix',
+					control: { type: 'text', key: 'filePrefix' },
+				},
+			]);
+
+			expect(keys).toEqual(new Set(['filePrefix']));
 		});
 
 		it('leaves the controls that change once per interaction alone', () => {

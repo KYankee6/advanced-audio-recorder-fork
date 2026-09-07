@@ -4,7 +4,10 @@
  * provider-factory validation.
  */
 
-import { planChunks } from 'src/transcription/audioChunks';
+import {
+	planChunks,
+	secondsWithinRequestBytes,
+} from 'src/transcription/audioChunks';
 import { at, defined } from '../helpers/assertions';
 import { mapWhisperResponse } from 'src/transcription/providers/whisperResponse';
 import { mapWhisperCppJson } from 'src/transcription/providers/LocalWhisperProvider';
@@ -28,31 +31,62 @@ import {
 } from 'src/constants';
 import { WAV_HEADER_SIZE } from 'src/audio/WavEncoder';
 
+describe('secondsWithinRequestBytes', () => {
+	it('leaves room for the WAV header each part carries', () => {
+		// 10 s of PCM plus the 44-byte header is over a 10 s budget, so the
+		// longest part that still fits the request is 9 s.
+		expect(secondsWithinRequestBytes(10 * TRANSCRIBE_BYTES_PER_SEC)).toBe(
+			9,
+		);
+	});
+
+	it('never goes below a single second', () => {
+		expect(secondsWithinRequestBytes(WAV_HEADER_SIZE)).toBe(1);
+	});
+});
+
 describe('planChunks', () => {
 	it('returns nothing for non-positive duration', () => {
-		expect(planChunks(0, 1_000_000)).toEqual([]);
-		expect(planChunks(Number.NaN, 1_000_000)).toEqual([]);
+		expect(planChunks(0, 30)).toEqual([]);
+		expect(planChunks(Number.NaN, 30)).toEqual([]);
 	});
 
 	it('returns one chunk when the file fits', () => {
-		const plans = planChunks(60, 100 * TRANSCRIBE_BYTES_PER_SEC);
+		const plans = planChunks(60, 100);
 		expect(plans).toEqual([{ index: 0, startSeconds: 0, endSeconds: 60 }]);
 	});
 
-	it('splits into chunks bounded by the byte budget (leaving room for the WAV header)', () => {
-		// 10s of PCM plus the 44-byte WAV header exceeds the budget, so the
-		// per-chunk budget is 9s: 25s total -> 3 chunks (9, 9, 7).
-		const plans = planChunks(25, 10 * TRANSCRIBE_BYTES_PER_SEC);
-		expect(plans).toEqual([
-			{ index: 0, startSeconds: 0, endSeconds: 9 },
-			{ index: 1, startSeconds: 9, endSeconds: 18 },
-			{ index: 2, startSeconds: 18, endSeconds: 25 },
+	it('returns one chunk for a recording of exactly the limit', () => {
+		expect(planChunks(900, 900)).toEqual([
+			{ index: 0, startSeconds: 0, endSeconds: 900 },
 		]);
 	});
 
-	it('keeps every chunk within the byte limit once the WAV header is added', () => {
+	// A greedy walk answered 901 s with a 900 s part and a 1 s part: a second
+	// request, its instruction tokens paid in full, for a second of audio.
+	it('divides a recording just past the limit into equal parts', () => {
+		const plans = planChunks(901, 900);
+
+		expect(plans).toHaveLength(2);
+		expect(at(plans, 0).endSeconds).toBeCloseTo(450.5);
+		expect(at(plans, 1).startSeconds).toBeCloseTo(450.5);
+		expect(at(plans, 1).endSeconds).toBe(901);
+	});
+
+	it('covers the whole recording with parts that tile', () => {
+		const plans = planChunks(25, 9);
+
+		expect(at(plans, 0).startSeconds).toBe(0);
+		expect(at(plans, plans.length - 1).endSeconds).toBe(25);
+		for (let i = 1; i < plans.length; i++) {
+			expect(at(plans, i).startSeconds).toBe(at(plans, i - 1).endSeconds);
+		}
+	});
+
+	it('keeps every part within the byte limit once the WAV header is added', () => {
 		const maxBytes = 10 * TRANSCRIBE_BYTES_PER_SEC;
-		const plans = planChunks(25, maxBytes);
+		const plans = planChunks(25, secondsWithinRequestBytes(maxBytes));
+
 		for (const plan of plans) {
 			const pcmBytes =
 				(plan.endSeconds - plan.startSeconds) *
@@ -197,6 +231,34 @@ describe('buildPostProcessPrompt', () => {
 		expect(prompt.system).toContain('ru');
 	});
 
+	it('names the target language in the translation prompt', () => {
+		const prompt = buildPostProcessPrompt('0||Hello', {
+			task: 'translate',
+			targetLanguage: 'Spanish',
+		});
+		expect(prompt.user).toBe('0||Hello');
+		expect(prompt.system).toContain('Spanish');
+		// The wire format is what keeps a translated line on its own segment,
+		// so the instruction has to describe it.
+		expect(prompt.system).toContain('number|speaker|text');
+	});
+
+	it('translates into English when the run named no language', () => {
+		expect(
+			buildPostProcessPrompt('0||Hola', { task: 'translate' }).system,
+		).toContain('English');
+	});
+
+	it('uses the profile translation prompt over the built-in one', () => {
+		expect(
+			buildPostProcessPrompt('0||Hello', {
+				task: 'translate',
+				translatePrompt: 'Render it as a shanty.',
+				targetLanguage: 'Spanish',
+			}).system,
+		).toBe('Render it as a shanty. Translate into Spanish.');
+	});
+
 	it('uses the custom instruction for the custom task', () => {
 		const prompt = buildPostProcessPrompt('x', {
 			task: 'custom',
@@ -313,6 +375,54 @@ describe('buildTranscriptFilePath', () => {
 			'audio/rec.srt',
 		);
 		expect(buildTranscriptFilePath('rec.mp3', 'vtt')).toBe('rec.vtt');
+	});
+
+	// A translation is written beside the original rather than over it, so
+	// the two cannot collide and be told apart only by a bare _1 suffix.
+	it('names the language of a translation', () => {
+		expect(
+			buildTranscriptFilePath('audio/rec.webm', 'srt', 'Spanish'),
+		).toBe('audio/rec.Spanish.srt');
+		expect(
+			buildTranscriptFilePath('audio/rec.webm', 'json', 'Spanish'),
+		).toBe('audio/rec.Spanish.transcript.json');
+	});
+
+	it.each([
+		{
+			case: 'a language written with spaces',
+			language: 'Brazilian Portuguese',
+			expected: 'rec.Brazilian-Portuguese.srt',
+		},
+		{
+			case: 'a language written in its own script',
+			language: 'Русский',
+			expected: 'rec.Русский.srt',
+		},
+		{
+			case: 'a dot, which would otherwise split the extension',
+			language: 'en.US',
+			expected: 'rec.en-US.srt',
+		},
+		{
+			case: 'a slash, which would otherwise move the file',
+			language: 'pt/br',
+			expected: 'rec.pt-br.srt',
+		},
+	])('carries $case into the file name', ({ language, expected }) => {
+		expect(buildTranscriptFilePath('rec.webm', 'srt', language)).toBe(
+			expected,
+		);
+	});
+
+	it.each([
+		{ case: 'no language at all', language: undefined },
+		{ case: 'a blank language', language: '   ' },
+		{ case: 'a language of only separators', language: '///' },
+	])('names nothing for $case', ({ language }) => {
+		expect(buildTranscriptFilePath('rec.webm', 'srt', language)).toBe(
+			'rec.srt',
+		);
 	});
 });
 

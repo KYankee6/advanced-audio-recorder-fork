@@ -20,7 +20,11 @@ import type {
 import type { AudioRecorderSettings } from '../settings/settingsSchema';
 import { PLUGIN_LOG_PREFIX, FORMAT_WAV } from '../constants';
 import { DebugLogger } from '../utils/DebugLogger';
-import { assembleWavFromPcmSegmentFiles } from '../audio/WavEncoder';
+import {
+	assembleWavFromPcmSegmentFiles,
+	WAV_SIZE_LIMIT_MESSAGE,
+	WavSizeLimitError,
+} from '../audio/WavEncoder';
 import { isOfflineEncodingSupported } from '../audio/AudioEncoder';
 import {
 	resolveUniquePath,
@@ -33,11 +37,14 @@ import {
 	convertBlobToWavBuffer,
 	convertBlobToFormatBuffer,
 	mergeAudioTracks,
+	type MergePlacement,
 } from '../audio/AudioFormatConverter';
+import { INT16_MAX } from '../audio/pcm';
 import { buildMimeType } from '../audio/AudioCapabilityDetector';
 import type { EncodingWorkerClient } from '../audio/EncodingWorkerClient';
 import { audioMimeForExtension } from '../audio/formatRegistry';
 import { canStreamMix, mixPcmTracksToWav } from './StreamingMixer';
+import { gainFactor, normalizeFactor, panGains } from './mixMath';
 import { buildPartFileName } from './AudioSplitter';
 import { insertFileLinks } from './NoteInserter';
 import type { TrackWriteQueue } from './TrackWriteQueue';
@@ -212,6 +219,7 @@ export class RecordingFinalizer {
 					(percent, description) => {
 						this.reportProgress(percent, description);
 					},
+					this.mergePlacement(),
 				);
 				this.reportProgress(60, 'Writing file...');
 				const fileName = `${this.settings.filePrefix}-multitrack-${effectiveTimestamp}.${targetFormat}`;
@@ -223,32 +231,10 @@ export class RecordingFinalizer {
 				);
 				if (filePath) {
 					this.reportProgress(80, 'Cleaning up...');
-					const intermediatePaths = targets.flatMap(
-						(target) => target.segmentPaths,
+					await this.cleanupTemporarySegments(
+						targets.flatMap((target) => target.segmentPaths),
+						() => cleanupIntermediateFiles(targets, this.app),
 					);
-					const failedCleanupPaths = await cleanupIntermediateFiles(
-						targets,
-						this.app,
-					);
-					this.journal.removeSegments(
-						intermediatePaths.filter(
-							(path) => !failedCleanupPaths.includes(path),
-						),
-					);
-					if (failedCleanupPaths.length > 0) {
-						// Keep the merged file: it already contains all
-						// captured audio, while segments removed by the
-						// partial cleanup exist nowhere else. Rolling it back
-						// would lose their audio permanently. Failed segments
-						// stay journaled for the next launch.
-						console.error(
-							`${PLUGIN_LOG_PREFIX} Temporary segment files could not be removed:`,
-							failedCleanupPaths,
-						);
-						new Notice(
-							`Recording saved, but temporary files could not be removed: ${failedCleanupPaths.join(', ')}`,
-						);
-					}
 					fileLinks.push(filePath);
 					// One merged file carries every track's timeline, so all
 					// markers resolve against this single file (part ordinal 0).
@@ -273,6 +259,8 @@ export class RecordingFinalizer {
 				}
 			}
 		} else {
+			const refusedTracks: string[] = [];
+			const keptSegments: string[] = [];
 			for (
 				let trackIndex = 0;
 				trackIndex < targets.length;
@@ -282,10 +270,40 @@ export class RecordingFinalizer {
 				if (!target) {
 					continue;
 				}
-				const paths = await this.finalizeTrackFiles(target);
-				const files = [...target.partPaths, ...paths];
-				fileLinks.push(...files);
-				trackFiles.push({ trackIndex, files });
+				// A track the container cannot hold is that track's problem
+				// and no sibling's: each writes its own file, each faces the
+				// ceiling alone, and a mono track beside a stereo one reaches
+				// it hours later. Letting the first refusal end the loop cost
+				// every track after it a save it had already earned. Only this
+				// one failure is caught, because only this one is about the
+				// track: a vault that will not take the write is about the
+				// session and still ends it.
+				try {
+					const paths = await this.finalizeTrackFiles(target);
+					const files = [...target.partPaths, ...paths];
+					fileLinks.push(...files);
+					trackFiles.push({ trackIndex, files });
+				} catch (error) {
+					if (!(error instanceof WavSizeLimitError)) {
+						throw error;
+					}
+					refusedTracks.push(target.fileBaseName);
+					keptSegments.push(...target.segmentPaths);
+				}
+			}
+			if (refusedTracks.length > 0) {
+				// The refusal happens before the assembly removes anything, so
+				// this track's PCM segments are still on disk and are the only
+				// copy of its audio. Reported the way the merged branch above
+				// reports its own leftovers: the paths to the console, where a
+				// list of them fits, and the reason to the user.
+				console.error(
+					`${PLUGIN_LOG_PREFIX} Track too long for a WAV container; its PCM segments were kept:`,
+					keptSegments,
+				);
+				new Notice(
+					`${refusedTracks.join(', ')}: ${WAV_SIZE_LIMIT_MESSAGE}`,
+				);
 			}
 		}
 
@@ -480,27 +498,13 @@ export class RecordingFinalizer {
 		if (reportProgress) {
 			this.reportProgress(80, 'Cleaning up...');
 		}
-		const failedCleanupPaths = await removeTemporaryArtifacts(
-			segmentPaths,
-			'Failed to remove segment file after finalization',
-			this.app,
+		await this.cleanupTemporarySegments(segmentPaths, () =>
+			removeTemporaryArtifacts(
+				segmentPaths,
+				'Failed to remove segment file after finalization',
+				this.app,
+			),
 		);
-		this.journal.removeSegments(
-			segmentPaths.filter((path) => !failedCleanupPaths.includes(path)),
-		);
-		if (failedCleanupPaths.length > 0) {
-			// Keep the final file: it already contains all captured audio,
-			// while segments that were removed exist nowhere else. Rolling
-			// it back would lose their audio permanently and leave part
-			// bookkeeping pointing at missing segment files.
-			console.error(
-				`${PLUGIN_LOG_PREFIX} Temporary segment files could not be removed:`,
-				failedCleanupPaths,
-			);
-			new Notice(
-				`Recording saved, but temporary files could not be removed: ${failedCleanupPaths.join(', ')}`,
-			);
-		}
 
 		return filePath;
 	}
@@ -524,19 +528,37 @@ export class RecordingFinalizer {
 
 		await this.app.vault.createBinary(filePath, wavBuffer);
 
-		const failedPaths = await removeTemporaryArtifacts(
-			target.segmentPaths,
-			'Failed to remove PCM segment file after WAV assembly',
-			this.app,
+		await this.cleanupTemporarySegments(target.segmentPaths, () =>
+			removeTemporaryArtifacts(
+				target.segmentPaths,
+				'Failed to remove PCM segment file after WAV assembly',
+				this.app,
+			),
 		);
+	}
+
+	/**
+	 * Removes a finished session's temporary segments, strikes the ones that
+	 * went from the recovery journal, and reports the ones that stayed.
+	 *
+	 * The saved file is kept whatever happens here. It already contains all
+	 * captured audio, while a segment that was removed exists nowhere else, so
+	 * rolling the file back would lose that audio permanently and leave part
+	 * bookkeeping pointing at files that are gone. A segment that refused to go
+	 * stays journaled instead, and the next launch offers it for recovery.
+	 * @param paths - Segment paths the removal was asked to take
+	 * @param remove - Removal to run, which answers with the paths it could not
+	 * take
+	 */
+	private async cleanupTemporarySegments(
+		paths: readonly string[],
+		remove: () => Promise<string[]>,
+	): Promise<void> {
+		const failedPaths = await remove();
 		this.journal.removeSegments(
-			target.segmentPaths.filter((path) => !failedPaths.includes(path)),
+			paths.filter((path) => !failedPaths.includes(path)),
 		);
 		if (failedPaths.length > 0) {
-			// Keep the assembled file: it already contains all captured
-			// audio, while segments that were removed exist nowhere else.
-			// Rolling it back would lose their audio permanently and leave
-			// part bookkeeping pointing at missing segment files.
 			console.error(
 				`${PLUGIN_LOG_PREFIX} Temporary segment files could not be removed:`,
 				failedPaths,
@@ -545,6 +567,46 @@ export class RecordingFinalizer {
 				`Recording saved, but temporary files could not be removed: ${failedPaths.join(', ')}`,
 			);
 		}
+	}
+
+	/**
+	 * Where this session's tracks sit in a merged file, in the terms the Web
+	 * Audio merge takes them.
+	 *
+	 * Derived from the rules the streaming mixer applies rather than written
+	 * again, so a session is placed the same by either route: the level in
+	 * decibels through {@link gainFactor}, the position through the balance law
+	 * of {@link panGains}, and the alignment through {@link normalizeFactor}.
+	 * Only the unit differs, because the mixer reads a level on the int16 scale
+	 * the capture works in while a decoded buffer is a share of full scale.
+	 *
+	 * The placement is the same; the final level is not, once levels are
+	 * aligned. This route renders the mix and measures the peak it actually
+	 * reached, while the streaming one cannot: its measuring pass runs before
+	 * the alignment figures exist, so it bounds the sum by the tracks' separate
+	 * peaks and comes out quieter by however far apart they peak. Closing that
+	 * would cost the streaming route a third full read of the session, which is
+	 * the memory-bounded route's whole reason for existing.
+	 * @returns The placement for this session's merge
+	 */
+	private mergePlacement(): MergePlacement {
+		const session = this.requireSession();
+		return {
+			levels: session.trackMix.map((mix) => {
+				const level = gainFactor(mix.gainDb);
+				const pan = panGains(mix.pan);
+				return {
+					left: level * pan.left,
+					right: level * pan.right,
+				};
+			}),
+			...(session.alignTrackLevels
+				? {
+						normalize: (rms: number): number =>
+							normalizeFactor(rms * INT16_MAX),
+					}
+				: {}),
+		};
 	}
 
 	/**
@@ -558,31 +620,54 @@ export class RecordingFinalizer {
 	private async tryStreamMixToWav(
 		targets: RecordingTarget[],
 	): Promise<Blob | null> {
+		const session = this.requireSession();
 		const tracks = targets
-			.filter((target) => target.segmentPaths.length > 0)
-			.map((target) => ({
+			// The placement is read before the filter, because it is aligned
+			// with the session's tracks and a track that flushed nothing must
+			// not shift the one after it into its place.
+			.map((target, index) => ({
 				segmentPaths: target.segmentPaths,
 				channels: target.pcmChannels,
 				sampleRate: target.pcmSampleRate,
-			}));
+				...(session.trackMix[index] ?? {}),
+			}))
+			.filter((track) => track.segmentPaths.length > 0);
 		if (!canStreamMix(tracks)) {
+			this.debugLogger.log('Mixing through the Web Audio route', {
+				reason: 'the streaming mixer does not take these tracks',
+				tracks: tracks.length,
+			});
 			return null;
 		}
 		try {
-			const wavBuffer = await mixPcmTracksToWav(
-				tracks,
-				this.app,
-				(percent) => {
+			const wavBuffer = await mixPcmTracksToWav(tracks, this.app, {
+				onProgress: (percent) => {
 					this.reportProgress(
 						40 + Math.round(percent * 0.2),
 						'Mixing tracks...',
 					);
 				},
-			);
+				alignLevels: session.alignTrackLevels,
+			});
+			this.debugLogger.log('Mixed through the streaming route', {
+				tracks: tracks.length,
+				alignLevels: session.alignTrackLevels,
+			});
 			return new Blob([wavBuffer], {
 				type: audioMimeForExtension(FORMAT_WAV),
 			});
 		} catch (error) {
+			// The one failure the fallback cannot answer. Every other reason
+			// the streaming mix gives up is a property of the route - a rate
+			// mismatch, an adapter without stat - and the Web Audio mix takes
+			// another route to the same file. The container ceiling is a
+			// property of the audio: that mix encodes through mediabunny,
+			// which is outside the check entirely, so it would spend the
+			// decode only to write a file whose stated sizes have wrapped.
+			// The refusal names auto-split, which is what the user can act on.
+			if (error instanceof WavSizeLimitError) {
+				throw error;
+			}
 			console.warn(
 				`${PLUGIN_LOG_PREFIX} Streaming mix failed, falling back to the Web Audio mix:`,
 				error,

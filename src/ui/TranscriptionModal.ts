@@ -32,16 +32,17 @@ import {
 } from '../settings/settingControls';
 import { formatTimecode } from '../utils/TimeUtils';
 import { readAudioMetadata } from '../utils/AudioFileAnalyzer';
-import { TRANSCRIPTION_PROVIDER_IDS } from '../constants';
 import {
 	buildCostEstimate,
 	costEstimateNeedsDuration,
 	effectiveDiarize,
+	effectiveWordTimestamps,
 	effectiveTranscriptDestination,
-	estimateStepCost,
 	formatUsd,
 	isProviderAvailableOnPlatform,
 	providerSupportsDiarization,
+	wordTimestampsNote,
+	wordTimestampsSelectable,
 	providerSupportsDictionary,
 	transcribeFile,
 	TranscriptionCancelledError,
@@ -406,9 +407,17 @@ export class TranscriptionModal extends PluginModal {
 		}
 		addToggle(ctx, {
 			name: 'Word-level timestamps',
-			desc: 'Request per-word timing (recorded in JSON file output only).',
-			get: () => s.transcriptionWordTimestamps,
+			desc: wordTimestampsNote(s.transcriptionProvider),
+			// Reflect what this run will produce: a stored "off" reads as on
+			// for an engine that returns the words anyway, and a stored "on"
+			// as off for one that never does.
+			get: () =>
+				effectiveWordTimestamps(
+					s.transcriptionProvider,
+					s.transcriptionWordTimestamps,
+				),
 			set: (v) => (s.transcriptionWordTimestamps = v),
+			disabled: !wordTimestampsSelectable(s.transcriptionProvider),
 		});
 
 		// Advanced settings: a per-run master switch mirroring the settings tab.
@@ -743,11 +752,23 @@ export class TranscriptionModal extends PluginModal {
 		if (!tracker?.hasEntries()) {
 			return;
 		}
+		const notes: string[] = [];
 		const unpriced = tracker.unpricedRuns();
-		const suffix =
-			unpriced > 0
-				? ` (${String(unpriced)} run${unpriced > 1 ? 's' : ''} not priced)`
-				: '';
+		if (unpriced > 0) {
+			notes.push(
+				`${String(unpriced)} run${unpriced > 1 ? 's' : ''} not priced`,
+			);
+		}
+		// Most of the total is now what the vendors themselves reported, so
+		// the line says how much of it is not: an estimate presented as a
+		// measurement is the thing this counter exists to avoid.
+		const estimated = tracker.estimatedRuns();
+		if (estimated > 0) {
+			notes.push(
+				`${String(estimated)} step${estimated > 1 ? 's' : ''} estimated`,
+			);
+		}
+		const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
 		el.createDiv({
 			cls: 'aar-transcribe-cost-session',
 			text: `Spent this session: ~${formatUsd(tracker.totalUsd())}${suffix}`,
@@ -774,23 +795,15 @@ export class TranscriptionModal extends PluginModal {
 		settings: AudioRecorderSettings,
 		cost: TranscribeRunCost,
 	): number | null {
-		if (
-			!settings.transcriptionShowCostEstimates ||
-			cost.engineId === TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER
-		) {
-			return null;
-		}
-		// Fall back to a duration estimate when the provider reported no usage.
-		// This goes through the shared transcription step, which already scales
-		// by the passes the run actually makes, so the fallback can never drift
-		// from the pre-run estimate the user was shown. Actual multi-pass
-		// billing still flows through the summed usage in cost.usd; this branch
-		// only estimates when the provider reported no usage to price from.
+		// Actual multi-pass billing flows through the summed usage in cost.usd;
+		// the shared rule only estimates when the provider reported no usage to
+		// price from, and leaves out the runs that are not counted at all.
 		const usd =
-			cost.usd ??
-			estimateStepCost('transcription', settings, this.durationSeconds)
-				.usd;
-		this.options.costTracker?.add(cost.engineId, usd);
+			this.options.costTracker?.recordRun(
+				cost,
+				settings,
+				this.durationSeconds,
+			) ?? null;
 		// Refresh the session line so a follow-up run sees the new total.
 		this.updateCostEstimate();
 		return usd;

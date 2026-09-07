@@ -7,17 +7,27 @@
  * marker data - this view only renders what it is given and reports user
  * intent back. Handlers are delegated once per container so rebuilding rows or
  * ticks never accumulates per-element listeners.
+ *
+ * A read-only row is a button, and an editable one is not. The whole row is
+ * the jump target in reading view, and a block element carrying a data
+ * attribute is reachable by pointer alone: tab skips it, Enter and Space do
+ * nothing, and a screen reader announces plain text. The editable row never
+ * had the problem, because there the jump is a real button beside the rename
+ * field. Reading view gets one too, and it is the row itself.
  * @module player/views/MarkerListView
  */
 
 import { setIcon } from 'obsidian';
-import { formatTimecode } from '../../utils/TimeUtils';
+import { formatTimecode, parseTimecode } from '../../utils/TimeUtils';
 import {
 	activeMarkerIndex,
 	MARKER_KIND,
+	MARKER_COLORS,
 	MARKER_ROW_ACTION,
 	markerRows,
 	sortMarkers,
+	isMarkerColor,
+	type MarkerColor,
 	type MarkerKind,
 	type MarkerRow,
 	type PlayerMarker,
@@ -29,6 +39,29 @@ import {
  * edit/preview by hotkey), without writing on every keystroke.
  */
 const RENAME_DEBOUNCE_MS = 400;
+
+/**
+ * Identifies one editable field: the marker it belongs to, and which of that
+ * marker's fields it is. A row offers two fields that are typed into, and both
+ * of them can be waiting to be written at the same moment.
+ * @param id - Marker identifier
+ * @param action - Which field was typed in
+ * @returns The key that field's pending write is held under
+ */
+function editKey(id: string, action: string): string {
+	return `${id}:${action}`;
+}
+
+/**
+ * What activating a jump target does, worded by the kind of marker it leads
+ * to. Both rows say it: the editable row's timecode button and the read-only
+ * row itself, which is a button of its own.
+ * @param kind - Whether the row holds a chapter or a bookmark
+ * @returns The action, as the opening of an accessible name
+ */
+function jumpAction(kind: MarkerKind): string {
+	return kind === MARKER_KIND.chapter ? 'Jump to chapter' : 'Jump to marker';
+}
 
 /** Lifecycle hooks the view borrows from the owning render child. */
 export interface MarkerListHost {
@@ -50,6 +83,14 @@ export interface MarkerListCallbacks {
 	onDelete(id: string): void;
 	/** Persist a renamed marker. */
 	onRename(id: string, label: string): void;
+	/** Move a marker to a typed time, in seconds. */
+	onEditTime(id: string, seconds: number): void;
+	/** Move a marker to wherever playback currently is. */
+	onUseCurrentTime(id: string): void;
+	/** Persist a marker's note; blank clears it. */
+	onEditNote(id: string, note: string): void;
+	/** Persist a marker's colour, or null to clear it. */
+	onSetColor(id: string, color: MarkerColor | null): void;
 	/** Add a marker/chapter at a clicked time (double-click, edit only). */
 	onAddAt(time: number, kind: MarkerKind): void;
 	/** Resolve a viewport X coordinate to a playback time, or null. */
@@ -69,8 +110,16 @@ export class MarkerListView {
 	 * the active-segment highlight never re-sorts on every timeupdate. */
 	private sortedMarkers: PlayerMarker[] = [];
 	private editable = false;
-	/** Pending debounced rename-persist timer. */
-	private renameTimer = 0;
+	/**
+	 * The pending debounced write of each field being typed in, held per
+	 * marker and per field.
+	 *
+	 * One handle for all of them meant a keystroke anywhere cancelled every
+	 * other field's pending write outright rather than merely delaying it:
+	 * renaming a marker and then clicking into a note within the debounce
+	 * window dropped the rename, and nothing fired a change event to save it.
+	 */
+	private readonly pendingEdits = new Map<string, number>();
 
 	/**
 	 * @param host - Lifecycle hooks from the owning render child
@@ -147,40 +196,118 @@ export class MarkerListView {
 				}
 			} else if (target.dataset.action === MARKER_ROW_ACTION.delete) {
 				this.callbacks.onDelete(id);
+			} else if (
+				target.dataset.action === MARKER_ROW_ACTION.useCurrentTime
+			) {
+				this.callbacks.onUseCurrentTime(id);
 			}
 		});
 		// Persist a rename shortly after typing (debounced), so the change is
 		// saved and synced even when no change/blur event fires
 		this.host.registerDomEvent(this.listEl, 'input', (event) => {
-			const input = event.target as HTMLInputElement | null;
+			const input = event.target as
+				| HTMLInputElement
+				| HTMLTextAreaElement
+				| null;
 			const id = input?.dataset.markerId;
-			if (
-				input &&
-				id &&
-				input.dataset.action === MARKER_ROW_ACTION.rename
-			) {
-				const value = input.value;
-				window.clearTimeout(this.renameTimer);
-				this.renameTimer = window.setTimeout(() => {
-					this.callbacks.onRename(id, value);
-				}, RENAME_DEBOUNCE_MS);
+			if (!input || !id) {
+				return;
 			}
+			const action = input.dataset.action;
+			if (
+				action !== MARKER_ROW_ACTION.rename &&
+				action !== MARKER_ROW_ACTION.editNote
+			) {
+				return;
+			}
+			const value = input.value;
+			this.debounceEdit(editKey(id, action), () => {
+				if (action === MARKER_ROW_ACTION.rename) {
+					this.callbacks.onRename(id, value);
+				} else {
+					this.callbacks.onEditNote(id, value);
+				}
+			});
 		});
 		this.host.registerDomEvent(this.listEl, 'change', (event) => {
-			const input = event.target as HTMLInputElement | null;
+			const input = event.target as
+				| HTMLInputElement
+				| HTMLSelectElement
+				| HTMLTextAreaElement
+				| null;
 			const id = input?.dataset.markerId;
-			if (
-				input &&
-				id &&
-				input.dataset.action === MARKER_ROW_ACTION.rename
-			) {
-				window.clearTimeout(this.renameTimer);
-				this.callbacks.onRename(id, input.value);
+			if (!input || !id) {
+				return;
+			}
+			switch (input.dataset.action) {
+				case MARKER_ROW_ACTION.rename:
+					this.cancelEdit(editKey(id, MARKER_ROW_ACTION.rename));
+					this.callbacks.onRename(id, input.value);
+					break;
+				case MARKER_ROW_ACTION.editNote:
+					this.cancelEdit(editKey(id, MARKER_ROW_ACTION.editNote));
+					this.callbacks.onEditNote(id, input.value);
+					break;
+				case MARKER_ROW_ACTION.editTime: {
+					// The same parser the timecode links use, so a marker
+					// accepts every shape a link does: 90, 1:30, 0:01:30.
+					const seconds = parseTimecode(input.value);
+					if (seconds === null) {
+						// Nothing was understood, so put back what the row was
+						// rendered with rather than moving the marker
+						// somewhere the user did not ask for.
+						input.value = input.dataset.timecode ?? input.value;
+						return;
+					}
+					this.callbacks.onEditTime(id, seconds);
+					break;
+				}
+				case MARKER_ROW_ACTION.setColor:
+					this.callbacks.onSetColor(
+						id,
+						isMarkerColor(input.value) ? input.value : null,
+					);
+					break;
+				default:
+					break;
 			}
 		});
 		this.host.register(() => {
-			window.clearTimeout(this.renameTimer);
+			for (const pending of this.pendingEdits.values()) {
+				window.clearTimeout(pending);
+			}
+			this.pendingEdits.clear();
 		});
+	}
+
+	/**
+	 * Debounces one field's write, replacing only that field's own pending
+	 * one so a keystroke elsewhere cannot drop it.
+	 * @param key - Identifies the field being typed in
+	 * @param write - Persists what was typed
+	 */
+	private debounceEdit(key: string, write: () => void): void {
+		this.cancelEdit(key);
+		this.pendingEdits.set(
+			key,
+			window.setTimeout(() => {
+				this.pendingEdits.delete(key);
+				write();
+			}, RENAME_DEBOUNCE_MS),
+		);
+	}
+
+	/**
+	 * Drops one field's pending write, for a change event that is about to
+	 * persist that same field itself.
+	 * @param key - Identifies the field
+	 */
+	private cancelEdit(key: string): void {
+		const pending = this.pendingEdits.get(key);
+		if (pending !== undefined) {
+			window.clearTimeout(pending);
+			this.pendingEdits.delete(key);
+		}
 	}
 
 	/**
@@ -216,7 +343,19 @@ export class MarkerListView {
 		}
 		const index = activeMarkerIndex(this.sortedMarkers, currentTime);
 		this.rowEls.forEach((rowEl, i) => {
-			rowEl.toggleClass('is-active', i === index);
+			const playing = i === index;
+			rowEl.toggleClass('is-active', playing);
+			// Beside the class rather than instead of it. The accent edge says
+			// which segment is playing to the eye and said it to nobody else,
+			// which in reading view leaves a real button whose announced name
+			// is the same whether the track is inside it or nowhere near it.
+			// Removed rather than set false, which is how aria-current spells
+			// "not this one".
+			if (playing) {
+				rowEl.setAttribute('aria-current', 'true');
+			} else {
+				rowEl.removeAttribute('aria-current');
+			}
 		});
 	}
 
@@ -256,7 +395,16 @@ export class MarkerListView {
 						? 'aar-player-tick aar-player-tick-chapter'
 						: 'aar-player-tick aar-player-tick-bookmark',
 			});
-			tick.setCssProps({ '--aar-tick-left': `${String(left)}%` });
+			tick.setCssProps({
+				'--aar-tick-left': `${String(left)}%`,
+				// Absent leaves the stylesheet's own default in place, which
+				// is what an uncoloured marker has always looked like.
+				...(marker.color
+					? {
+							'--aar-marker-color': `var(--aar-marker-${marker.color})`,
+						}
+					: {}),
+			});
 			tick.dataset.time = String(marker.time);
 			tick.setAttribute(
 				'aria-label',
@@ -283,10 +431,22 @@ export class MarkerListView {
 			durationSeconds ??
 			rows.reduce((max, row) => Math.max(max, row.time), 0);
 		for (const row of rows) {
-			const rowEl = this.listEl.createDiv({
-				cls: 'aar-player-marker-row',
-			});
+			// A button in reading view, where the row is the jump target, and a
+			// plain block in edit mode, where it holds a text field and two
+			// buttons of its own and nesting them in a button is invalid.
+			const rowEl = this.editable
+				? this.listEl.createDiv({ cls: 'aar-player-marker-row' })
+				: this.listEl.createEl('button', {
+						cls: 'aar-player-marker-row',
+						attr: { type: 'button' },
+					});
 			this.rowEls.push(rowEl);
+			if (row.color) {
+				rowEl.addClass('aar-player-marker-row-colored');
+				rowEl.setCssProps({
+					'--aar-marker-color': `var(--aar-marker-${row.color})`,
+				});
+			}
 			if (this.editable) {
 				this.buildEditableRow(rowEl, row, reference);
 			} else {
@@ -312,12 +472,9 @@ export class MarkerListView {
 		});
 		jump.dataset.action = MARKER_ROW_ACTION.jump;
 		jump.dataset.markerId = row.id;
-		jump.setAttribute(
-			'aria-label',
-			row.kind === MARKER_KIND.chapter
-				? 'Jump to chapter'
-				: 'Jump to marker',
-		);
+		// The action alone here: this button sits inside the row rather than
+		// being it, so the rename field beside it still carries the identity.
+		jump.setAttribute('aria-label', jumpAction(row.kind));
 		setIcon(
 			rowEl.createSpan({ cls: 'aar-player-marker-kind' }),
 			row.kind === MARKER_KIND.chapter ? 'list' : 'bookmark',
@@ -328,6 +485,55 @@ export class MarkerListView {
 		});
 		label.dataset.action = MARKER_ROW_ACTION.rename;
 		label.dataset.markerId = row.id;
+		const timecode = formatTimecode(row.time, referenceSeconds);
+		// A marker is almost always dropped a beat late, so moving it is the
+		// commonest edit there is. Typed as a timecode rather than as seconds,
+		// in the shapes a timecode link already accepts.
+		const timeEdit = rowEl.createEl('input', {
+			cls: 'aar-player-marker-time-edit',
+			attr: {
+				type: 'text',
+				value: timecode,
+				'aria-label': 'Marker time',
+			},
+		});
+		timeEdit.dataset.action = MARKER_ROW_ACTION.editTime;
+		timeEdit.dataset.markerId = row.id;
+		timeEdit.dataset.timecode = timecode;
+		const here = rowEl.createEl('button', {
+			cls: 'aar-player-marker-here',
+			attr: { 'aria-label': 'Move marker to the current position' },
+		});
+		here.dataset.action = MARKER_ROW_ACTION.useCurrentTime;
+		here.dataset.markerId = row.id;
+		setIcon(here, 'crosshair');
+		const color = rowEl.createEl('select', {
+			cls: 'aar-player-marker-color',
+			attr: { 'aria-label': 'Marker colour' },
+		});
+		color.dataset.action = MARKER_ROW_ACTION.setColor;
+		color.dataset.markerId = row.id;
+		color.createEl('option', { value: '', text: 'No colour' });
+		for (const name of MARKER_COLORS) {
+			// A name alone does not tell the user what the theme's red looks
+			// like on the seek bar, so every option carries the colour itself:
+			// a filled circle drawn in it, and the option text in the same
+			// colour. An option element takes no markup, so the circle is a
+			// character and the colour comes from the class.
+			color
+				.createEl('option', {
+					value: name,
+					// Capitalised for the menu; the value stays the stored name.
+					text: `\u25cf ${name.charAt(0).toUpperCase()}${name.slice(1)}`,
+				})
+				.addClass(`aar-player-marker-color-${name}`);
+		}
+		color.value = row.color ?? '';
+		// The closed control shows the chosen colour too, so the row states it
+		// without being opened.
+		if (row.color) {
+			color.addClass(`aar-player-marker-color-${row.color}`);
+		}
 		const remove = rowEl.createEl('button', {
 			cls: 'aar-player-marker-delete',
 			attr: { 'aria-label': 'Delete' },
@@ -335,6 +541,19 @@ export class MarkerListView {
 		remove.dataset.action = MARKER_ROW_ACTION.delete;
 		remove.dataset.markerId = row.id;
 		setIcon(remove, 'trash-2');
+		// The note sits under the row's own line: it is prose, and a field
+		// sized to the control column would show four characters of it.
+		const note = rowEl.createEl('textarea', {
+			cls: 'aar-player-marker-note',
+			attr: {
+				rows: '1',
+				placeholder: 'Note',
+				'aria-label': 'Marker note',
+			},
+		});
+		note.value = row.note ?? '';
+		note.dataset.action = MARKER_ROW_ACTION.editNote;
+		note.dataset.markerId = row.id;
 	}
 
 	/**
@@ -349,18 +568,28 @@ export class MarkerListView {
 		row: MarkerRow,
 		referenceSeconds: number,
 	): void {
+		// The element is a button (see renderList), so focus order, Enter and
+		// Space come from the platform rather than from a key handler here.
 		rowEl.addClass('aar-player-marker-row-clickable');
 		rowEl.dataset.action = MARKER_ROW_ACTION.jump;
 		rowEl.dataset.markerId = row.id;
+		const timecode = formatTimecode(row.time, referenceSeconds);
+		// The row is the button, so this name replaces the text inside it
+		// rather than introducing it: what the spans below show has to be said
+		// here too, or every chapter in the list announces identically. A
+		// marker with no name of its own is told apart by its time alone.
+		const name = row.label
+			? `${jumpAction(row.kind)}: ${row.label} at ${timecode}`
+			: `${jumpAction(row.kind)} at ${timecode}`;
+		// The note is shown below, and the row is the button, so it has to be
+		// said here too or a reader who cannot see it never gets it.
 		rowEl.setAttribute(
 			'aria-label',
-			row.kind === MARKER_KIND.chapter
-				? 'Jump to chapter'
-				: 'Jump to marker',
+			row.note ? `${name}. ${row.note}` : name,
 		);
 		rowEl.createSpan({
 			cls: 'aar-player-marker-time',
-			text: formatTimecode(row.time, referenceSeconds),
+			text: timecode,
 		});
 		setIcon(
 			rowEl.createSpan({ cls: 'aar-player-marker-kind' }),
@@ -377,5 +606,23 @@ export class MarkerListView {
 					? formatTimecode(row.segmentSeconds, referenceSeconds)
 					: '',
 		});
+		if (row.note) {
+			// The note takes a line of its own under the row, starting where
+			// the marker's icon does rather than under its timecode. The
+			// alignment is drawn rather than measured: a copy of the timecode,
+			// hidden, holds the column open however wide the timecode is.
+			const noteLine = rowEl.createSpan({
+				cls: 'aar-player-marker-note-line',
+			});
+			noteLine.createSpan({
+				cls: 'aar-player-marker-note-indent',
+				text: timecode,
+				attr: { 'aria-hidden': 'true' },
+			});
+			noteLine.createSpan({
+				cls: 'aar-player-marker-note-static',
+				text: row.note,
+			});
+		}
 	}
 }

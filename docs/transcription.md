@@ -17,6 +17,8 @@
 - [In-note formatting](#in-note-formatting)
 - [The Transcribe dialog (per-run overrides)](#the-transcribe-dialog-per-run-overrides)
 - [Progress and minimizing](#progress-and-minimizing)
+- [Transcribing a folder](#transcribing-a-folder)
+- [Transcribing the parts that failed](#transcribing-the-parts-that-failed)
 - [Cost estimates](#cost-estimates)
 - [LLM post-processing](#llm-post-processing)
 - [Auto chapters](#auto-chapters)
@@ -34,11 +36,12 @@ Open **Settings > Advanced Audio Recorder > Transcription** and turn on **Enable
 2. **Transcription engine** - the row naming the service that transcribes, with the **Engines** entry under it opening the page where that service is configured: base URL, API key, and model.
 3. **Language** - `auto` to detect, or an ISO code.
 4. **Speaker diarization** - request speaker labels (only some engines).
-5. **Word-level timestamps** - per-word timing in JSON output.
-6. **Request timeout** - the per-request network deadline (cloud engines only).
-7. **Transcript output** - destination, file format, and in-note formatting.
-8. **Auto chapters** - optional LLM-generated chapters for the enhanced player (see [Auto chapters](#auto-chapters)).
-9. **LLM post-processing** - optional, documented separately in [LLM post-processing](llm-post-processing.md).
+5. **Translate speech to English** - write the recording down in English whatever was spoken, using the engine's own translating operation (only some engines).
+6. **Word-level timestamps** - per-word timing in JSON output, selectable on Whisper API and decided by the engine on the other three.
+7. **Request timeout** - the per-request network deadline (cloud engines only), replaced by **Local run timeout** on local whisper.cpp.
+8. **Transcript output** - destination, file format, and in-note formatting.
+9. **Auto chapters** - optional LLM-generated chapters for the enhanced player (see [Auto chapters](#auto-chapters)).
+10. **LLM post-processing** - optional, documented separately in [LLM post-processing](llm-post-processing.md).
 
 ---
 
@@ -89,6 +92,7 @@ Behavior and limits:
 - **Per-request limit is a hard 25 MB.** Files **at or under 25 MB** are uploaded in their **original container**, untouched.
 - **Larger files** are resampled to **16 kHz mono**, split into upload-sized WAV chunks (sized by **Upload chunk size**, default 24 MB to stay under the 25 MB limit), and the per-chunk results are stitched back onto one timeline.
 - **No diarization.** Whisper does not return speaker labels, so **Speaker diarization** is disabled for this engine.
+- **Speech translation.** The endpoint carries a second operation that writes the recording down in **English** whatever was spoken. Turn on **Translate speech to English** to use it. Chunking and the dictionary bias behave exactly as they do on the transcription operation, but the translation one takes a narrower set of fields, so two things are dropped from the request rather than sent and refused. The **Language** hint goes, because it would describe the audio rather than the answer. **Word-level timestamps** go with it, because the operation has no timing granularity to ask for and answers with segments only, so a translated transcript carries per-segment timings and never per-word ones. This is the only engine that offers speech translation at all. To translate into any other language, or on any other engine, use the [translation task](llm-post-processing.md) of LLM post-processing instead, which runs on the finished transcript.
 - **Model requirements.** Only models that return `verbose_json` with segment timestamps work. `whisper-1` is OpenAI's; `whisper-large-v3` and `whisper-large-v3-turbo` are served by Groq and other compatible hosts. (OpenAI's `gpt-4o-transcribe` models do **not** support `verbose_json` and are intentionally excluded.)
 
 Getting a key: [OpenAI Whisper API key](use-cases/openai-whisper-api-key.md) · [Groq Whisper setup](use-cases/groq-whisper-setup.md). The catalogue link next to the model picker points at the [OpenAI speech-to-text guide](https://platform.openai.com/docs/guides/speech-to-text).
@@ -137,7 +141,7 @@ Behavior and limits:
 
 - **Up to 2 GB uploaded whole** via the File API, then transcribed in one request - so diarization keeps consistent speaker numbering across the whole file.
 - **Container conversion.** Containers Gemini does not accept directly (notably `webm`, `mp4`, and `m4a`) are decoded to **16 kHz mono WAV** before upload. WAV, MP3, AAC, OGG, FLAC, and AIFF are sent as-is.
-- **Long recordings are split.** A recording **longer than 15 minutes** is split into parts, each transcribed and stitched back onto the timeline. Splitting **resets Gemini's per-request speaker numbering**, so a diarized split shows a warning that speaker labels may differ between parts; the message suggests using Deepgram or splitting the recording for consistent speakers.
+- **Long recordings are split.** A recording **longer than 15 minutes** is split into parts of equal length, each transcribed and stitched back onto the timeline; a recording of exactly 15 minutes still goes in one request. Splitting **resets Gemini's per-request speaker numbering**, so a diarized split shows a warning that speaker labels may differ between parts; the message suggests using Deepgram or splitting the recording for consistent speakers.
 - **Diarization supported.** Turn on **Speaker diarization** to request speaker labels.
 
 Getting a key: [Gemini API key](use-cases/gemini-api-key.md). The catalogue link points at the [Gemini model list](https://ai.google.dev/gemini-api/docs/models).
@@ -308,7 +312,7 @@ When you ask for in-note output but the note is not open in an editable view (re
 | **WebVTT (.vtt)**               | `.vtt`             | WebVTT cues with `HH:MM:SS.mmm` timing; speaker as a line prefix.            |
 | **Plain text (.txt)**           | `.txt`             | Readable lines, each prefixed with `[timecode]` and the speaker.             |
 
-The sidecar is written **next to the audio file**, sharing its base name (JSON uses a `.transcript.json` suffix so it is not mistaken for other JSON). If a file with that name already exists, a numeric suffix is appended to avoid overwriting it. **Word-level timestamps** (the global toggle) only appear in the **JSON** output, and only some engines populate them: **Whisper API** requests per-word timings when the toggle is on, **Deepgram** always returns them regardless of the toggle, while **Google Gemini** and **local whisper.cpp** return segment-level timing only, so the toggle has no effect for those three.
+The sidecar is written **next to the audio file**, sharing its base name (JSON uses a `.transcript.json` suffix so it is not mistaken for other JSON). If a file with that name already exists, a numeric suffix is appended to avoid overwriting it. **Word-level timestamps** only appear in the **JSON** output, and which engine gives them is not the toggle's to decide: **Whisper API** requests per-word timings when it is on, **Deepgram** returns them on every run whatever it says, and **Google Gemini** and **local whisper.cpp** return segment-level timing only. The toggle is therefore live on Whisper API alone; on the other three it is shown disabled, sitting in the position that engine will actually produce and with that engine's own behaviour named under it, so a run never promises a words array it will not produce. Your choice is kept while another engine is selected and takes effect again on Whisper API.
 
 With the default templates and timestamp links on, a diarized transcript renders like this:
 
@@ -353,7 +357,7 @@ When you run **Transcribe audio** from the context menu or the command palette, 
 - **Language** - `auto` or an ISO code.
 - **Speaker diarization** - request speaker labels (enabled only when the chosen engine can diarize).
 - **Participant profile** - shown only when the run will actually produce speaker labels. Picks the roster of names stored with this recording, so **Rename speakers** suggests the right people afterwards. The last pick is remembered and also applies to transcribe-on-save; profiles are created in the rename dialog. See [Naming speakers](#naming-speakers).
-- **Word-level timestamps** - per-word timing (JSON output only).
+- **Word-level timestamps** - per-word timing (JSON output only). Live on Whisper API; on the other engines it shows what that engine will do and cannot be changed.
 - **Advanced settings** - a master switch (off by default) that reveals the term-biasing controls for this run; with it off the recording transcribes in one plain pass with no biasing. When on it shows a **Dictionary** picker (choose a named profile to bias this run, or None) and an **Advanced two-pass transcription** toggle (the experimental context-biased two-pass mode, roughly 2x the engine cost plus LLM calls, reusing the Dictionary terms above and leaving its length safeguard in the settings tab).
 - **Destination** - Insert into note / Save to file / Note and file / Save to file and link it in the note.
 - **File format** - shown when the destination is not note-only.
@@ -385,15 +389,50 @@ A part whose transcript overruns the model's **output-token limit** (which Gemin
 
 ---
 
+## Transcribing a folder
+
+Right-click a folder and choose **Transcribe every recording in this folder** to queue all the recordings in it, including those in the folders under it. The dialog that opens lists what will run and roughly what it will cost, so a month of recordings is approved once instead of opened one at a time.
+
+The queue runs **one recording at a time**. The engines it calls are paid, rate limited, and slow on a long recording, and firing a folder's worth of requests at once is the way to be refused by all of them at once. Each recording's state is shown as it goes: waiting, transcribing, done, or failed with the reason the engine gave. A recording that fails does not stop the rest.
+
+While it runs you can **pause** it, which lets the recording in flight finish and starts nothing after it, **resume** it, or **drop** a single entry. The dialog can be closed at any point: the queue keeps running, and **Show the transcription queue** in the command palette brings it back.
+
+The queue is kept **in the plugin folder**, not in your settings, so it survives closing Obsidian. On the next start, a queue with work left in it is **offered back** rather than simply resumed, because carrying on spends money and reopening Obsidian is not a decision to spend it. Declining leaves the queue where it is; the offer comes back next time. A recording that was mid-transcription when the window closed goes back to waiting, since nothing will finish it.
+
+Every queued run counts into the **"Spent this session"** total by the same rules a single run follows: what the provider reported, or the estimate when it reported nothing, marked as an estimate either way. The estimate the dialog shows beforehand is coarser: it prices a typical recording rather than measuring each one, since reading a folder of recordings to price them would cost more than the number is worth.
+
+---
+
+## Transcribing the parts that failed
+
+A recording longer than the engine takes in one request is sent in parts, and a part can fail on its own: a rate limit, a provider fault, a request the engine refused. The run keeps every part that came back rather than throwing the transcript away, warns about the gap in a callout, and **records what it lost** in the recording's sidecar, with the time bounds of each missing part and the reason the engine gave.
+
+**Transcribe the parts that failed**, in the recording's context menu, the editor menu of its embed, and the command palette, sends **exactly those parts again** and splices what comes back into the transcript already written. The part boundaries are a pure function of the recording's length and the engine's limit, so the same recording is cut the same way every time and the part that failed is the part that is asked for. That is what makes this a top-up rather than a second run: you are billed for the missing minutes, not for the whole recording.
+
+What it does with the result:
+
+- The stretches that were sent are **replaced wholesale** by what came back for them, and everything outside those stretches is left untouched. The decision is made by stretch rather than by comparing segment starts, because a chunk size or an engine changed since the first run moves the part boundaries: the parts that already succeeded would then come back a few tenths of a second off, and a proximity test would read them as new segments and write the same speech into the transcript twice. Anything you edited by hand inside a retried stretch is overwritten along with the rest of it.
+- Every transcript file the run wrote is **rewritten** with the completed transcript, each in the format it was written in. No second set of files appears beside the first.
+- What still fails is recorded again, so the action can be run once more later; a run that comes back whole clears the record.
+- The speaker names you assigned are **re-applied** to the recovered segments, exactly as a full re-run applies them, so a topped-up transcript does not call the same person both by name and by the engine's own label.
+- No **cleanup, custom, or translation pass** runs over the top-up. It reads segments and writes them back, so what you pay for is the engine time on the missing minutes and nothing else.
+- A translation is left alone: it is a second document, and completing it is the [translation task's](llm-post-processing.md) job rather than the engine's.
+
+Two limits are worth knowing. The top-up reads the transcript back from a **JSON transcript file**, which is the only output that keeps the segment timings, and whether such a file exists is decided by **Transcript output > Destination** rather than by the format alone. On the default destination, **Insert into note**, the transcript goes into the note and no file is written at all, so the top-up has nothing to read and says so. Choose a destination that saves a file (**Save to file**, **Note and file**, or **Save to file and link it in the note**) and set **File format** to JSON, and every run from then on leaves behind what a top-up needs. With only subtitles or plain text on disk it likewise says so rather than guessing at the timings those formats drop. And a recording small enough to go in **one request** has no smaller unit to re-send, so a failure there is reported as one to transcribe again in full.
+
+The action is offered on every recording, because whether anything is missing cannot be known without reading the sidecar: a recording with nothing missing is simply told so.
+
+---
+
 ## Cost estimates
 
 Cloud transcription is a paid API call, and nobody likes a surprise bill. With **Show cost estimates** on (the default, under **Settings > Advanced Audio Recorder > Transcription**), the **Transcribe audio** dialog makes the spending visible:
 
 - **Before the run**, the dialog shows an **Estimated cost** breakdown priced from the recording's duration. That duration is read from the container headers, which costs almost nothing; a file whose headers carry no duration, as a recording written live often does, is decoded instead, so the estimate appears either way. It lists one line per billed step of the run, assembled automatically from the features you have enabled: the transcription pass itself, a second transcription pass when the **Advanced two-pass** mode is on (so the transcription roughly doubles), the LLM **context agents** that run between those passes, the [LLM post-processing](llm-post-processing.md) pass, and the **auto chapters** generation, each shown only when it will actually run. The priced lines are summed into an estimated total, so the number reflects the whole run rather than one stage, and toggling a feature changes it. Deepgram and the Whisper API are priced per audio minute; Gemini is priced from its audio-token rate (about 32 tokens per second of audio); the LLM steps are priced from the transcript's token size and the selected model. Switching the engine, model, or an enabled feature in the dialog re-prices the estimate immediately.
 - **During a long multi-part run**, a live "Cost so far" line accumulates what the completed transcription parts actually billed.
-- **After the run**, a notice reports the transcription cost together with the running session total, and the dialog shows **"Spent this session"** - a per-session counter of everything transcribed since Obsidian started, kept per engine.
+- **After the run**, a notice reports the transcription cost together with the running session total, and the dialog shows **"Spent this session"** - a per-session counter of everything transcribed since Obsidian started, kept per engine. The line names what the total is made of: runs that could not be priced at all, and steps whose figure is an estimate rather than a count the vendor reported.
 
-Below the breakdown, a **Check current pricing** line links straight to the pricing page of each provider the run uses, so the built-in rates are one click from the authoritative numbers. The transcription cost is computed from what the provider **actually reported billing for** - Deepgram's and OpenAI's billed audio duration, Gemini's token counts split by modality (audio input and the text prompt are billed at different rates) - and falls back to the duration-based estimate when a provider reports nothing. Estimates use **built-in, approximate pay-as-you-go rates** for the common models (`whisper-1`, Groq's `whisper-large-v3`(-turbo) and `distil-whisper`, Deepgram `nova`/`enhanced`/`base`, Gemini 2.x, and the OpenAI, Anthropic, and Gemini post-processing models); providers change prices, so always verify against the linked pricing page. A model the plugin has no rate for shows "no built-in rate" instead of a wrong number, and such runs are counted separately in the session total rather than silently added as zero. The **local whisper.cpp engine is free** and shows no cost. The LLM steps (context agents, post-processing, auto chapters) are included in the pre-run **estimate**, but because their provider returns no usage to measure, they are billed separately and are not added to the "Spent this session" counter.
+Below the breakdown, a **Check current pricing** line links straight to the pricing page of each provider the run uses, so the built-in rates are one click from the authoritative numbers. The transcription cost is computed from what the provider **actually reported billing for** - Deepgram's and OpenAI's billed audio duration, Gemini's token counts split by modality (audio input and the text prompt are billed at different rates) - and falls back to the duration-based estimate when a provider reports nothing. Estimates use **built-in, approximate pay-as-you-go rates** for the common models (`whisper-1`, Groq's `whisper-large-v3`(-turbo) and `distil-whisper`, Deepgram `nova`/`enhanced`/`base`, Gemini 2.x, and the OpenAI, Anthropic, and Gemini post-processing models); providers change prices, so always verify against the linked pricing page. A model the plugin has no rate for shows "no built-in rate" instead of a wrong number, and such runs are counted separately in the session total rather than silently added as zero. The **local whisper.cpp engine is free** and shows no cost. The LLM steps (context agents, post-processing, auto chapters) are counted in the session total too, and they are priced the same way the transcription is: OpenAI, Anthropic, and Gemini all return the token counts they billed in the same response the text comes from, so a completed step is recorded at **what it cost** rather than at what it was expected to cost. Reasoning tokens, which the models that produce them report separately, are billed at the output rate. The pre-run estimate is the fallback, used for a model with no built-in rate and for a vendor that reported no counts, and the session line says how many steps were priced that way, so an estimate is never presented as a measurement.
 
 ---
 
@@ -447,8 +486,9 @@ All transcription settings live under **Settings > Advanced Audio Recorder > Tra
 | **Transcription engine**            | Whisper API / Deepgram / Google Gemini / Local whisper.cpp.                                             | Whisper API                    |
 | **Language**                        | `auto` to detect, or an ISO code (`en`, `ru`, `es`).                                                    | `auto`                         |
 | **Speaker diarization**             | Request speaker labels (Deepgram and Gemini only).                                                      | Off                            |
-| **Word-level timestamps**           | Per-word timing, recorded in JSON file output only.                                                     | Off                            |
+| **Word-level timestamps**           | Per-word timing in JSON file output. Selectable on Whisper API; the other engines decide it themselves. | Off                            |
 | **Request timeout**                 | Minutes before one request is aborted and reported (cloud engines only). Range 1-60.                    | 10                             |
+| **Local run timeout**               | Minutes before the local whisper.cpp process is stopped (that engine only). Range 1-720.                | 120                            |
 | **Advanced settings**               | Master switch revealing the dictionary and the two-pass mode; off keeps one plain pass with no biasing. | Off                            |
 | **Advanced two-pass transcription** | Two engine passes with LLM-generated context biasing the second (roughly 2x cost; experimental).        | Off                            |
 | **Second-pass length safeguard**    | Keep the biased second pass only when its text is at least this fraction of the first pass.             | 0.8                            |
@@ -481,9 +521,10 @@ Per-engine fields (base URL, key, model picker, upload chunk size) are documente
 - **"Transcribe audio" is missing from the menu** - enable **Enable transcription** in settings first.
 - **The Transcribe audio palette command does nothing** - it runs only when the active file is an audio file and transcription is enabled. Open the audio file (or its note) and try again.
 - **Speaker labels never appear** - only Deepgram and Gemini diarize; the toggle is disabled for Whisper API and local whisper.cpp. With a diarizing engine, make sure **Speaker diarization** and **Include speakers** are on. Without diarization in effect, labels are stripped everywhere, including the JSON file.
-- **Speaker numbers change partway through a Gemini transcript** - a recording over 15 minutes is split into parts and Gemini renumbers speakers per part. Use **Deepgram** (sends the whole file) or split the recording for consistent speakers.
+- **Speaker numbers change partway through a Gemini transcript** - a recording longer than 15 minutes is split into parts and Gemini renumbers speakers per part. Use **Deepgram** (sends the whole file) or split the recording for consistent speakers. A recording of exactly 15 minutes is not split and shows no such warning.
 - **"Could not insert the transcript into the note"** - the note was not open in editing mode. The transcript is saved as a sidecar file as a fallback; the notice shows its path. Open the note in editing mode to insert there.
-- **A request times out** - raise **Request timeout** (up to 60 minutes) for slow connections or very large uploads, or split the file first. Local whisper.cpp has no request timeout.
+- **A request times out** - raise **Request timeout** (up to 60 minutes) for slow connections or very large uploads, or split the file first.
+- **A local whisper.cpp run is stopped before it finishes** - the process outlived **Local run timeout**. Raise it (up to 720 minutes) or point the engine at a smaller model; a large model on a slow CPU can take longer than the recording itself.
 - **A part of a long recording is missing** - that part failed; a `> [!warning]` callout names the stretch and a notice explains the cause. Re-run the failed file, or check the engine's quota and key.
 - **A large file uploaded to Whisper** - there is no "file too large" error. Whisper has a hard 25 MB limit, but files over it are resampled to 16 kHz mono and split into chunks automatically, so the run proceeds without an error. If a chunk still fails, lower **Upload chunk size**.
 - **API errors (401/403/quota)** - verify the **API key** and **base URL** for the engine, and check the account's billing or starter credit. A key is only required while the **Base URL** points at the vendor's own host, so a `401` from an endpoint you pointed elsewhere means that endpoint wants a key after all. See the per-engine use-case guides for getting and checking keys, and the [Engines reference](settings-reference.md#transcription) for when the key field may be left empty.

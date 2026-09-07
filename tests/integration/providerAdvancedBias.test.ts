@@ -261,6 +261,7 @@ describe('LocalWhisperProvider advanced bias', () => {
 			modelPath: '/models/ggml.bin',
 			extraArgs: [],
 			ffmpegPath: 'ffmpeg',
+			processTimeoutMs: 60_000,
 		});
 
 		await provider.transcribe(payload(), {
@@ -283,6 +284,7 @@ describe('LocalWhisperProvider advanced bias', () => {
 			modelPath: '/models/ggml.bin',
 			extraArgs: [],
 			ffmpegPath: 'ffmpeg',
+			processTimeoutMs: 60_000,
 		});
 
 		await provider.transcribe(payload(), {
@@ -303,6 +305,7 @@ describe('LocalWhisperProvider advanced bias', () => {
 			modelPath: '/models/ggml.bin',
 			extraArgs: ['--prompt', 'mine'],
 			ffmpegPath: 'ffmpeg',
+			processTimeoutMs: 60_000,
 		});
 
 		await provider.transcribe(payload(), {

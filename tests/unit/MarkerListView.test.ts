@@ -48,6 +48,10 @@ function makeCallbacks(): jest.Mocked<MarkerListCallbacks> {
 		onJump: jest.fn(),
 		onDelete: jest.fn(),
 		onRename: jest.fn(),
+		onEditTime: jest.fn(),
+		onUseCurrentTime: jest.fn(),
+		onEditNote: jest.fn(),
+		onSetColor: jest.fn(),
 		onAddAt: jest.fn(),
 		timeAtClientX: jest.fn((_clientX: number): number | null => 42),
 	};
@@ -171,6 +175,82 @@ describe('MarkerListView interaction', () => {
 	});
 });
 
+// Reading view is where the whole row is the jump target, and it used to be a
+// block element carrying a data attribute: tab skipped it, Enter and Space did
+// nothing, and a screen reader read it as text, so the chapters of a recording
+// could only be reached with a pointer. Making the row the button it behaves
+// like is what fixes all three, and what these tests hold it to.
+describe('MarkerListView keyboard access in reading view', () => {
+	it('builds a read-only row as a button', () => {
+		const { listContainer } = setup(false);
+
+		expect(el(listContainer, MARKER.byId('a')).tagName).toBe('BUTTON');
+	});
+
+	it('keeps an editable row a plain block, which holds controls of its own', () => {
+		const { listContainer } = setup(true);
+
+		expect(el(listContainer, MARKER.row).tagName).toBe('DIV');
+	});
+
+	it('puts a read-only row in the tab order', () => {
+		const { listContainer } = setup(false);
+
+		// A button is focusable without a tabindex, which is the point of
+		// using one: the order is the document's rather than a number here.
+		expect(el(listContainer, MARKER.byId('a')).tabIndex).toBe(0);
+	});
+
+	it('does not submit a form when a row is pressed', () => {
+		const { listContainer } = setup(false);
+
+		expect(el(listContainer, MARKER.byId('a')).getAttribute('type')).toBe(
+			'button',
+		);
+	});
+
+	// A button turns Enter and Space into a click, which the delegated handler
+	// already answers; the row is focused first because that is how a user
+	// reaches it.
+	it('jumps when a focused row is activated from the keyboard', () => {
+		const { listContainer, callbacks } = setup(false);
+		const row = el(listContainer, MARKER.byId('b'));
+
+		row.focus();
+		row.click();
+
+		expect(callbacks.onJump).toHaveBeenCalledWith(30);
+	});
+
+	// The row being a button makes its aria-label the accessible name, which
+	// replaces the text inside it rather than adding to it. A constant one
+	// therefore hides the very thing the reader is tabbing through the list to
+	// find, and every chapter of a recording announces identically.
+	it('names a read-only row by the marker it jumps to', () => {
+		const { listContainer } = setup(false);
+
+		const name = el(listContainer, MARKER.byId('a')).getAttribute(
+			'aria-label',
+		);
+
+		expect(name).toContain('Intro');
+		expect(name).toContain('0:10');
+	});
+
+	// A marker keeps its timecode as the only thing that tells it apart when
+	// it was never given a name, so the label falls back to that rather than
+	// leaving an empty gap in the sentence.
+	it('names an unlabelled read-only row by its time alone', () => {
+		const { listContainer } = setup(false, {
+			markers: [{ id: 'a', time: 10, label: '', kind: 'chapter' }],
+		});
+
+		expect(
+			el(listContainer, MARKER.byId('a')).getAttribute('aria-label'),
+		).toBe('Jump to chapter at 0:10');
+	});
+});
+
 describe('MarkerListView active highlight and tick refresh', () => {
 	it('highlights the row whose segment contains the current time', () => {
 		const { view, listContainer } = setup(false);
@@ -179,6 +259,34 @@ describe('MarkerListView active highlight and tick refresh', () => {
 		// 15s falls in the first marker's segment (10s..30s)
 		expect(at(rows, 0).classList.contains('is-active')).toBe(true);
 		expect(at(rows, 1).classList.contains('is-active')).toBe(false);
+	});
+
+	// In reading view the row is a real button, so a reader announces its name
+	// and nothing else about it. The accent edge marking the segment being
+	// played was visible and unannounced, which left a listener working
+	// through the chapters with no way to tell where the track had reached.
+	it('marks the playing row as the current one for a reader', () => {
+		const { view, listContainer } = setup(false);
+
+		view.updateActive(15);
+
+		const rows = allEls(listContainer, MARKER.row);
+		expect(at(rows, 0).getAttribute('aria-current')).toBe('true');
+		expect(at(rows, 1).hasAttribute('aria-current')).toBe(false);
+	});
+
+	// aria-current spells "not the current one" by absence, so a row the
+	// position has left has to give the attribute up rather than carry it
+	// saying false, which some readers announce anyway.
+	it('takes the mark off a row the position has moved past', () => {
+		const { view, listContainer } = setup(false);
+
+		view.updateActive(15);
+		view.updateActive(45);
+
+		const rows = allEls(listContainer, MARKER.row);
+		expect(at(rows, 0).hasAttribute('aria-current')).toBe(false);
+		expect(at(rows, 1).getAttribute('aria-current')).toBe('true');
 	});
 
 	it('refreshes ticks without rebuilding the list', () => {
@@ -305,15 +413,50 @@ describe('MarkerListView renaming while typing', () => {
 		jest.useRealTimers();
 	});
 
+	/**
+	 * Types into one of a row's fields without committing it.
+	 * @param listContainer - The rendered marker list
+	 * @param selector - The element the field is, `input` or `textarea`
+	 * @param id - Which marker's row to type in
+	 * @param value - What to type
+	 */
+	function typeInto(
+		listContainer: HTMLElement,
+		selector: string,
+		id: string,
+		value: string,
+	): void {
+		const field = el<HTMLInputElement | HTMLTextAreaElement>(
+			listContainer,
+			`${selector}[data-marker-id="${id}"]`,
+		);
+		field.value = value;
+		field.dispatchEvent(new Event('input', { bubbles: true }));
+	}
+
 	/** Types into a row's rename input without committing it. */
 	function type(listContainer: HTMLElement, id: string, value: string): void {
-		const input = el<HTMLInputElement>(
-			listContainer,
-			`input[data-marker-id="${id}"]`,
-		);
-		input.value = value;
-		input.dispatchEvent(new Event('input', { bubbles: true }));
+		typeInto(listContainer, 'input', id, value);
 	}
+
+	// The name and the note shared one timer, so a keystroke in either
+	// cancelled the other's pending write rather than merely delaying it.
+	// Clicking straight from a name into a note fires no change event on the
+	// name, so the rename was not saved late: it was lost.
+	it('keeps a pending rename when another field is typed in', () => {
+		const { listContainer, callbacks } = setup(true);
+
+		type(listContainer, 'b', 'Renamed');
+		jest.advanceTimersByTime(200);
+		typeInto(listContainer, 'textarea', 'a', 'Worth coming back to');
+		jest.advanceTimersByTime(400);
+
+		expect(callbacks.onRename).toHaveBeenCalledWith('b', 'Renamed');
+		expect(callbacks.onEditNote).toHaveBeenCalledWith(
+			'a',
+			'Worth coming back to',
+		);
+	});
 
 	it('saves a rename shortly after the typing stops', () => {
 		// Neither change nor blur fires when the player is torn down while a
@@ -472,5 +615,352 @@ describe('MarkerListView teardown', () => {
 		jest.advanceTimersByTime(400);
 
 		expect(callbacks.onRename).not.toHaveBeenCalled();
+	});
+});
+
+describe('editing a marker time from the list', () => {
+	it('reports a typed timecode as seconds', () => {
+		const { listContainer, callbacks } = setup(true);
+		const field = at(
+			allEls<HTMLInputElement>(listContainer, MARKER.timeEdit),
+			0,
+		);
+
+		field.value = '1:05';
+		field.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onEditTime).toHaveBeenCalledWith('a', 65);
+	});
+
+	it.each([
+		{ name: 'plain seconds', typed: '90', seconds: 90 },
+		{ name: 'minutes and seconds', typed: '2:30', seconds: 150 },
+		{ name: 'hours, minutes and seconds', typed: '1:00:01', seconds: 3601 },
+	])('understands $name', ({ typed, seconds }) => {
+		const { listContainer, callbacks } = setup(true);
+		const field = at(
+			allEls<HTMLInputElement>(listContainer, MARKER.timeEdit),
+			0,
+		);
+
+		field.value = typed;
+		field.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onEditTime).toHaveBeenCalledWith('a', seconds);
+	});
+
+	it('puts the rendered time back when the typed one means nothing', () => {
+		const { listContainer, callbacks } = setup(true);
+		const field = at(
+			allEls<HTMLInputElement>(listContainer, MARKER.timeEdit),
+			0,
+		);
+
+		field.value = 'half past';
+		field.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onEditTime).not.toHaveBeenCalled();
+		expect(field.value).toBe('0:10');
+	});
+
+	it('offers moving the marker to the current position', () => {
+		const { listContainer, callbacks } = setup(true);
+
+		at(allEls(listContainer, MARKER.here), 0).click();
+
+		expect(callbacks.onUseCurrentTime).toHaveBeenCalledWith('a');
+	});
+});
+
+describe('a marker note and colour in the list', () => {
+	it('reports a committed note', () => {
+		const { listContainer, callbacks } = setup(true);
+		const field = at(
+			allEls<HTMLTextAreaElement>(listContainer, MARKER.note),
+			0,
+		);
+
+		field.value = 'the bit about pricing';
+		field.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onEditNote).toHaveBeenCalledWith(
+			'a',
+			'the bit about pricing',
+		);
+	});
+
+	it('shows the note a marker already carries', () => {
+		const { listContainer } = setup(true, {
+			markers: [
+				{
+					id: 'a',
+					time: 10,
+					label: 'Intro',
+					kind: 'chapter',
+					note: 'why',
+				},
+			],
+		});
+
+		expect(
+			at(allEls<HTMLTextAreaElement>(listContainer, MARKER.note), 0)
+				.value,
+		).toBe('why');
+	});
+
+	it('reports a chosen colour', () => {
+		const { listContainer, callbacks } = setup(true);
+		const picker = at(
+			allEls<HTMLSelectElement>(listContainer, MARKER.color),
+			0,
+		);
+
+		picker.value = 'blue';
+		picker.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onSetColor).toHaveBeenCalledWith('a', 'blue');
+	});
+
+	it('reports the empty choice as no colour at all', () => {
+		const { listContainer, callbacks } = setup(true, {
+			markers: [
+				{
+					id: 'a',
+					time: 10,
+					label: 'Intro',
+					kind: 'chapter',
+					color: 'red',
+				},
+			],
+		});
+		const picker = at(
+			allEls<HTMLSelectElement>(listContainer, MARKER.color),
+			0,
+		);
+
+		picker.value = '';
+		picker.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onSetColor).toHaveBeenCalledWith('a', null);
+	});
+
+	// A list of six colour names tells the user nothing about what the theme's
+	// red actually looks like on the seek bar.
+	it('draws every colour of the palette in the menu that offers it', () => {
+		const { listContainer } = setup(true);
+		const picker = at(
+			allEls<HTMLSelectElement>(listContainer, MARKER.color),
+			0,
+		);
+
+		const offered = Array.from(picker.options).filter(
+			(option) => option.value !== '',
+		);
+		expect(offered).toHaveLength(6);
+		for (const option of offered) {
+			expect(option.className).toBe(
+				MARKER.colorSwatch(option.value).slice(1),
+			);
+			// The circle is a character because an option takes no markup
+			expect(option.textContent?.startsWith('\u25cf ')).toBe(true);
+		}
+	});
+
+	it('shows the chosen colour on the closed control as well', () => {
+		const { listContainer } = setup(true, {
+			markers: [
+				{
+					id: 'a',
+					time: 10,
+					label: 'Intro',
+					kind: 'chapter',
+					color: 'purple',
+				},
+			],
+		});
+
+		expect(
+			allEls(listContainer, MARKER.colorSwatch('purple')),
+			// The control itself, plus the one option that names the colour
+		).toHaveLength(2);
+	});
+
+	it('marks a coloured row so the stylesheet can draw its edge', () => {
+		const { listContainer } = setup(true, {
+			markers: [
+				{
+					id: 'a',
+					time: 10,
+					label: 'Intro',
+					kind: 'chapter',
+					color: 'green',
+				},
+			],
+		});
+
+		expect(allEls(listContainer, MARKER.coloredRow)).toHaveLength(1);
+	});
+
+	it('leaves an uncoloured row unmarked, so it looks as it always did', () => {
+		const { listContainer } = setup(true);
+
+		expect(allEls(listContainer, MARKER.coloredRow)).toHaveLength(0);
+	});
+
+	it('shows the note as text in reading view, where it cannot be edited', () => {
+		const { listContainer } = setup(false, {
+			markers: [
+				{
+					id: 'a',
+					time: 10,
+					label: 'Intro',
+					kind: 'chapter',
+					note: 'why',
+				},
+			],
+		});
+
+		expect(allEls(listContainer, MARKER.note)).toHaveLength(0);
+		expect(el(listContainer, MARKER.staticNote).textContent).toBe('why');
+	});
+
+	// Under the timecode the note read as a caption on the time rather than on
+	// the marker. It starts at the icon instead, held there by a hidden copy of
+	// the timecode so the column is exactly as wide as the one above it.
+	it('aligns the reading-view note with the marker icon above it', () => {
+		const { listContainer } = setup(false, {
+			markers: [
+				{
+					id: 'a',
+					time: 3725,
+					label: 'Intro',
+					kind: 'chapter',
+					note: 'why',
+				},
+			],
+		});
+
+		const indent = el(listContainer, MARKER.noteIndent);
+		expect(indent.textContent).toBe(
+			el(listContainer, MARKER.time).textContent,
+		);
+		expect(indent.getAttribute('aria-hidden')).toBe('true');
+		expect(el(listContainer, MARKER.noteLine).contains(indent)).toBe(true);
+	});
+
+	it('says the note in the row name, which is the whole button', () => {
+		const { listContainer } = setup(false, {
+			markers: [
+				{
+					id: 'a',
+					time: 10,
+					label: 'Intro',
+					kind: 'chapter',
+					note: 'why',
+				},
+			],
+		});
+
+		expect(el(listContainer, MARKER.row).getAttribute('aria-label')).toBe(
+			'Jump to chapter: Intro at 0:10. why',
+		);
+	});
+});
+
+describe('a note typed into the list', () => {
+	beforeEach(() => {
+		jest.useFakeTimers();
+	});
+
+	afterEach(() => {
+		jest.useRealTimers();
+	});
+
+	it('saves the note shortly after typing stops, as a rename does', () => {
+		const { listContainer, callbacks } = setup(true);
+		const note = at(
+			allEls<HTMLTextAreaElement>(listContainer, MARKER.note),
+			0,
+		);
+
+		note.value = 'why this matters';
+		note.dispatchEvent(new Event('input', { bubbles: true }));
+		jest.advanceTimersByTime(400);
+
+		expect(callbacks.onEditNote).toHaveBeenCalledWith(
+			'a',
+			'why this matters',
+		);
+	});
+
+	it('saves nothing while the user is still typing it', () => {
+		const { listContainer, callbacks } = setup(true);
+		const note = at(
+			allEls<HTMLTextAreaElement>(listContainer, MARKER.note),
+			0,
+		);
+
+		note.value = 'why';
+		note.dispatchEvent(new Event('input', { bubbles: true }));
+		jest.advanceTimersByTime(200);
+
+		expect(callbacks.onEditNote).not.toHaveBeenCalled();
+	});
+});
+
+describe('an event from something the list does not own', () => {
+	it.each([
+		{ name: 'a typed value', type: 'input' },
+		{ name: 'a committed value', type: 'change' },
+	])('ignores $name with no marker behind it', ({ type }) => {
+		const { listContainer, callbacks } = setup(true);
+		const stray = el(listContainer, MARKER.list).createEl('input');
+
+		stray.value = 'nobody';
+		stray.dispatchEvent(new Event(type, { bubbles: true }));
+
+		expect(callbacks.onRename).not.toHaveBeenCalled();
+		expect(callbacks.onEditNote).not.toHaveBeenCalled();
+		expect(callbacks.onEditTime).not.toHaveBeenCalled();
+		expect(callbacks.onSetColor).not.toHaveBeenCalled();
+	});
+
+	it('ignores a committed value whose action it does not answer', () => {
+		const { listContainer, callbacks } = setup(true);
+		const stray = el(listContainer, MARKER.list).createEl('input');
+		stray.dataset['markerId'] = 'a';
+		stray.dataset['action'] = 'jump';
+
+		stray.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onRename).not.toHaveBeenCalled();
+		expect(callbacks.onEditTime).not.toHaveBeenCalled();
+	});
+
+	it('keeps what a time field showed when it was rendered without one', () => {
+		const { listContainer, callbacks } = setup(true);
+		// A field with no rendered timecode to fall back on keeps whatever the
+		// user left in it, rather than being blanked by the refusal.
+		const stray = el(listContainer, MARKER.list).createEl('input');
+		stray.dataset['markerId'] = 'a';
+		stray.dataset['action'] = 'edit-time';
+		stray.value = 'half past';
+
+		stray.dispatchEvent(new Event('change', { bubbles: true }));
+
+		expect(callbacks.onEditTime).not.toHaveBeenCalled();
+		expect(stray.value).toBe('half past');
+	});
+
+	it('ignores a typed value whose action it does not answer', () => {
+		const { listContainer, callbacks } = setup(true);
+		const stray = el(listContainer, MARKER.list).createEl('input');
+		stray.dataset['markerId'] = 'a';
+		stray.dataset['action'] = 'jump';
+
+		stray.dispatchEvent(new Event('input', { bubbles: true }));
+
+		expect(callbacks.onRename).not.toHaveBeenCalled();
+		expect(callbacks.onEditNote).not.toHaveBeenCalled();
 	});
 });

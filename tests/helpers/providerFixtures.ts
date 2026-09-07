@@ -30,7 +30,9 @@ export const UNLIMITED_CAPABILITIES: ProviderCapabilities = {
 	acceptsOriginalContainer: true,
 	supportsDiarization: true,
 	supportsDictionary: true,
+	wordTimestamps: 'requested',
 	biasChannel: 'prompt',
+	supportsSpeechTranslation: false,
 };
 
 /** What a suite varies about the provider it transcribes through. */
@@ -91,4 +93,5 @@ export function fakeProvider(options: FakeProviderOptions = {}): FakeProvider {
 export const NO_DIARIZATION: Partial<ProviderCapabilities> = {
 	supportsDiarization: false,
 	supportsDictionary: false,
+	wordTimestamps: 'none',
 };

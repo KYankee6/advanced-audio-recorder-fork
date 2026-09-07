@@ -7,6 +7,7 @@ Splitting breaks one long recording into several shorter part files. **Advanced 
 - [Manual splitting (existing file)](#manual-splitting-existing-file)
     - [The split dialog](#the-split-dialog)
     - [Part naming](#part-naming)
+- [Cutting at chapters](#cutting-at-chapters)
 - [How link updating works](#how-link-updating-works)
 - [Lossless vs lossy splitting](#lossless-vs-lossy-splitting)
 - [Failure handling](#failure-handling)
@@ -20,7 +21,8 @@ A two-hour lecture or an all-day meeting recorded as one file is awkward to work
 - **Stay under upload limits.** Most cloud transcription engines cap the size of a single request. The Whisper API in particular refuses anything over 25 MB per request, so a long recording must be broken up before it can be sent. See [Transcription](transcription.md) for the per-engine limits.
 - **Navigate long material.** Shorter parts are quicker to open, scrub, and share. You can link to the exact part of a meeting that matters instead of one giant file.
 - **Process big files in pieces.** Some actions (for example [Audio cleanup](audio-cleanup.md)) work better on shorter inputs. Split first, then clean or convert each part.
-- **Keep recording reliably.** With automatic splitting on, each finished part is flushed to disk while recording continues, so a crash costs you at most the unfinished last part rather than the whole session. See [Crash recovery](recording.md#crash-recovery).
+- **Keep recording reliably.** With automatic splitting on, each finished part is flushed to disk while recording continues, so a crash costs you at most the unfinished last part rather than the whole session. This matters most on a phone, where the operating system can close a backgrounded app without warning. See [Crash recovery](recording.md#crash-recovery).
+- **Record WAV past the format's own ceiling.** A WAV file cannot describe more than 4 GB, which at 48 kHz stereo 16-bit is roughly six hours, and a session that reaches it is refused at the moment you stop. Automatic splitting keeps every part well inside the limit, so it is what makes a WAV session of that length possible at all. See [Audio formats](formats.md#choosing-a-format).
 
 ---
 
@@ -52,7 +54,8 @@ How exactly a part lands on the configured boundary depends on the recording for
 
 ### Constraints
 
-- **Desktop only.** Automatic splitting is not available in the mobile app. If a mobile recording starts with the option on, the plugin shows a notice and saves one file.
+- **Worth turning on for mobile.** Automatic splitting works on a phone or tablet as well, and it is the setting that decides how much an interrupted recording can cost you there: a mobile session already rotates a part when its memory buffer fills (about 50 MB, roughly fifty minutes of audio), and the part duration moves that boundary in. See [Crash recovery](recording.md#crash-recovery).
+- **Discarding an interrupted mobile session deletes its parts.** On a phone the parts of a session that never stopped are the recording itself, so the recovery dialog offers them as one set and **Discard** removes them. Choose **Recover audio** to keep them. The parts of a desktop session are never deleted this way. See [Crash recovery on mobile](mobile-support.md#crash-recovery-on-mobile).
 - **Not for merged multi-track.** A multi-track recording with **Output mode** set to `Single file` is mixed into one file and cannot be auto-split; the plugin shows a notice and saves the single merged file. To auto-split a multi-track session, use **Multiple files** output mode, where each track is recorded independently. See [Multi-track recording](multi-track-recording.md).
 - **Changes apply next session.** Split settings changed during an active recording take effect on the **next** recording, not the one in progress.
 
@@ -110,6 +113,16 @@ For a source `meeting.wav` split with the default suffix, you get `meeting-part1
 - The **extension** of the parts depends on the source format - see [Lossless vs lossy splitting](#lossless-vs-lossy-splitting). WAV sources stay `.wav`; a compressed source keeps its own extension when an offline encoder is available for it, and otherwise the parts are written as WAV (with a notice explaining the fallback).
 
 ---
+
+## Cutting at chapters
+
+A recording that carries chapters can be cut **at them** instead of every N minutes. The **Cut at chapters** switch appears in the split dialog once the recording is known to have chapters, and turning it on hides the part duration and the name suffix: neither applies, because the parts are as long as the chapters make them and each is named after the chapter it holds.
+
+The names come from the chapter titles, with the characters a file name cannot carry replaced and a number appended when two chapters share a title. The audio before the first chapter, when a recording has any, is a part of its own named after the recording rather than after a chapter that starts later.
+
+Everything else is unchanged. An uncompressed WAV is still cut **without decoding**, so a recording too large to hold in memory can still be split; every other format still goes through the decode path; and links to the original are rewritten by the same rules an even split follows.
+
+Bookmarks are left out. A cut divides the recording into parts, and a bookmark marks a point rather than a division.
 
 ## How link updating works
 
@@ -185,7 +198,7 @@ These live under **Settings > Advanced Audio Recorder > Audio splitting** and se
 
 | Setting                            | Used by                        | Default | Notes                                                                  |
 | ---------------------------------- | ------------------------------ | ------- | ---------------------------------------------------------------------- |
-| **Split recordings automatically** | Automatic splitting only       | `Off`   | Desktop only; not applied to merged multi-track recordings.            |
+| **Split recordings automatically** | Automatic splitting only       | `Off`   | Not applied to merged multi-track recordings.                          |
 | **Part duration**                  | Automatic and manual splitting | `15`    | `1`-`180` minutes. Also the starting value in the manual split dialog. |
 | **Part name suffix**               | Automatic and manual splitting | `part`  | Letters, digits, hyphens, and underscores only.                        |
 | **Delete source after split**      | Manual split dialog default    | `Off`   | Seeds the **Delete source file** toggle in the split dialog.           |
@@ -210,4 +223,4 @@ The split dialog also reuses two settings from elsewhere:
 - **"… frontmatter link(s) still point to the source file."** - Some links live in a note's YAML frontmatter, which cannot be rewritten. Update those property links by hand.
 - **"Source file kept: … link(s) could not be updated."** - You asked to delete the source, but some links could not be rewritten, so the source was kept to avoid breaking them.
 - **A compressed split runs out of memory** - Re-encoding decodes the whole file into memory. Split it in WAV instead (record in WAV, or convert to WAV first with **Convert audio format**), which splits losslessly one part at a time.
-- **Automatic split did not happen** - Auto-split is **desktop only** and does not apply to merged (`Single file`) multi-track recordings. Confirm **Split recordings automatically** is on, that you are on desktop, and that the recording is not a merged multi-track session.
+- **Automatic split did not happen** - Auto-split does not apply to merged (`Single file`) multi-track recordings. Confirm **Split recordings automatically** is on and that the recording is not a merged multi-track session.

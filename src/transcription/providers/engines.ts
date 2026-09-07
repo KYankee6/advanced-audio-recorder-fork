@@ -18,7 +18,10 @@
  */
 
 import {
+	DEFAULT_LOCAL_WHISPER_TIMEOUT_MINUTES,
 	LOCAL_WHISPER_SETUP_MESSAGE,
+	MAX_LOCAL_WHISPER_TIMEOUT_MINUTES,
+	MIN_LOCAL_WHISPER_TIMEOUT_MINUTES,
 	MS_PER_MINUTE,
 	TRANSCRIPTION_PROVIDER_IDS,
 } from '../../constants';
@@ -46,6 +49,7 @@ import { DeepgramProvider } from './DeepgramProvider';
 import { GeminiProvider } from './GeminiProvider';
 import { LocalWhisperProvider } from './LocalWhisperProvider';
 import { WhisperApiProvider } from './WhisperApiProvider';
+import { GEMINI_TOKEN_RATES, type TokenRate } from './geminiRates';
 import type { TranscriptionProvider } from './TranscriptionProvider';
 import {
 	effectiveDictionary,
@@ -66,13 +70,6 @@ export type EnginePricing =
 			usdPerMillionTextInput: number;
 			usdPerMillionOutput: number;
 	  };
-
-/** A token-billed rate: USD per million audio-input, text-input, and output tokens. */
-interface TokenRate {
-	audioInput: number;
-	textInput: number;
-	output: number;
-}
 
 /** What a cloud engine's client is built from, once its settings check out. */
 interface CloudEngineConfig {
@@ -179,21 +176,6 @@ const DEEPGRAM_RATES: readonly [string, number][] = [
 	['nova-2', 0.0043],
 	['nova', 0.0043],
 	['base', 0.0125],
-];
-
-/**
- * Approximate Gemini transcription rates. On the 2.5 Flash tier audio input is
- * billed higher than text input, so the two are kept apart; the 2.5 Pro tier
- * and the whole 3.x generation bill every input modality at one rate.
- */
-const GEMINI_RATES: readonly [string, TokenRate][] = [
-	['gemini-3.6-flash', { audioInput: 1.5, textInput: 1.5, output: 7.5 }],
-	['gemini-3.5-flash', { audioInput: 1.5, textInput: 1.5, output: 9 }],
-	['gemini-3.5-flash-lite', { audioInput: 0.3, textInput: 0.3, output: 2.5 }],
-	['gemini-2.5-flash-lite', { audioInput: 0.3, textInput: 0.1, output: 0.4 }],
-	['gemini-2.5-flash', { audioInput: 1.0, textInput: 0.3, output: 2.5 }],
-	['gemini-2.5-pro', { audioInput: 1.25, textInput: 1.25, output: 10 }],
-	['gemini-2.0-flash', { audioInput: 0.7, textInput: 0.1, output: 0.4 }],
 ];
 
 /**
@@ -340,7 +322,8 @@ export const TRANSCRIPTION_ENGINES: Record<
 		label: 'Google Gemini',
 		pricingUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
 		model: (s) => s.geminiModel,
-		pricing: (model) => perTokenPricing(matchRate(GEMINI_RATES, model)),
+		pricing: (model) =>
+			perTokenPricing(matchRate(GEMINI_TOKEN_RATES, model)),
 		// Gemini folds terms into a large instruction context with no hard cap.
 		planDictionary: (_model, terms) => ({ applied: terms, omitted: [] }),
 		biasUnsupportedReason: () => null,
@@ -378,6 +361,12 @@ export const TRANSCRIPTION_ENGINES: Record<
 								maxSpeakers: settings.localDiarizerMaxSpeakers,
 							}
 						: undefined,
+				// Its own limit rather than the shared per-request one: the
+				// work here is a process on this machine, and the CPU takes an
+				// order of time an accelerator behind an API does not.
+				processTimeoutMs: localWhisperTimeoutMs(
+					settings.localWhisperTimeoutMinutes,
+				),
 			});
 			if (!provider.isAvailable()) {
 				throw new ProviderConfigError(
@@ -430,7 +419,7 @@ export function createTranscriptionProvider(
 	}
 	// Per-request timeout cap shared by every network provider, from the
 	// user-configured limit (minutes). Local whisper.cpp makes no HTTP request,
-	// so its descriptor ignores this.
+	// so its descriptor ignores this and reads its own run limit instead.
 	return engine.create(
 		settings,
 		settings.transcriptionTimeoutMinutes * MS_PER_MINUTE,
@@ -474,4 +463,34 @@ export function parseArgs(raw: string): string[] {
 		.split(/\s+/)
 		.map((part) => part.trim())
 		.filter((part) => part.length > 0);
+}
+
+/**
+ * The time limit for one local whisper.cpp run, in milliseconds.
+ *
+ * Clamped rather than read straight through, for the reason the auto-split
+ * part length is: the row declaring the range is not the only way a value
+ * reaches the field. A data.json edited by hand or synced from another install
+ * never passes that row, and the load path fills a missing field from the
+ * defaults without normalising any number it does find.
+ *
+ * What makes an out-of-range value worth guarding here rather than leaving to
+ * the process is where it lands. Node arms no kill timer at all for a limit at
+ * or below zero, so a stored 0 would restore the unbounded run this setting
+ * exists to end, and restore it silently: a process nobody ever kills reports
+ * nothing at all.
+ * @param minutes - The configured limit in minutes
+ * @returns Whole minutes within the supported range, as milliseconds, or the
+ *   default for a value that is not a number
+ */
+export function localWhisperTimeoutMs(minutes: number): number {
+	if (!Number.isFinite(minutes)) {
+		return DEFAULT_LOCAL_WHISPER_TIMEOUT_MINUTES * MS_PER_MINUTE;
+	}
+	return (
+		Math.min(
+			MAX_LOCAL_WHISPER_TIMEOUT_MINUTES,
+			Math.max(MIN_LOCAL_WHISPER_TIMEOUT_MINUTES, Math.floor(minutes)),
+		) * MS_PER_MINUTE
+	);
 }

@@ -34,6 +34,8 @@ export function createTarget(
 		partIndex: 0,
 		partPaths: [],
 		partPcmBytes: 0,
+		filePcmBytes: 0,
+		wavCeilingWarned: false,
 		...overrides,
 	};
 }
@@ -60,6 +62,8 @@ export function createSession(
 		splitEnabled: false,
 		partMinutes: 15,
 		partSuffix: 'part',
+		trackMix: [],
+		alignTrackLevels: false,
 		...overrides,
 	};
 }

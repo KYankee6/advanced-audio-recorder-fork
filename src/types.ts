@@ -106,6 +106,19 @@ export interface TrackFileGroup {
 }
 
 /**
+ * Where one track is placed when a session's tracks are combined into one
+ * file. Fixed at the session's start, alongside the devices and the channel
+ * modes: a settings edit half way through a two-hour recording must not
+ * split the session's own mix between two answers.
+ */
+export interface TrackMix {
+	/** Level applied to the track at the mix, in decibels. */
+	gainDb: number;
+	/** Where the track sits, from -1 (left) to 1 (right). */
+	pan: number;
+}
+
+/**
  * Immutable snapshot of the session-scoped recording configuration,
  * taken at recording start. The per-track part and finalization paths
  * read these values repeatedly during the session; without the
@@ -118,11 +131,13 @@ export interface RecordingSessionConfig {
 	/**
 	 * Chunk-buffer size that forces a part rotation, or null where a
 	 * plain buffer flush may write raw mid-stream segments instead.
-	 * Mid-stream segments are only usable where a guaranteed
-	 * concatenate-and-finalize step follows (the journaled desktop
-	 * pipeline); platforms without the recovery journal (mobile) must
-	 * produce a self-contained container per flush, which requires
-	 * stopping and restarting the recorders - a rotation.
+	 * A mid-stream segment carries no container header, so it only means
+	 * anything together with its siblings and the journal that lists
+	 * them. Where the operating system may kill the app without warning
+	 * (mobile), each flush has to leave a file that plays on its own,
+	 * which requires stopping and restarting the recorders: a rotation.
+	 * The platform capability midStreamSegmentFlush decides which of the
+	 * two a session gets.
 	 */
 	chunkRotationBytes: number | null;
 	/** Whether the session captures raw PCM for WAV output (desktop). */
@@ -141,6 +156,14 @@ export interface RecordingSessionConfig {
 	partMinutes: number;
 	/** Auto-split part name suffix. */
 	partSuffix: string;
+	/**
+	 * Where each track sits in a merged file, aligned with the acquired
+	 * streams. Empty on a session that writes one file per track, which
+	 * keeps every track exactly as it was captured.
+	 */
+	trackMix: readonly TrackMix[];
+	/** Whether the merge brings the tracks to a common level first. */
+	alignTrackLevels: boolean;
 }
 
 /**
@@ -164,6 +187,21 @@ export type RecordingTarget = {
 	partPaths: string[];
 	/** Bytes of PCM data accumulated toward the current auto-split part. */
 	partPcmBytes: number;
+	/**
+	 * Bytes of PCM data destined for the WAV file being written now.
+	 *
+	 * Separate from {@link partPcmBytes}, which only exists while auto-split
+	 * runs: this counter is what the container ceiling applies to, and the
+	 * ceiling applies to every WAV whether or not the session splits. With
+	 * auto-split on it tracks the current part, with it off the whole session.
+	 */
+	filePcmBytes: number;
+	/**
+	 * Whether the user has already been warned that this file is approaching
+	 * the WAV size ceiling. Held per target so the warning is shown once per
+	 * file rather than once per chunk over the threshold.
+	 */
+	wavCeilingWarned: boolean;
 };
 
 /**
