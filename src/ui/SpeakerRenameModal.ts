@@ -96,6 +96,13 @@ export interface SpeakerRenameModalOptions {
 	saveSettings: () => Promise<void>;
 	/** Recording sidecar access: the roster and outputs to rename. */
 	sidecar: SpeakerRenameSidecarAccess;
+	/**
+	 * Speaker to scroll to and focus once the rows render: the label the user
+	 * clicked in a transcript (an engine label, `-`, or an assigned name).
+	 * A label that matches no roster entry is ignored - the dialog opens
+	 * normally.
+	 */
+	focusSpeaker?: string;
 }
 
 /**
@@ -190,6 +197,7 @@ export class SpeakerRenameModal extends PluginModal {
 		for (const entry of section.speakers) {
 			this.renderSpeakerRow(entry);
 		}
+		this.focusRequestedSpeaker(section);
 
 		if (hasUnscopableRecordedNote(this.app, this.file, section)) {
 			new Setting(contentEl)
@@ -218,6 +226,33 @@ export class SpeakerRenameModal extends PluginModal {
 				},
 			},
 		);
+	}
+
+	/**
+	 * Scrolls to and focuses the row of the speaker the user clicked in a
+	 * transcript, when the option names one. The click carries either the
+	 * engine label or the assigned name currently shown in the note, so both
+	 * are matched; an unmatched label (a transcript the roster no longer
+	 * lists, the `-` segments) opens the dialog without a focused row.
+	 * @param section - The recording's loaded transcript sidecar section
+	 */
+	private focusRequestedSpeaker(section: TranscriptSection): void {
+		const wanted = this.options.focusSpeaker?.trim();
+		if (!wanted) {
+			return;
+		}
+		const entry = section.speakers.find(
+			(candidate) =>
+				candidate.label === wanted ||
+				(candidate.name ?? '').trim() === wanted,
+		);
+		const input = entry ? this.inputs.get(entry.label) : undefined;
+		if (!input) {
+			return;
+		}
+		input.scrollIntoView({ block: 'center' });
+		input.focus();
+		input.select();
 	}
 
 	/**

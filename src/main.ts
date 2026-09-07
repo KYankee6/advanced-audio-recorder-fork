@@ -267,6 +267,7 @@ export default class AudioRecorderPlugin extends Plugin {
 			this,
 			this.app,
 			() => this.settings,
+			() => this.saveSettings(),
 			this.sidecarStore,
 			mediaKindStore,
 		);

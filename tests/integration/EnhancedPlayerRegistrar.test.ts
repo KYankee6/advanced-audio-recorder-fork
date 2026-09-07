@@ -255,6 +255,7 @@ function setup(
 		plugin,
 		app,
 		() => settings,
+		async () => {},
 		partial<RecordingSidecarStore>(markerStore),
 		kindStore === null ? null : partial<MediaKindStore>(kindStore),
 	);
@@ -726,6 +727,7 @@ describe('EnhancedPlayerRegistrar vault rename/delete wiring', () => {
 			}),
 			app,
 			() => ({ ...DEFAULT_SETTINGS, enhancedPlayerEnabled: true }),
+			async () => {},
 			partial<RecordingSidecarStore>(markerStore),
 			partial<MediaKindStore>(kindStore),
 		).register();

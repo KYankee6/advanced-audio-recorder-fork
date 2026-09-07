@@ -60,6 +60,7 @@ describe('timecode clicks work inside a pop-out window', () => {
 				partialPlugin(plugin),
 				plugin.app,
 				() => settings,
+				async () => {},
 				makeMarkerStore(),
 				null,
 			);
@@ -143,6 +144,7 @@ describe('timecode clicks work inside a pop-out window', () => {
 				partialPlugin(plugin),
 				plugin.app,
 				() => settings,
+				async () => {},
 				makeMarkerStore(),
 				null,
 			);

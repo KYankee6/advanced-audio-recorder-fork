@@ -56,8 +56,10 @@ import {
 	parseAudioLinkTarget,
 	isAudioFile,
 	parseTimecodeSubpath,
-	wikiLinkTargetAtCursor,
+	isSpeakerAlias,
+	wikiLinkWithAliasAtCursor,
 } from './timecodeLinks';
+import { SpeakerRenameModal } from '../ui/SpeakerRenameModal';
 import { probeMediaKind, MEDIA_KIND, type MediaKind } from './mediaProbe';
 import { registerDomEventOnAllWindows } from '../utils/multiWindowDomEvents';
 import { markdownViewContaining } from '../utils/windowScopedViews';
@@ -119,6 +121,8 @@ export class EnhancedPlayerRegistrar {
 	 * @param plugin - Owning plugin (for registration lifecycle)
 	 * @param app - Obsidian App instance
 	 * @param getSettings - Returns the current plugin settings
+	 * @param saveSettings - Persists settings (the speaker-rename dialog
+	 *   writes profile choices through it)
 	 * @param markerStore - Persistence for markers and chapters
 	 * @param mediaKindStore - Cross-session media-kind cache, if any
 	 */
@@ -126,6 +130,7 @@ export class EnhancedPlayerRegistrar {
 		private readonly plugin: Plugin,
 		private readonly app: App,
 		private readonly getSettings: () => AudioRecorderSettings,
+		private readonly saveSettings: () => Promise<void>,
 		private readonly markerStore: RecordingSidecarStore,
 		private readonly mediaKindStore: MediaKindStore | null = null,
 	) {}
@@ -627,10 +632,10 @@ export class EnhancedPlayerRegistrar {
 			return;
 		}
 		const href = this.resolveTimecodeHref(event);
-		if (!href || !href.includes('#t=')) {
+		if (!href || !href.href.includes('#t=')) {
 			return;
 		}
-		const { linkPath, startSeconds } = parseAudioLinkTarget(href);
+		const { linkPath, startSeconds } = parseAudioLinkTarget(href.href);
 		if (startSeconds === null) {
 			return;
 		}
@@ -659,6 +664,25 @@ export class EnhancedPlayerRegistrar {
 		// video it keeps Obsidian's own player, so never consume the click into
 		// audio-only detached playback; let Obsidian open it with its video UI.
 		if (this.knownKind(file) === MEDIA_KIND.video) {
+			return;
+		}
+		// A speaker link (its alias names a speaker rather than a timecode)
+		// opens the rename dialog for this recording instead of seeking: the
+		// timestamp beside it already jumps, so the label is the affordance
+		// for naming. With renaming disabled the click keeps seeking.
+		if (
+			href.alias !== null &&
+			isSpeakerAlias(href.alias) &&
+			this.getSettings().transcriptionSpeakerRenameEnabled
+		) {
+			new SpeakerRenameModal(this.app, file, {
+				getSettings: this.getSettings,
+				saveSettings: this.saveSettings,
+				sidecar: this.markerStore,
+				focusSpeaker: href.alias.trim(),
+			}).open();
+			event.preventDefault();
+			event.stopPropagation();
 			return;
 		}
 		// An on-screen embed for the file seeks in place; otherwise start a
@@ -716,22 +740,39 @@ export class EnhancedPlayerRegistrar {
 	/**
 	 * Resolves the link target under a click, in either view mode. Reading view
 	 * (and the post-processor fallback) exposes a rendered `a.internal-link`
-	 * with the target in an attribute; Live Preview renders the link through
-	 * CodeMirror with no attribute, so its target is read from the editor
-	 * source at the clicked position.
+	 * with the target in an attribute; Live Preview renders the link
+	 * through CodeMirror with no attribute, so its target is read from the
+	 * editor source at the clicked position. Both modes also return the link's
+	 * alias, which tells a timestamp link from a speaker link: a rendered
+	 * anchor's text is the alias, and an editor link carries it after `|`.
 	 * @param event - The captured click event
-	 * @returns The link target (with any `#t=` subpath), or null when none
+	 * @returns The link target (with any `#t=` subpath) plus its alias, or
+	 *   null when none is under the click
 	 */
-	private resolveTimecodeHref(event: MouseEvent): string | null {
+	private resolveTimecodeHref(
+		event: MouseEvent,
+	): { href: string; alias: string | null } | null {
 		const target = event.target as HTMLElement | null;
 		if (!target) {
 			return null;
 		}
 		const anchor = target.closest<HTMLElement>('a.internal-link');
 		if (anchor) {
-			return (
-				anchor.getAttribute('data-href') ?? anchor.getAttribute('href')
-			);
+			const href =
+				anchor.getAttribute('data-href') ?? anchor.getAttribute('href');
+			if (!href) {
+				return null;
+			}
+			// The anchor renders the alias as its text; a link with no alias
+			// renders its own target, which must not read as a speaker name.
+			const text = (anchor.textContent ?? '').trim();
+			const alias =
+				text &&
+				text !== href &&
+				text !== parseAudioLinkTarget(href).linkPath
+					? text
+					: null;
+			return { href, alias };
 		}
 		// Live Preview renders a wikilink as a .cm-hmd-internal-link token that
 		// carries no data-href. Resolve from source ONLY when the click is on
@@ -743,7 +784,10 @@ export class EnhancedPlayerRegistrar {
 		if (!linkToken) {
 			return null;
 		}
-		return this.resolveEditorLinkTarget(linkToken);
+		const resolved = this.resolveEditorLinkWithAlias(linkToken);
+		return resolved
+			? { href: resolved.target, alias: resolved.alias }
+			: null;
 	}
 
 	/**
@@ -759,7 +803,17 @@ export class EnhancedPlayerRegistrar {
 	 * @param node - The clicked DOM node inside the editor
 	 * @returns The wikilink target, or null when none is under the click
 	 */
-	private resolveEditorLinkTarget(node: Node): string | null {
+	/**
+	 * Alias-carrying variant of {@link resolveEditorLinkTarget}: reads the
+	 * wikilink source under the clicked node and returns its target and
+	 * `|` alias, so a speaker link is told apart from a timestamp link.
+	 * @param node - The clicked DOM node inside the editor
+	 * @returns Target and alias (null when the link has none), or null when
+	 *   the click is not on a wikilink or the editor internals are unavailable
+	 */
+	private resolveEditorLinkWithAlias(
+		node: Node,
+	): { target: string; alias: string | null } | null {
 		const view =
 			markdownViewContaining(this.app, node) ??
 			this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -772,7 +826,7 @@ export class EnhancedPlayerRegistrar {
 		}
 		try {
 			const cursor = view.editor.offsetToPos(cm.posAtDOM(node));
-			return wikiLinkTargetAtCursor(
+			return wikiLinkWithAliasAtCursor(
 				view.editor.getLine(cursor.line),
 				cursor.ch,
 			);

@@ -3,8 +3,10 @@
  * the timecode links were generated against - not whatever pane happens to be
  * active when an async run finishes - so the view lookup is what keeps a long
  * transcription from dumping its output into an unrelated file the user
- * switched to mid-run. A refused insert must report false rather than throw, so
- * the caller can still write the sidecar fallback.
+ * switched to mid-run. When the note exists but no editable view holds it
+ * (closed tab, reading mode), the block is appended to the file instead: a
+ * run that finished while the user was elsewhere must still land. False is
+ * reserved for a note that does not exist at all.
  * @module tests/unit/transcriptInsertion.test
  */
 
@@ -94,18 +96,44 @@ describe('insertTranscriptIntoNote', () => {
 		expect(at(at(target.writes, 0), 0)).toBe('\n\n## Transcript\n\nbody\n');
 	});
 
-	it('reports not-inserted when the target note is not open', () => {
+	it('appends to the note file when the target note is not open', () => {
 		const other = makeLeaf('Notes/unrelated.md');
+		const process = jest.fn(
+			(_file: TFile, fn: (data: string) => string) => {
+				expect(fn('existing')).toBe('existing\n\nbody\n');
+				return Promise.resolve('existing\n\nbody\n');
+			},
+		);
+		const app = createMockApp({
+			workspace: {
+				getLeavesOfType: jest.fn((type: string) =>
+					type === 'markdown' ? [other.leaf] : [],
+				),
+			},
+			vault: {
+				getFileByPath: jest.fn((path: string) =>
+					path === 'Notes/meeting.md' ? { path } : null,
+				),
+				process,
+			},
+		}).app;
+
+		// A run that finished while the user was elsewhere still lands: the
+		// block goes to the end of the note file instead of being dropped.
+		expect(
+			insertTranscriptIntoNote(app, 'Notes/meeting.md', 'body', ''),
+		).toBe(true);
+		expect(process).toHaveBeenCalled();
+		// The pane the user switched to must be left alone.
+		expect(other.writes).toEqual([]);
+	});
+
+	it('reports not-inserted when the note is neither open nor on disk', () => {
+		const app = makeApp([]);
 
 		expect(
-			insertTranscriptIntoNote(
-				makeApp([other.leaf]),
-				'Notes/meeting.md',
-				'body',
-				'',
-			),
+			insertTranscriptIntoNote(app, 'Notes/meeting.md', 'body', ''),
 		).toBe(false);
-		expect(other.writes).toEqual([]);
 	});
 
 	it('reports not-inserted for an empty note path', () => {
@@ -132,20 +160,28 @@ describe('insertTranscriptIntoNote', () => {
 		).toBe(false);
 	});
 
-	it('reports not-inserted instead of throwing when the editor refuses', () => {
+	it('appends to the file when the editor refuses', () => {
 		const target = makeLeaf('Notes/meeting.md', { throws: true });
 		const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		const process = jest.fn().mockResolvedValue('');
+		const app = createMockApp({
+			workspace: {
+				getLeavesOfType: jest.fn((type: string) =>
+					type === 'markdown' ? [target.leaf] : [],
+				),
+			},
+			vault: {
+				getFileByPath: jest.fn(() => ({ path: 'Notes/meeting.md' })),
+				process,
+			},
+		}).app;
 
-		// A note in reading mode: the caller needs a false to fall back to the
-		// sidecar file, not an exception that aborts the whole run.
+		// A note in reading mode: the editor refuses, so the block lands at
+		// the end of the file instead of being dropped with a warning.
 		expect(
-			insertTranscriptIntoNote(
-				makeApp([target.leaf]),
-				'Notes/meeting.md',
-				'body',
-				'',
-			),
-		).toBe(false);
+			insertTranscriptIntoNote(app, 'Notes/meeting.md', 'body', ''),
+		).toBe(true);
+		expect(process).toHaveBeenCalled();
 		expect(warn).toHaveBeenCalled();
 	});
 });
@@ -195,7 +231,27 @@ describe('insertTranscriptFileLink', () => {
 		);
 	});
 
-	it('reports not-inserted when the note is not open', () => {
+	it('appends the link to the file when the note is not open', () => {
+		const process = jest.fn().mockResolvedValue('');
+		const app = createMockApp({
+			vault: {
+				getFileByPath: jest.fn(() => ({ path: 'Notes/meeting.md' })),
+				process,
+			},
+		}).app;
+
+		expect(
+			insertTranscriptFileLink(
+				app,
+				'Notes/meeting.md',
+				transcriptFile,
+				'',
+			),
+		).toBe(true);
+		expect(process).toHaveBeenCalled();
+	});
+
+	it('reports not-inserted when the note is neither open nor on disk', () => {
 		expect(
 			insertTranscriptFileLink(
 				makeApp([]),

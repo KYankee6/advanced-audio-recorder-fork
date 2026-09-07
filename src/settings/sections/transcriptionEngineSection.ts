@@ -81,4 +81,37 @@ export function renderLocalWhisperSettings(ctx: SettingsSectionContext): void {
 		set: (v) => (s.localWhisperExtraArgs = v),
 		disabled: unavailable,
 	});
+	addText(ctx, {
+		name: 'ffmpeg path',
+		desc: 'ffmpeg binary that converts the original recording (webm/m4a) to WAV before local transcription. Long meetings no longer go through the memory-bounded in-app decoder.',
+		get: () => s.localFfmpegPath,
+		set: (v) => (s.localFfmpegPath = v),
+		disabled: unavailable,
+	});
+	// Local diarization (speaker labeling) runs our python script over the
+	// same WAV whisper just transcribed. Empty python path turns it off.
+	addText(ctx, {
+		name: 'Diarization python path',
+		desc: 'Python interpreter for local speaker diarization. Leave empty to disable diarization.',
+		get: () => s.localDiarizerPythonPath,
+		set: (v) => (s.localDiarizerPythonPath = v),
+		disabled: unavailable,
+	});
+	addText(ctx, {
+		name: 'Diarization script path',
+		desc: 'Path to the diarization script (takes the WAV and whisper segments, prints speaker assignments as JSON).',
+		get: () => s.localDiarizerScriptPath,
+		set: (v) => (s.localDiarizerScriptPath = v),
+		disabled: unavailable,
+	});
+	addText(ctx, {
+		name: 'Expected speakers',
+		desc: 'Speaker count for diarization. 0 = estimate automatically (set the count when you know it).',
+		get: () => String(s.localDiarizerMaxSpeakers),
+		set: (v) => {
+			const n = Number.parseInt(v, 10);
+			s.localDiarizerMaxSpeakers = Number.isFinite(n) && n >= 0 ? n : 0;
+		},
+		disabled: unavailable,
+	});
 }

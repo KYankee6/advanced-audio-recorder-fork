@@ -260,6 +260,7 @@ describe('LocalWhisperProvider advanced bias', () => {
 			binaryPath: '/bin/whisper',
 			modelPath: '/models/ggml.bin',
 			extraArgs: [],
+			ffmpegPath: 'ffmpeg',
 		});
 
 		await provider.transcribe(payload(), {
@@ -281,6 +282,7 @@ describe('LocalWhisperProvider advanced bias', () => {
 			binaryPath: '/bin/whisper',
 			modelPath: '/models/ggml.bin',
 			extraArgs: [],
+			ffmpegPath: 'ffmpeg',
 		});
 
 		await provider.transcribe(payload(), {
@@ -300,6 +302,7 @@ describe('LocalWhisperProvider advanced bias', () => {
 			binaryPath: '/bin/whisper',
 			modelPath: '/models/ggml.bin',
 			extraArgs: ['--prompt', 'mine'],
+			ffmpegPath: 'ffmpeg',
 		});
 
 		await provider.transcribe(payload(), {

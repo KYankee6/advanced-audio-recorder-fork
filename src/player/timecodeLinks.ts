@@ -37,6 +37,50 @@ export function parseAudioLinkTarget(src: string): AudioLinkTarget {
 }
 
 /**
+ * Returns the target and alias of the wikilink under a cursor position in a
+ * line of source text, or null when the cursor is not inside one. Live
+ * Preview renders internal links without a `data-href`, so a click there is
+ * resolved from the editor source instead of the DOM. The alias distinguishes
+ * a timestamp link (`[[rec.webm#t=30|0:30]]`, alias parses as a timecode)
+ * from a speaker link (`[[rec.webm#t=30|Speaker 1]]`, alias does not).
+ * @param lineText - Full source text of the clicked line
+ * @param cursorCh - Character index of the cursor within the line
+ * @returns Target with `#t=` subpath plus alias (null when none), or null
+ */
+export function wikiLinkWithAliasAtCursor(
+	lineText: string,
+	cursorCh: number,
+): { target: string; alias: string | null } | null {
+	const internalLinkRegex = /!?\[\[(.*?)(?:\|(.*?))?\]\]/g;
+	let match: RegExpExecArray | null;
+	while ((match = internalLinkRegex.exec(lineText)) !== null) {
+		const start = match.index;
+		// end is the exclusive position just past the closing ]]; a cursor there
+		// sits on the next character, not on this link, so compare with < end.
+		const end = start + match[0].length;
+		if (match[1] !== undefined && cursorCh >= start && cursorCh < end) {
+			return { target: match[1], alias: match[2] ?? null };
+		}
+	}
+	return null;
+}
+
+/**
+ * Decides whether a link alias names a speaker rather than a timestamp.
+ * Generated timestamp links always carry a parseable `M:SS`-style alias, so
+ * any alias that does not parse as a timecode is a speaker label (the engine
+ * label, `-`, or a name the user assigned). An empty alias is not a speaker.
+ * @param alias - The rendered/`|` alias of the clicked link
+ * @returns True when the alias should open speaker renaming, not a seek
+ */
+export function isSpeakerAlias(alias: string | null): boolean {
+	if (!alias || alias.trim().length === 0) {
+		return false;
+	}
+	return parseTimecode(alias.trim()) === null;
+}
+
+/**
  * Returns the target of the wikilink under a cursor position in a line of
  * source text, or null when the cursor is not inside one. Live Preview renders
  * internal links without a `data-href`, so a click there is resolved from the
@@ -44,7 +88,7 @@ export function parseAudioLinkTarget(src: string): AudioLinkTarget {
  * so `[[rec.mp4#t=30|0:30]]` yields `rec.mp4#t=30`.
  * @param lineText - Full source text of the clicked line
  * @param cursorCh - Character index of the cursor within the line
- * @returns Link target with its `#t=` subpath, or null when none is at cursor
+ * @returns Link target with its `#t=` subpath, or null when none at cursor
  */
 export function wikiLinkTargetAtCursor(
 	lineText: string,

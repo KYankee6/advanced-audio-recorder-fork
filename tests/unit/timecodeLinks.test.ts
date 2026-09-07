@@ -7,6 +7,8 @@ import {
 	parseTimecodeSubpath,
 	isAudioFile,
 	wikiLinkTargetAtCursor,
+	wikiLinkWithAliasAtCursor,
+	isSpeakerAlias,
 } from 'src/player/timecodeLinks';
 import { createFile } from '../helpers/createApp';
 
@@ -115,5 +117,45 @@ describe('wikiLinkTargetAtCursor', () => {
 		expect(link).toHaveLength(15);
 		expect(wikiLinkTargetAtCursor(link, 14)).toBe('rec.mp4#t=5');
 		expect(wikiLinkTargetAtCursor(link, 15)).toBeNull();
+	});
+});
+
+describe('wikiLinkWithAliasAtCursor', () => {
+	it('returns the target and the alias of the link under the cursor', () => {
+		const line = '[[rec.webm#t=30|발화자1]] did the thing';
+		expect(wikiLinkWithAliasAtCursor(line, 5)).toEqual({
+			target: 'rec.webm#t=30',
+			alias: '발화자1',
+		});
+	});
+
+	it('returns a null alias for a link without one', () => {
+		expect(wikiLinkWithAliasAtCursor('[[rec.webm#t=30]]', 3)).toEqual({
+			target: 'rec.webm#t=30',
+			alias: null,
+		});
+	});
+
+	it('returns null outside any link', () => {
+		expect(wikiLinkWithAliasAtCursor('plain text', 2)).toBeNull();
+	});
+});
+
+describe('isSpeakerAlias', () => {
+	it('reads a timecode-style alias as a timestamp, not a speaker', () => {
+		expect(isSpeakerAlias('0:30')).toBe(false);
+		expect(isSpeakerAlias('1:05:09')).toBe(false);
+	});
+
+	it('reads any non-timecode alias as a speaker label', () => {
+		expect(isSpeakerAlias('발화자1')).toBe(true);
+		expect(isSpeakerAlias('김철수')).toBe(true);
+		expect(isSpeakerAlias('-')).toBe(true);
+	});
+
+	it('rejects empty and null aliases', () => {
+		expect(isSpeakerAlias(null)).toBe(false);
+		expect(isSpeakerAlias('')).toBe(false);
+		expect(isSpeakerAlias('   ')).toBe(false);
 	});
 });

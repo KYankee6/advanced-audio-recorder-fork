@@ -368,6 +368,16 @@ export const TRANSCRIPTION_ENGINES: Record<
 				binaryPath: settings.localWhisperBinaryPath,
 				modelPath: settings.localWhisperModelPath,
 				extraArgs: parseArgs(settings.localWhisperExtraArgs),
+				ffmpegPath: settings.localFfmpegPath,
+				diarizer:
+					settings.localDiarizerPythonPath &&
+					settings.localDiarizerScriptPath
+						? {
+								pythonPath: settings.localDiarizerPythonPath,
+								scriptPath: settings.localDiarizerScriptPath,
+								maxSpeakers: settings.localDiarizerMaxSpeakers,
+							}
+						: undefined,
 			});
 			if (!provider.isAvailable()) {
 				throw new ProviderConfigError(

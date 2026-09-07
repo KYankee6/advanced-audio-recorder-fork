@@ -131,6 +131,7 @@ describe('transcription engine id constants', () => {
 				binaryPath: '',
 				modelPath: '',
 				extraArgs: [],
+				ffmpegPath: 'ffmpeg',
 			}).id,
 		).toBe(TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER);
 	});

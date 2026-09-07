@@ -43,6 +43,7 @@ function createSut(): LocalWhisperProvider {
 		binaryPath: '/bin/whisper',
 		modelPath: '/models/ggml.bin',
 		extraArgs: [],
+		ffmpegPath: 'ffmpeg',
 	});
 }
 

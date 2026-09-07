@@ -327,6 +327,14 @@ export interface AudioRecorderSettings {
 	localWhisperModelPath: string;
 	/** Extra CLI arguments for the local whisper binary (space-separated) */
 	localWhisperExtraArgs: string;
+	/** ffmpeg binary used to convert the original container for local whisper */
+	localFfmpegPath: string;
+	/** Python interpreter for local diarization (empty = diarization off) */
+	localDiarizerPythonPath: string;
+	/** Diarization script the local python runs after whisper */
+	localDiarizerScriptPath: string;
+	/** Expected speaker count for local diarization (0 = auto-estimate) */
+	localDiarizerMaxSpeakers: number;
 	/** Where to write the transcript */
 	transcriptDestination: TranscriptDestination;
 	/** File format when writing a transcript file */
@@ -335,6 +343,8 @@ export interface AudioRecorderSettings {
 	transcriptIncludeTimestamps: boolean;
 	/** Render timestamps as clickable player links */
 	transcriptTimestampLinks: boolean;
+	/** Render speaker labels as clickable player links */
+	transcriptSpeakerLinks: boolean;
 	/** Include speaker labels in the in-note transcript */
 	transcriptIncludeSpeakers: boolean;
 	/** Merge consecutive same-speaker segments onto one line */
@@ -689,10 +699,15 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	localWhisperBinaryPath: '',
 	localWhisperModelPath: '',
 	localWhisperExtraArgs: '',
+	localFfmpegPath: 'ffmpeg',
+	localDiarizerPythonPath: '',
+	localDiarizerScriptPath: '',
+	localDiarizerMaxSpeakers: 0,
 	transcriptDestination: 'note',
 	transcriptFileFormat: 'json',
 	transcriptIncludeTimestamps: true,
 	transcriptTimestampLinks: true,
+	transcriptSpeakerLinks: false,
 	transcriptIncludeSpeakers: true,
 	transcriptMergeConsecutiveSpeaker: true,
 	transcriptTimestampFormat: '{time}',

@@ -60,6 +60,35 @@ function fragmentMap(
 }
 
 /**
+ * Builds a single-pass rename for the wikilink-alias form this fork renders
+ * for clickable speaker labels (`**[[audio.webm#t=30|Speaker 1]]**`): only
+ * the visible alias between `|` and `]]` is swapped, so the link target and
+ * its timecode survive untouched. One simultaneous pass keeps swaps
+ * (A -> B while B -> A) from chaining.
+ */
+function applyLinkedAliasRenames(
+	content: string,
+	renames: readonly SpeakerRename[],
+): string {
+	const map = renameMap(renames);
+	const names = [...map.keys()].sort((a, b) => b.length - a.length);
+	if (names.length === 0) {
+		return content;
+	}
+	const regex = new RegExp(
+		`(\\[\\[[^\\]\\n]*\\|)(${names.map(escapeRegExp).join('|')})(\\]\\])`,
+		'g',
+	);
+	return content.replace(
+		regex,
+		(match: string, prefix: string, alias: string, suffix: string) => {
+			const to = map.get(alias);
+			return to !== undefined ? `${prefix}${to}${suffix}` : match;
+		},
+	);
+}
+
+/**
  * Rewrites rendered speaker fragments in note Markdown, but only on the lines
  * the caller marks as belonging to this recording (the lines whose timecode
  * link resolves to the audio). A second transcript in the same note, and any
@@ -77,7 +106,10 @@ export function renameSpeakersInNoteLines(
 	audioLines: ReadonlySet<number>,
 ): string {
 	const fragments = fragmentMap(speakerFormat, renames);
-	if (fragments.size === 0 || audioLines.size === 0) {
+	if (
+		(fragments.size === 0 && renameMap(renames).size === 0) ||
+		audioLines.size === 0
+	) {
 		return content;
 	}
 	const regex = new RegExp(alternation(fragments.keys()), 'g');
@@ -85,10 +117,10 @@ export function renameSpeakersInNoteLines(
 	for (let index = 0; index < lines.length; index++) {
 		const line = lines[index];
 		if (line !== undefined && audioLines.has(index)) {
-			lines[index] = line.replace(
-				regex,
-				(match) => fragments.get(match) ?? match,
-			);
+			const scoped = fragments.size
+				? line.replace(regex, (match) => fragments.get(match) ?? match)
+				: line;
+			lines[index] = applyLinkedAliasRenames(scoped, renames);
 		}
 	}
 	return lines.join('\n');
@@ -109,11 +141,16 @@ export function renameSpeakersInMarkdown(
 	renames: readonly SpeakerRename[],
 ): string {
 	const fragments = fragmentMap(speakerFormat, renames);
-	if (fragments.size === 0) {
+	if (fragments.size === 0 && renameMap(renames).size === 0) {
 		return content;
 	}
-	const regex = new RegExp(alternation(fragments.keys()), 'g');
-	return content.replace(regex, (match) => fragments.get(match) ?? match);
+	const plain = fragments.size
+		? content.replace(
+				new RegExp(alternation(fragments.keys()), 'g'),
+				(match) => fragments.get(match) ?? match,
+			)
+		: content;
+	return applyLinkedAliasRenames(plain, renames);
 }
 
 /**
@@ -140,18 +177,32 @@ export function noteShowsAnySpeaker(
 		.filter((speaker) => speaker.length > 0)
 		.map((speaker) => renderSpeakerFragment(speakerFormat, speaker))
 		.filter((fragment) => fragment.length > 0);
+	// The clickable-label form renders the speaker as a wikilink alias, which
+	// no plain fragment matches, so probe it too before declaring the note
+	// free of these speakers.
+	const linkedRegex = new RegExp(
+		`\\[\\[[^\\]\\n]*\\|(${speakers
+			.filter((speaker) => speaker.length > 0)
+			.map(escapeRegExp)
+			.sort((a, b) => b.length - a.length)
+			.join('|')})\\]\\]`,
+	);
 	if (fragments.length === 0) {
-		return false;
+		return linkedRegex.test(content);
 	}
 	// Deliberately not global: the regex is reused across the lines below, and
 	// a sticky lastIndex would make every other test miss.
 	const regex = new RegExp(alternation(fragments));
 	if (!audioLines) {
-		return regex.test(content);
+		return regex.test(content) || linkedRegex.test(content);
 	}
 	return content
 		.split('\n')
-		.some((line, index) => audioLines.has(index) && regex.test(line));
+		.some(
+			(line, index) =>
+				audioLines.has(index) &&
+				(regex.test(line) || linkedRegex.test(line)),
+		);
 }
 
 /**

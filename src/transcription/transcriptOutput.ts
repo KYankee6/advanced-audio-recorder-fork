@@ -105,13 +105,14 @@ function findNoteView(app: App, notePath: string): MarkdownView | null {
 }
 
 /**
- * Inserts a Markdown block at the cursor of the given note, optionally under
- * a heading. Returns true when inserted, false when the note is not open in
- * an editable view (reading mode or not open), so the caller can fall back.
- * @param app - Obsidian App
- * @param notePath - Vault path of the target note (the link source)
- * @param body - Markdown to insert
- * @param heading - Optional heading line (empty for none)
+ * Inserts a Markdown block into the given note, optionally under a heading.
+ * With the note open in an editable view the block lands at the cursor;
+ * otherwise it is appended to the note file itself. The append fallback
+ * matters because a run that finished while the user was in another app (or
+ * with the window minimized) would otherwise drop a completed - possibly
+ * already-billed - transcript and LLM summary on the floor: the previous
+ * behavior returned false here and only fired a Notice nobody saw.
+ * Returns true when written, false only when the note does not exist at all.
  */
 function insertBlockIntoNote(
 	app: App,
@@ -119,31 +120,45 @@ function insertBlockIntoNote(
 	body: string,
 	heading: string,
 ): boolean {
-	const view = findNoteView(app, notePath);
-	if (!view) {
-		return false;
-	}
 	const block = heading ? `${heading}\n\n${body}` : body;
-	try {
-		const editor = view.editor;
-		const cursor = editor.getCursor();
-		editor.replaceRange(`\n\n${block}\n`, cursor);
-		return true;
-	} catch (error) {
-		// The note may be in reading mode or otherwise not editable; report
-		// not-inserted so the caller can fall back to the file/notice.
-		console.warn(
-			`${PLUGIN_LOG_PREFIX} Could not insert into the note:`,
-			error,
-		);
+	const view = findNoteView(app, notePath);
+	if (view) {
+		try {
+			const editor = view.editor;
+			const cursor = editor.getCursor();
+			editor.replaceRange(`\n\n${block}\n`, cursor);
+			return true;
+		} catch (error) {
+			// The note may be in reading mode or otherwise not editable; fall
+			// through to the file-level append instead of dropping the block.
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} Could not insert into the note view, appending to the file instead:`,
+				error,
+			);
+		}
+	}
+	const file = app.vault.getFileByPath(notePath);
+	if (!file) {
 		return false;
 	}
+	// Fire-and-forget: the run only needs to know the write was accepted;
+	// process() re-reads and rewrites atomically so no open editor is needed.
+	void app.vault
+		.process(file, (data) => `${data}\n\n${block}\n`)
+		.catch((error: unknown) => {
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} Could not append transcript to ${notePath}:`,
+				error,
+			);
+		});
+	return true;
 }
 
 /**
- * Inserts the transcript Markdown at the cursor of the note the timecode
- * links were generated against, optionally under a heading. Returns true
- * when inserted, false when that note is not open in an editable view.
+ * Inserts the transcript Markdown into the note the timecode links were
+ * generated against, optionally under a heading: at the cursor when the note
+ * is open in an editable view, appended to the file otherwise. Returns true
+ * when written, false only when the note does not exist.
  * @param app - Obsidian App
  * @param notePath - Vault path of the target note (the link source)
  * @param markdown - Rendered transcript Markdown
@@ -163,9 +178,10 @@ export function insertTranscriptIntoNote(
  * optionally under a heading. The link is built with
  * {@link App.fileManager.generateMarkdownLink} so it honors the vault's
  * link format (a `[[wikilink]]` when wikilinks are enabled). Returns true
- * when inserted, false when the note is not open in an editable view.
+ * when written (at the cursor, or appended to the file when no editable
+ * view holds the note), false only when the note does not exist.
  * @param app - Obsidian App
- * @param notePath - Vault path of the target note (the link source)
+ * @param notePath - Vault path of the target note
  * @param transcriptFile - The written transcript file to link to
  * @param heading - Optional heading line (empty for none)
  */

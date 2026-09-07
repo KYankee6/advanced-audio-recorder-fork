@@ -25,6 +25,8 @@ export interface TranscriptMarkdownOptions {
 	includeTimestamps: boolean;
 	/** Whether timestamps are clickable links into the player. */
 	timestampLinks: boolean;
+	/** Whether speaker labels are clickable links seeking to the turn start. */
+	speakerLinks: boolean;
 	/** Whether to render speaker labels. */
 	includeSpeakers: boolean;
 	/** Merge consecutive segments from the same speaker into one line. */
@@ -41,6 +43,7 @@ export interface TranscriptMarkdownOptions {
 export const DEFAULT_TRANSCRIPT_MARKDOWN_OPTIONS: TranscriptMarkdownOptions = {
 	includeTimestamps: true,
 	timestampLinks: true,
+	speakerLinks: false,
 	includeSpeakers: true,
 	mergeConsecutiveSpeaker: true,
 	// No surrounding brackets by default: with timestamp links on (the
@@ -180,7 +183,7 @@ export function formatTranscriptMarkdown(
 		const speaker =
 			options.includeSpeakers && row.speaker
 				? applyTemplate(options.speakerFormat, {
-						speaker: neutralizeWikilinks(row.speaker),
+						speaker: renderSpeakerValue(row, options, linkBuilder),
 					})
 				: '';
 		return applyTemplate(options.lineFormat, {
@@ -190,6 +193,25 @@ export function formatTranscriptMarkdown(
 		});
 	});
 	return lines.join('\n\n');
+}
+
+/**
+ * Renders the speaker value for a row: when speaker links are enabled (and
+ * linking is possible at all), the label becomes a clickable link that seeks
+ * the player to the start of the speaker's turn; a plain label is
+ * wikilink-neutralized like any other transcript text.
+ */
+function renderSpeakerValue(
+	row: RenderRow,
+	options: TranscriptMarkdownOptions,
+	linkBuilder: TimecodeLinkBuilder,
+): string {
+	if (row.speaker === undefined) {
+		return '';
+	}
+	return options.speakerLinks && options.timestampLinks
+		? linkBuilder(row.start, row.speaker)
+		: neutralizeWikilinks(row.speaker);
 }
 
 /**

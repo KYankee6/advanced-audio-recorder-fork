@@ -643,8 +643,11 @@ describe('AudioRecorderPlugin crash recovery wiring', () => {
 
 		const managerStore = (RecordingManager as jest.Mock).mock
 			.calls[0][3] as unknown;
+		// The registrar's constructor takes a saveSettings callback between
+		// getSettings and the sidecar store (the speaker-rename dialog writes
+		// through it), so the store is the fifth argument there.
 		const registrarStore = (EnhancedPlayerRegistrar as jest.Mock).mock
-			.calls[0][3] as unknown;
+			.calls[0][4] as unknown;
 		expect(managerStore).toBeDefined();
 		expect(managerStore).toBe(registrarStore);
 	});

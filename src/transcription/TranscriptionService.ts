@@ -1096,6 +1096,7 @@ export class TranscriptionService {
 			...DEFAULT_TRANSCRIPT_MARKDOWN_OPTIONS,
 			includeTimestamps: settings.transcriptIncludeTimestamps,
 			timestampLinks: settings.transcriptTimestampLinks,
+			speakerLinks: settings.transcriptSpeakerLinks,
 			includeSpeakers: settings.transcriptIncludeSpeakers,
 			mergeConsecutiveSpeaker: settings.transcriptMergeConsecutiveSpeaker,
 			timestampFormat: settings.transcriptTimestampFormat,

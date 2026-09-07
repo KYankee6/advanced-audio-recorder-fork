@@ -47,12 +47,20 @@ export const DEEPGRAM_CAPABILITIES: ProviderCapabilities = {
 	biasChannel: 'keyterm',
 };
 
-/** Local whisper.cpp: no upload limit, needs decoded WAV, no diarization. */
+/**
+ * Local whisper.cpp: no upload limit. This fork accepts the original
+ * container and converts it with the desktop ffmpeg binary, so a long
+ * meeting never goes through the renderer's memory-bounded WebAudio decode
+ * (which fails around ~30+ minutes). Speaker diarization runs through the
+ * external diarizer script configured in settings (python + script path);
+ * without a script configured the provider silently skips the step, so the
+ * capability is declared unconditionally.
+ */
 export const LOCAL_WHISPER_CAPABILITIES: ProviderCapabilities = {
 	maxRequestBytes: Number.POSITIVE_INFINITY,
 	maxRequestSeconds: Number.POSITIVE_INFINITY,
-	acceptsOriginalContainer: false,
-	supportsDiarization: false,
+	acceptsOriginalContainer: true,
+	supportsDiarization: true,
 	// whisper.cpp accepts an initial prompt via the --prompt CLI flag.
 	supportsDictionary: true,
 	biasChannel: 'prompt',
