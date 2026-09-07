@@ -1,0 +1,9 @@
+# Verified combination for the bundled speaker diarization script
+# (Python 3.12). Install into a dedicated venv:
+#   python3.12 -m venv ~/diarize-env
+#   ~/diarize-env/bin/pip install -r requirements.txt
+numpy==2.5.2
+scipy==1.18.1
+scikit-learn==1.9.0
+torch==2.13.0
+pyannote.audio==4.0.7

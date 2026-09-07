@@ -1,4 +1,77 @@
-# Advanced Audio Recorder for Obsidian
+# Advanced Audio Recorder for Obsidian — long-meeting fork
+
+> **This is a fork** of [akhmialeuski/advanced-audio-recorder](https://github.com/akhmialeuski/advanced-audio-recorder),
+> tuned for **long offline meeting transcription**: 30–60 minute meetings
+> recorded in a vault, transcribed locally by whisper.cpp with speaker labels,
+> and none of your audio leaving the machine. It tracks upstream releases
+> (currently 2.2.3 — all upstream features included) and adds the pieces a
+> long meeting needs.
+
+| Fork addition | What it fixes |
+| --- | --- |
+| **Chunked local transcription** (240 s runs, `--max-context 0`) | A whole-meeting whisper.cpp run eventually locks onto one phrase and repeats it for minutes. Short independent runs don't. |
+| **Anti-hallucination decoder thresholds** (`--entropy-thold 2.6 --logprob-thold -0.8 --no-speech-thold 0.5`) | On silence, room noise, faint far-mic speech, or a TV in the background, default thresholds let the decoder fill non-speech stretches with a repeated phrase — a real 44-minute meeting lost ~8 minutes of demo narration under a phrase loop. With these thresholds the same audio transcribes as the actual speech (or nothing, when it truly is silence). |
+| **ffmpeg container conversion** | 30+ minute webm/m4a recordings decode through desktop ffmpeg instead of the renderer's memory-bounded WebAudio, which dies on long meetings. |
+| **Offline speaker diarization** | A bundled pyannote-based script ([`diarizer/`](diarizer/README.md)) labels segments by speaker after local transcription — 100% offline, no Hugging Face token (ungated model mirror), and it works at conference-room mic distance where voice-similarity diarization collapses. |
+| **Speaker rename from the transcript** | Click a speaker label in the transcript to rename that speaker everywhere via a modal. |
+| **Append fallback for transcript insertion** | If the target note isn't open in an editor, the transcript is appended to the file instead of being silently dropped. |
+| **Adjacent-duplicate segment merge** | Chunk-boundary residue (the same sentence twice) is collapsed on the merged timeline. |
+
+On an Apple-Silicon Mac, a 44-minute meeting transcribes locally in about
+3 minutes with `ggml-large-v3-turbo`.
+
+## Installation
+
+### Via BRAT (recommended — gets fork updates)
+
+1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from the
+   community plugins.
+2. If you already use the original plugin from the community store,
+   **disable and remove it first** (same plugin id — they cannot coexist).
+3. BRAT → **Add Beta plugin** → paste: `KYankee6/advanced-audio-recorder-fork`
+4. Enable "Advanced Audio Recorder" and restart Obsidian.
+
+### Manual
+
+Download `main.js`, `manifest.json` and `styles.css` from the
+[latest release](../../releases/latest) into
+`<vault>/.obsidian/plugins/advanced-audio-recorder/`, then enable the plugin.
+
+### Local whisper.cpp setup
+
+1. `brew install whisper-cpp ffmpeg` (or your platform's equivalents).
+2. Download a GGML model, e.g.
+   [ggml-large-v3-turbo.bin](https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin)
+   (~1.6 GB), into `~/.cache/whisper/`.
+3. Settings → Transcription:
+   - Engine: **Local whisper.cpp**
+   - Binary path: e.g. `/opt/homebrew/bin/whisper-cli`
+   - Model path: e.g. `~/.cache/whisper/ggml-large-v3-turbo.bin`
+   - Language: pin your meeting language (e.g. `ko`) — this also stops
+     language misdetection on quiet intros.
+4. For speaker labels, see [`diarizer/README.md`](diarizer/README.md):
+   one venv (`pip install -r diarizer/requirements.txt`), then point the
+   "Local diarizer" settings at that python and `diarizer/diarize.py`.
+
+## (한국어) 장회의 녹음용 포크
+
+원본 플러그인의 포크로 **긴 오프라인 회의 전사**에 맞춰 조정했습니다.
+30~60분 회의를 녹음하면 whisper.cpp가 로컬에서 전사하고 화자 라벨까지
+붙입니다. 음성은 100% 오프라인입니다.
+
+포크 추가 사항: ① 240초 청크 분할 전사(긴 녹음 한 번 실행 시 발생하는
+문구 반복 루프 방지) ② 검증된 환각 억제 임계값(무음·잡음·TV 소리 구간을
+반복 문구가 아니라 실제 발화로 전사) ③ 30분+ webm의 ffmpeg 변환
+④ 오프라인 화자분리(`diarizer/`, HuggingFace 토큰 불필요) ⑤ 전사에서 화자
+이름 일괄 변경 ⑥ 노트가 닫혀 있어도 전사 폴백 삽입.
+
+설치: BRAT에서 "Add Beta plugin"에 이 저장소(`KYankee6/advanced-audio-recorder-fork`)를
+등록하세요. 커뮤니티 스토어의 원본을 쓰고 있다면 먼저 제거해야 합니다(같은
+플러그인 id). whisper.cpp·화자분리 설정은 위 영문 섹션을 따라주세요.
+
+---
+
+# About the plugin
 
 Advanced Audio Recorder lets you record, play, clean up, and transcribe audio directly inside [Obsidian](https://obsidian.md).
 
@@ -31,17 +104,11 @@ Recording is fast and forgiving. Start and stop from the ribbon or a command, fo
 
 The enhanced player turns playback into a first-class part of your notes. Recordings embed as a player with a clickable waveform, adjustable speed, skip, loop, and volume. Add per-recording bookmarks and chapters, move between them, and copy timestamp links that jump straight to a moment in the audio. See the [enhanced audio player](docs/audio-player.md).
 
-Transcription turns any recording, or any audio file already in your vault, into text with the engine that fits your needs: the OpenAI-compatible Whisper API (Groq and other compatible hosts included), Deepgram, Google Gemini, or a fully offline `whisper.cpp` model that never touches the network. Deepgram and Gemini add automatic speaker diarization, so meetings and interviews come back labelled by speaker. You decide where the transcript goes and in which format (JSON, SRT, WebVTT, or plain text), with timestamps you can click to jump the player to the right moment. An optional pass through an LLM (OpenAI, Anthropic, or Gemini) cleans up the wording or condenses the transcript into key points and action items. See [Transcription](docs/transcription.md) and [LLM post-processing](docs/llm-post-processing.md).
+Transcription turns any recording, or any audio file already in your vault, into text with the engine that fits your needs: the OpenAI-compatible Whisper API (Groq and other compatible hosts included), Deepgram, Google Gemini, or a fully offline `whisper.cpp` model that never touches the network. Deepgram and Gemini add automatic speaker diarization, so meetings and interviews come back labelled by speaker. The fork extends the local engine with offline diarization (see [`diarizer/`](diarizer/README.md)). You decide where the transcript goes and in which format (JSON, SRT, WebVTT, or plain text), with timestamps you can click to jump the player to the right moment. An optional pass through an LLM (OpenAI, Anthropic, or Gemini) cleans up the wording or condenses the transcript into key points and action items. See [Transcription](docs/transcription.md) and [LLM post-processing](docs/llm-post-processing.md).
 
 ![The Transcribe audio dialog with per-run controls for engine, language, speaker diarization, destination, and LLM post-processing.](docs/images/transcription-dialog.png)
 
 Everything else keeps your audio tidy. Convert recordings between WAV, WebM, OGG, MP3, MP4, M4A, AAC, and FLAC, and split long files into parts straight from the right-click menu; the formats you can record in are the subset your platform supports. Clean up noisy audio on demand with a high-pass filter, noise gate, and loudness leveling, always written to a fresh copy so the original is left untouched. See [Formats](docs/formats.md), [File operations](docs/file-operations.md), and [Audio cleanup](docs/audio-cleanup.md).
-
-## Installation
-
-1. In Obsidian, open Settings, go to Community plugins, and turn off Restricted mode if it is on.
-2. Click Browse, then search for "Advanced Audio Recorder".
-3. Click Install, then Enable.
 
 ## Quick start
 
@@ -53,11 +120,13 @@ No default hotkeys are assigned. Set your own in Settings, under Hotkeys.
 
 ## Support
 
-If this plugin saves you time, consider supporting its development: [Buy Me A Coffee](https://coff.ee/akhmelevskiy).
+All credit for the original plugin goes to
+[Anatol Khmialeuski](https://github.com/akhmialeuski) — if the plugin saves
+you time, please support [his funding page](https://coff.ee/akhmelevskiy).
 
 ## Troubleshooting and bug reports
 
-If something is not working, start with the [troubleshooting guide](docs/troubleshooting.md). When you report a problem, follow the [bug reporting guide](docs/BUG_REPORTING_GUIDE.md) and open an issue on [GitHub](https://github.com/akhmialeuski/advanced-audio-recorder/issues).
+If something is not working, start with the [troubleshooting guide](docs/troubleshooting.md). For problems specific to this fork (local chunked transcription, thresholds, offline diarization), open an issue on [this fork](../../issues); for anything else, follow the [bug reporting guide](docs/BUG_REPORTING_GUIDE.md) and open an issue on [the upstream repository](https://github.com/akhmialeuski/advanced-audio-recorder/issues).
 
 ## License
 
