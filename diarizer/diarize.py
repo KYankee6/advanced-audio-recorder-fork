@@ -1,157 +1,101 @@
 #!/usr/bin/env python3
 """
-diarize.py — 로컬 화자분리 (100% 오프라인, 게이트 없는 모델만 사용)
-- 아키텍처: pyannote segmentation-3.0 (회의 학습, 원거리 강건) 로
-  10초 윈도우별 화자활성 임베딩(프레임x7)을 만들고 병합 클러스터링으로
-  화자를 나눈 뒤, whisper 세그먼트에 프레임 다수결으로 화자를 붙인다.
-- 입력: 16kHz mono WAV + whisper 세그먼트 JSON ([{start, end, text}, ...])
-- 출력(stdout): {"speakers": N, "assignments": [{"index": i, "speaker": "발화자1"}]}
+diarize.py v2 - pyannote community-1 파이프라인 화자분리 (100% 로컬 추론)
 
-사용법:
-  python diarize.py --wav rec.wav --segments segs.json --max-speakers 3
-  --max-speakers 0 이면 자동 추정 (고유값 갭). 회의 인원을 알면 고정 권장.
+v1(segments 활성 패턴 클러스터링)을 pyannote 공식 community-1으로 교체:
+  segmentation + wespeaker 임베딩 + VBx(베이지안 HMM) 클러스터링.
+최초 1회 HF 다운로드(게이트 토큰) 후 로컬 캐시로 오프라인 동작한다.
+
+계약(v1과 동일 - 플러그인 수정 불필요):
+  입력: 16kHz mono WAV + whisper 세그먼트 JSON ([{start, end, text}, ...])
+  사용법: python diarize.py --wav rec.wav --segments segs.json --max-speakers 4
+  출력(stdout): {"speakers": N, "assignments": [{"index": i, "speaker": "발화자N"}]}
+
+--max-speakers 0 이면 파이프라인 자동 추정. 세그먼트 배정은 exclusive 출력의
+  턴 중 최대 겹침(없으면 2초 이내 최근접)으로 한다.
 """
 import argparse
 import json
+import os
 import sys
 
-import numpy as np
-import torch
 
-MIRROR = "ubitec/pyannote-segmentation-3.0"  # 비게이트 pyannote 세그멘테이션 미러
-WIN_SEC = 10.0
-HOP_SEC = 5.0  # 중첩 홉: 경계 정밀도
-
-
-def load_wav(path: str, target_sr: int = 16000):
-    import wave
-
-    with wave.open(path, "rb") as w:
-        sr = w.getframerate()
-        ch = w.getnchannels()
-        raw = w.readframes(w.getnframes())
-    x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-    if ch > 1:
-        x = x.reshape(-1, ch).mean(axis=1)
-    if sr != target_sr:
-        from scipy.signal import resample_poly
-        x = resample_poly(x, target_sr, sr)
-    return x
+def _reexec_with_dyld_path():
+    """macOS: torchcodec이 홈브루 FFmpeg 공유라이브러리(libavutil 등)를
+    찾으려면 DYLD_FALLBACK_LIBRARY_PATH가 필요하다. 플러그인은 환경변수 없이
+    이 스크립트를 실행하므로, 본체 임포트 전에 스스로 재실행한다."""
+    if (
+        sys.platform == "darwin"
+        and not os.environ.get("DYLD_FALLBACK_LIBRARY_PATH")
+        and os.path.isdir("/opt/homebrew/lib")
+    ):
+        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = "/opt/homebrew/lib"
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
 
 
-def rms(x: np.ndarray) -> float:
-    return float(np.sqrt(np.mean(x**2))) if x.size else 0.0
+_reexec_with_dyld_path()
+
+REPO_ID = "pyannote/speaker-diarization-community-1"
+NEAREST_GAP_SEC = 2.0  # 겹침 없는 세그먼트를 최근접 턴으로 배정하는 상한
 
 
-def segmentation_activations(model, wav: np.ndarray, sr: int):
-    """10초 윈도우를 HOP_SEC 간격으로 이동하며 (윈도우수, 프레임수, 7) 활성행렬."""
-    win = int(WIN_SEC * sr)
-    hop = int(HOP_SEC * sr)
-    chunks = []
-    n = len(wav)
-    for s in range(0, max(n - hop, 1), hop):
-        clip = wav[s:s + win]
-        if len(clip) < win:
-            clip = np.pad(clip, (0, win - len(clip)))
-        with torch.no_grad():
-            out = model(torch.tensor(clip, dtype=torch.float32).unsqueeze(0))
-        logits = out["logits"] if isinstance(out, dict) else out
-        if isinstance(logits, torch.Tensor):
-            logits = logits.squeeze(0)
-        else:
-            logits = logits[0] if isinstance(logits, (list, tuple)) else logits
-        chunks.append(torch.sigmoid(logits if torch.is_tensor(logits)
-                                    else torch.tensor(logits)).cpu().numpy())
-    return np.stack(chunks)  # (W, F, 7)
+def load_pipeline():
+    from pyannote.audio import Pipeline
+    try:
+        return Pipeline.from_pretrained(REPO_ID)
+    except Exception:
+        # 네트워크 불가 환경: HF 캐시로만 로드
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        return Pipeline.from_pretrained(REPO_ID)
 
 
-def cluster_windows(emb: np.ndarray, max_speakers: int, threshold: float):
-    """윈도우 임베딩(F*7) 클러스터링. 발화 있는 윈도우만 대상."""
-    from sklearn.cluster import AgglomerativeClustering
+def run_pipeline(wav_path: str, max_speakers: int, cache_path: str):
+    """파이프라인 exclusive 다이어라이제이션. [(start, end, label), ...] 반환."""
+    import time
 
-    activeness = (emb * emb).sum(axis=1)
-    cut = np.percentile(activeness, 10)
-    idx = np.where(activeness >= cut)[0]
-    sub = emb[idx]
-    sub = sub / (np.linalg.norm(sub, axis=1, keepdims=True) + 1e-9)
+    if cache_path and os.path.exists(cache_path):
+        with open(cache_path, encoding="utf-8") as f:
+            print(f"캐시 로드: {cache_path}", file=sys.stderr)
+            return [tuple(t) for t in json.load(f)]
 
-    labels = np.full(len(emb), -1, dtype=int)  # -1 = 무음/제외
-    if max_speakers > 1:
-        labels_sub = fixed_k_cluster(sub, min(max_speakers, len(idx)))
-    else:
-        labels_sub = auto_cluster(sub)
-    labels[idx] = labels_sub
-    return labels
-
-
-def fixed_k_cluster(sub: np.ndarray, k: int, thr: float = 0.52):
-    """임계값 클러스터링 후 발화량 상위 k개만 남기고, 나머지 창은
-    살아남은 클러스터 중심과의 코사인으로 재배정한다.
-    (n_clusters=k 직접 컷은 중첩 윈도우 체이닝 때문에 한 덩어리 붕괴 발생)"""
-    from sklearn.cluster import AgglomerativeClustering
-
-    lab = AgglomerativeClustering(
-        n_clusters=None, distance_threshold=thr,
-        metric="cosine", linkage="average").fit_predict(sub)
-    sizes = np.bincount(lab)
-    keep = sorted(range(len(sizes)), key=lambda i: -sizes[i])[:k]
-    if len(keep) < len(sizes):
-        cent = np.stack([sub[lab == c].mean(axis=0) for c in keep])
-        cent = cent / (np.linalg.norm(cent, axis=1, keepdims=True) + 1e-9)
-        remap = {c: j for j, c in enumerate(keep)}
-        out = []
-        for row, c in zip(sub, lab):
-            if c in remap:
-                out.append(remap[c])
-            else:
-                out.append(int(np.argmax(cent @ row)))
-        return np.array(out, dtype=int)
-    remap = {c: j for j, c in enumerate(keep)}
-    return np.array([remap[c] for c in lab], dtype=int)
+    pipeline = load_pipeline()
+    kwargs = {"min_speakers": 1}
+    if max_speakers > 0:
+        kwargs["max_speakers"] = max_speakers
+    t0 = time.time()
+    out = pipeline(wav_path, **kwargs)
+    # 겹침 보존 출력 사용: exclusive 모드는 짧은 끼어들기를 우세 화자에 흡수한다.
+    diarization = getattr(out, "speaker_diarization", out)
+    turns = [
+        (float(turn.start), float(turn.end), label)
+        for turn, _, label in diarization.itertracks(yield_label=True)
+    ]
+    turns.sort()
+    elapsed = time.time() - t0
+    dur_cache = f"{len(turns)}턴"
+    print(f"community-1 추론 완료: {elapsed:.0f}초 ({dur_cache})", file=sys.stderr)
+    if cache_path:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(turns, f, ensure_ascii=False)
+    return turns
 
 
-def auto_cluster(sub: np.ndarray, min_frac: float = 0.05):
-    """임계값 안정구간 + 최소크기 필터로 자동 클러스터링.
-    잡음성 미니 클러스터(전체의 min_frac 미만)는 -1(제외) 처리한다."""
-    from sklearn.cluster import AgglomerativeClustering
-
-    best = None
-    for d in np.arange(0.50, 0.95, 0.05):
-        try:
-            lab = AgglomerativeClustering(
-                n_clusters=None, distance_threshold=float(d),
-                metric="cosine", linkage="average").fit_predict(sub)
-        except Exception:
-            continue
-        sizes = np.bincount(lab)
-        big = int((sizes >= max(2, min_frac * len(sub))).sum())
-        print(f"  거리 {d:.2f} → 클러스터 {len(set(lab))}개 중 유효 {big}개", file=sys.stderr)
-        if best is None or big > best[0]:
-            best = (big, lab.copy())
-    if best is None:
-        return np.zeros(len(sub), dtype=int)
-    lab = best[1]
-    sizes = np.bincount(lab)
-    keep = sizes >= max(2, min_frac * len(sub))
-    # 유효 클러스터만 발화량 순으로 재라벨, 나머지는 -1
-    order_ids = [i for i in range(len(sizes)) if keep[i]]
-    order_ids.sort(key=lambda i: -sizes[i])
-    remap = {old: new for new, old in enumerate(order_ids)}
-    return np.array([remap.get(l, -1) for l in lab], dtype=int)
-
-
-def estimate_speaker_count(emb: np.ndarray, max_k: int = 8) -> int:
-    aff = (emb @ emb.T + 1.0) / 2.0
-    np.fill_diagonal(aff, 1.0)
-    deg = aff.sum(axis=1)
-    d_inv_sqrt = 1.0 / np.sqrt(np.maximum(deg, 1e-9))
-    lap = np.diag(np.maximum(deg, 1e-9)) - aff
-    eigvals = np.clip(
-        np.linalg.eigvalsh(lap * np.outer(d_inv_sqrt, d_inv_sqrt)), 0, None)
-    gaps = np.diff(eigvals[: max_k + 1])
-    if len(gaps) == 0 or gaps.max() < 0.05:
-        return 1
-    return int(np.argmax(gaps[:max_k]) + 1)
+def assign_segments(segments, turns):
+    """세그먼트별 최대 겹침 턴 배정 (겹침 없으면 2초 이내 최근접, 아니면 '-')."""
+    assign = []
+    for i, seg in enumerate(segments):
+        s, e = float(seg["start"]), float(seg["end"])
+        best, best_ov = None, 0.0
+        for ts, te, label in turns:
+            ov = min(te, e) - max(ts, s)
+            if ov > best_ov:
+                best, best_ov = label, ov
+        if best is None:
+            gap, best = min((min(abs(ts - e), abs(te - s)), label) for ts, te, label in turns)
+            if gap > NEAREST_GAP_SEC:
+                best = None
+        assign.append({"index": i, "speaker": best if best is not None else "-"})
+    return assign
 
 
 def main():
@@ -162,7 +106,7 @@ def main():
     ap.add_argument("--max-speakers", type=int, default=0)
     ap.add_argument("--min-duration", type=float, default=1.0, help="호환용(미사용)")
     ap.add_argument("--energy-floor", type=float, default=0.004, help="호환용(미사용)")
-    ap.add_argument("--cache", default="")
+    ap.add_argument("--cache", default="", help="파이프라인 결과 캐시(디버그용)")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
@@ -174,64 +118,29 @@ def main():
         json.dump({"speakers": 0, "assignments": []}, sys.stdout)
         return
 
-    import os
-    acts = None
-    if args.cache and os.path.exists(args.cache):
-        acts = np.load(args.cache)
-        print(f"캐시 로드: {args.cache}", file=sys.stderr)
+    turns = run_pipeline(args.wav, args.max_speakers, args.cache)
 
-    wav = load_wav(args.wav)
-    sr = 16000
-    if acts is None:
-        from pyannote.audio import Model
-        model = Model.from_pretrained(MIRROR)
-        # PyanNet의 instance_norm이 MPS에서 미구현 버그 → CPU 고정
-        device = "cpu"
-        model = model.to(device).eval()
-        print(f"세그멘테이션 추론: {len(wav)/sr:.0f}초, device={device}", file=sys.stderr)
-        acts = segmentation_activations(model, wav, sr)
-        if args.cache:
-            np.save(args.cache, acts)
+    # 발화량 순 라벨링 (v1과 동일: 발화 시간이 긴 사람이 발화자1)
+    talk = {}
+    for ts, te, label in turns:
+        talk[label] = talk.get(label, 0.0) + (te - ts)
+    order = {
+        label: f"발화자{i + 1}"
+        for i, label in enumerate(sorted(talk, key=lambda l: -talk[l]))
+    }
 
-    n_win, n_frame, _ = acts.shape
-    dur = len(wav) / sr
-    print(f"윈도우 {n_win}개 (10초창, {HOP_SEC}초 홉) × 프레임 {n_frame} × 7화자슬롯",
-          file=sys.stderr)
-
-    # 1) 윈도우 임베딩 클러스터링
-    emb = acts.reshape(n_win, -1)  # (W, F*7)
-    labels = cluster_windows(emb, args.max_speakers, args.threshold)
-
-    # 발화량 순 라벨링
-    order = {}
-    for lab in sorted(set(labels.tolist()) - {-1},
-                      key=lambda l: -(labels == l).sum()):
-        order[lab] = f"발화자{len(order) + 1}"
+    assignments = assign_segments(segments, turns)
+    for a in assignments:
+        a["speaker"] = order.get(a["speaker"], a["speaker"])
 
     if args.debug:
-        from collections import Counter
-        print(f"[debug] 윈도우 클러스터: {Counter(labels.tolist())}", file=sys.stderr)
+        import collections
+        counts = collections.Counter(a["speaker"] for a in assignments)
+        print(f"[debug] 세그먼트 배정: {dict(counts)}", file=sys.stderr)
+        for label, name in sorted(order.items(), key=lambda kv: kv[1]):
+            print(f"[debug] {name} = {label} (발화 {talk[label]:.0f}초)", file=sys.stderr)
 
-    # 2) 세그먼트 배정: 커버 윈도우들과의 겹침 길이 가중 다수결
-    win_starts = np.arange(n_win) * HOP_SEC
-    assign = []
-    for i, seg in enumerate(segments):
-        s, e = float(seg["start"]), min(float(seg["end"]), dur)
-        overlap = np.minimum(win_starts + WIN_SEC, e) - np.maximum(win_starts, s)
-        votes = {}
-        for w, ov in enumerate(overlap):
-            if ov > 0 and labels[w] in order:
-                votes[labels[w]] = votes.get(labels[w], 0.0) + float(ov)
-        if not votes:
-            # 커버 윈도우 없음 → 시간상 가장 가까운 윈도우
-            w = int(np.clip(np.argmin(np.abs(win_starts - s)), 0, n_win - 1))
-            assign.append({"index": i, "speaker": order.get(labels[w], "-")})
-            continue
-        lab = max(votes, key=votes.get)
-        assign.append({"index": i, "speaker": order.get(lab, "-")})
-
-    json.dump({"speakers": len(order), "assignments": assign},
-              sys.stdout, ensure_ascii=False)
+    json.dump({"speakers": len(order), "assignments": assignments}, sys.stdout, ensure_ascii=False)
 
 
 if __name__ == "__main__":

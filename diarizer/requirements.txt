@@ -1,9 +1,12 @@
-# Verified combination for the bundled speaker diarization script
-# (Python 3.12). Install into a dedicated venv:
+# Verified combination for the bundled speaker diarization script v2
+# (Python 3.12, macOS arm64). Install into a dedicated venv:
 #   python3.12 -m venv ~/diarize-env
 #   ~/diarize-env/bin/pip install -r requirements.txt
 numpy==2.5.2
 scipy==1.18.1
 scikit-learn==1.9.0
 torch==2.13.0
+torchaudio==2.11.0
+torchcodec
 pyannote.audio==4.0.7
+# Also required on macOS: homebrew ffmpeg (shared libs for torchcodec)
