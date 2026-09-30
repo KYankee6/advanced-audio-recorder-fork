@@ -11,6 +11,7 @@ import {
 	LLM_PROVIDER_IDS,
 	LLM_REQUEST_TIMEOUT_MS,
 } from '../../constants';
+import { EngineLabel } from '../../providers/providers';
 import {
 	authHeader,
 	HttpError,
@@ -75,7 +76,7 @@ export interface LlmProvider {
 	 * (and therefore the vendor registry) do not know about.
 	 */
 	readonly id: LlmProviderId;
-	readonly label: string;
+	readonly label: EngineLabel;
 	/**
 	 * Completes a prompt and returns the assistant's text with whatever
 	 * usage the vendor reported alongside it.
@@ -129,13 +130,22 @@ export interface LlmConfig {
  * `max_tokens`, so asking it first means only OpenAI's own current models ever
  * reach the second attempt, and no endpoint can quietly discard the budget.
  */
-const OUTPUT_TOKEN_PARAMS = ['max_tokens', 'max_completion_tokens'] as const;
+const OutputTokenParam = {
+	/** The original name, which every OpenAI-compatible server understands. */
+	MaxTokens: 'max_tokens',
+	/** The name OpenAI's own current models require instead. */
+	MaxCompletionTokens: 'max_completion_tokens',
+} as const;
+
+/**
+ * One of the two names an output-token ceiling can be sent under (derived from
+ * {@link OutputTokenParam}).
+ */
+type OutputTokenParam =
+	(typeof OutputTokenParam)[keyof typeof OutputTokenParam];
 
 /** The status an endpoint refuses an unknown parameter with. */
 const HTTP_BAD_REQUEST = 400;
-
-/** One of the two names an output-token ceiling can be sent under. */
-type OutputTokenParam = (typeof OUTPUT_TOKEN_PARAMS)[number];
 
 /**
  * Whether a failure is the endpoint saying it does not know this parameter,
@@ -157,13 +167,28 @@ function rejectedTokenParam(error: unknown, param: OutputTokenParam): boolean {
 }
 
 /**
- * OpenAI chat-completions provider, using the OpenAI Chat Completions API.
- * The implementation stays OpenAI-compatible, but only OpenAI is offered as a
- * configured vendor.
+ * Which vendor a provider instance answers as.
+ *
+ * The OpenAI Chat Completions wire format is spoken by more than one service,
+ * and the client is the same for all of them, so the identity is a fact about
+ * the vendor being called rather than about the class. It is required rather
+ * than defaulted on purpose: a default would let a second vendor built on this
+ * client be priced and accounted as OpenAI, which is precisely the mistake the
+ * parameter exists to make impossible.
+ */
+export interface LlmVendorIdentity {
+	readonly id: LlmProviderId;
+	readonly label: EngineLabel;
+}
+
+/**
+ * Chat-completions provider speaking the OpenAI Chat Completions API, used for
+ * every vendor that serves that wire format - OpenAI itself, Mistral, and any
+ * compatible endpoint a Base URL is pointed at.
  */
 export class OpenAiCompatibleLlmProvider implements LlmProvider {
-	readonly id = LLM_PROVIDER_IDS.OPENAI_COMPATIBLE;
-	readonly label = 'OpenAI';
+	readonly id: LlmProviderId;
+	readonly label: EngineLabel;
 
 	/**
 	 * The name this endpoint took, once it has answered.
@@ -175,7 +200,13 @@ export class OpenAiCompatibleLlmProvider implements LlmProvider {
 	 */
 	private acceptedParam: OutputTokenParam | null = null;
 
-	constructor(private readonly config: LlmConfig) {}
+	constructor(
+		private readonly config: LlmConfig,
+		vendor: LlmVendorIdentity,
+	) {
+		this.id = vendor.id;
+		this.label = vendor.label;
+	}
 
 	async complete(
 		prompt: LlmPrompt,
@@ -230,11 +261,13 @@ export class OpenAiCompatibleLlmProvider implements LlmProvider {
 	private candidateParams(): readonly OutputTokenParam[] {
 		const accepted = this.acceptedParam;
 		if (accepted === null) {
-			return OUTPUT_TOKEN_PARAMS;
+			return Object.values(OutputTokenParam);
 		}
 		return [
 			accepted,
-			...OUTPUT_TOKEN_PARAMS.filter((param) => param !== accepted),
+			...Object.values(OutputTokenParam).filter(
+				(param) => param !== accepted,
+			),
 		];
 	}
 
@@ -277,7 +310,7 @@ export class OpenAiCompatibleLlmProvider implements LlmProvider {
  */
 export class AnthropicLlmProvider implements LlmProvider {
 	readonly id = LLM_PROVIDER_IDS.ANTHROPIC;
-	readonly label = 'Anthropic (Claude)';
+	readonly label = EngineLabel.Anthropic;
 
 	constructor(private readonly config: LlmConfig) {}
 
@@ -321,7 +354,7 @@ export class AnthropicLlmProvider implements LlmProvider {
  */
 export class GeminiLlmProvider implements LlmProvider {
 	readonly id = LLM_PROVIDER_IDS.GEMINI;
-	readonly label = 'Google Gemini';
+	readonly label = EngineLabel.Gemini;
 
 	constructor(private readonly config: LlmConfig) {}
 

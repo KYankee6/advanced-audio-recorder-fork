@@ -4,7 +4,12 @@
  * @module tests/unit/RibbonIcon.test
  */
 
-import { updateRibbonIcon, initializeRibbonIcon } from 'src/ui/RibbonIcon';
+import {
+	ICON_QUICK_NOTE,
+	QUICK_NOTE_GLYPHS,
+	updateRibbonIcon,
+	initializeRibbonIcon,
+} from 'src/ui/RibbonIcon';
 import { RecordingStatus } from 'src/types';
 
 describe('RibbonIcon', () => {
@@ -22,28 +27,28 @@ describe('RibbonIcon', () => {
 			}).not.toThrow();
 		});
 
-		it('changes icon to mic and add is-recording class when recording', () => {
+		it('shows the microphone and adds is-recording when recording', () => {
 			updateRibbonIcon(ribbonElement, RecordingStatus.Recording);
 
-			expect(ribbonElement.getAttribute('data-icon')).toBe('mic');
+			expect(ribbonElement.getAttribute('data-icon')).toBe('mic-vocal');
 			expect(ribbonElement.classList.contains('is-recording')).toBe(true);
 		});
 
-		it('changes icon to mic and add is-recording class when paused', () => {
+		it('shows the microphone and adds is-recording when paused', () => {
 			updateRibbonIcon(ribbonElement, RecordingStatus.Paused);
 
-			expect(ribbonElement.getAttribute('data-icon')).toBe('mic');
+			expect(ribbonElement.getAttribute('data-icon')).toBe('mic-vocal');
 			expect(ribbonElement.classList.contains('is-recording')).toBe(true);
 		});
 
-		it('changes icon to microphone and remove is-recording class when idle', () => {
+		it('drops is-recording and keeps the microphone when idle', () => {
 			// First set to recording
 			ribbonElement.classList.add('is-recording');
-			ribbonElement.setAttribute('data-icon', 'mic');
+			ribbonElement.setAttribute('data-icon', 'mic-vocal');
 
 			updateRibbonIcon(ribbonElement, RecordingStatus.Idle);
 
-			expect(ribbonElement.getAttribute('data-icon')).toBe('microphone');
+			expect(ribbonElement.getAttribute('data-icon')).toBe('mic-vocal');
 			expect(ribbonElement.classList.contains('is-recording')).toBe(
 				false,
 			);
@@ -76,9 +81,27 @@ describe('RibbonIcon', () => {
 
 			updateRibbonIcon(ribbonElement, RecordingStatus.Idle);
 
-			expect(ribbonElement.getAttribute('data-icon')).toBe('microphone');
+			expect(ribbonElement.getAttribute('data-icon')).toBe('mic-vocal');
 			expect(ribbonElement.classList.contains('is-saving')).toBe(false);
 		});
+
+		it.each([
+			RecordingStatus.Idle,
+			RecordingStatus.Recording,
+			RecordingStatus.Saving,
+		])(
+			'keeps the quick note glyph while %s, since a dictation saves nothing',
+			(status) => {
+				updateRibbonIcon(ribbonElement, status, QUICK_NOTE_GLYPHS);
+
+				expect(ribbonElement.getAttribute('data-icon')).toBe(
+					ICON_QUICK_NOTE,
+				);
+				expect(ribbonElement.classList.contains('is-saving')).toBe(
+					status === RecordingStatus.Saving,
+				);
+			},
+		);
 
 		it('handles default case same as idle', () => {
 			ribbonElement.classList.add('is-recording');
@@ -86,7 +109,7 @@ describe('RibbonIcon', () => {
 			// Force an unknown status value to test default case
 			updateRibbonIcon(ribbonElement, 'unknown' as RecordingStatus);
 
-			expect(ribbonElement.getAttribute('data-icon')).toBe('microphone');
+			expect(ribbonElement.getAttribute('data-icon')).toBe('mic-vocal');
 			expect(ribbonElement.classList.contains('is-recording')).toBe(
 				false,
 			);
@@ -102,11 +125,11 @@ describe('RibbonIcon', () => {
 
 		it('sets ribbon icon to idle state', () => {
 			ribbonElement.classList.add('is-recording');
-			ribbonElement.setAttribute('data-icon', 'mic');
+			ribbonElement.setAttribute('data-icon', 'mic-vocal');
 
 			initializeRibbonIcon(ribbonElement);
 
-			expect(ribbonElement.getAttribute('data-icon')).toBe('microphone');
+			expect(ribbonElement.getAttribute('data-icon')).toBe('mic-vocal');
 			expect(ribbonElement.classList.contains('is-recording')).toBe(
 				false,
 			);

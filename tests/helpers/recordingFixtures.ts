@@ -31,6 +31,7 @@ export function createTarget(
 		pcmBufferedBytes: 0,
 		pcmChannels: 1,
 		pcmSampleRate: 44100,
+		pcmFormat: 'int16',
 		partIndex: 0,
 		partPaths: [],
 		partPcmBytes: 0,
@@ -55,7 +56,9 @@ export function createSession(
 	return {
 		chunkRotationBytes: null,
 		isWavPcm: false,
+		pcmFormat: 'int16',
 		recorderFormat: 'webm',
+		recorderMimeType: 'audio/webm',
 		outputFormat: 'webm',
 		outputMode: 'multiple',
 		bitrate: 128000,

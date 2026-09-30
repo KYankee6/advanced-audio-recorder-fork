@@ -33,6 +33,7 @@ import { audioPlayerPage } from './sections/audioPlayerSection';
 import { audioProcessingPage } from './sections/audioProcessingSection';
 import { audioSplittingPage } from './sections/audioSplittingSection';
 import { autoChaptersGroup } from './sections/autoChaptersSection';
+import { ProfileSection } from './profileKinds';
 import {
 	SETTINGS_ROOT_CLASS,
 	type SettingsDefinitionContext,
@@ -40,9 +41,11 @@ import {
 import { diagnosticsPage } from './sections/diagnosticsSection';
 import { enginesPage } from './sections/enginesSection';
 import { fileStorageGroup } from './sections/fileStorageSection';
+import { isSystemAudioLoopbackAvailable } from '../recording/systemAudioSupport';
 import { llmGroup } from './sections/llmSection';
 import { multiTrackPage } from './sections/multiTrackSection';
 import { outputFormatGroup } from './sections/outputFormatSection';
+import { quickNotesPage } from './sections/quickNotesSection';
 import { sectionItems } from './sections/rowHelpers';
 import { transcriptionAdvancedGroup } from './sections/transcriptionAdvancedSection';
 import { transcriptionGroup } from './sections/transcriptionSection';
@@ -54,6 +57,7 @@ import type { Setting, SettingDefinitionItem } from 'obsidian';
 // this module. Only what it actually reads is passed on: a name the tab does
 // not take is imported from the module that owns it.
 export {
+	LAYOUT_TRACK_FIELDS,
 	parseProfileControlKey,
 	parseTrackControlKey,
 	type TrackControlField,
@@ -92,6 +96,13 @@ export {
 export function buildSettingsDefinitions(
 	ctx: SettingsDefinitionContext,
 ): SettingDefinitionItem[] {
+	// The one answer two sections say out loud: the audio-input switch that
+	// pairs the microphone with the system output, and the source row of every
+	// track. It is a fact of the platform and the installed build, so it cannot
+	// differ between them, and asking it costs a synchronous trip through
+	// Electron's remote module - which is why it is asked here, once per build
+	// of the tree, rather than by each row that reports it.
+	const systemAudioAvailable = isSystemAudioLoopbackAvailable();
 	return [
 		...sectionItems([
 			{
@@ -104,13 +115,32 @@ export function buildSettingsDefinitions(
 					ctx.renderDocumentationLink(host);
 				},
 			},
+			{
+				// Beside the documentation link rather than under Diagnostics:
+				// both rows are about the plugin itself rather than about the
+				// recording being configured, and this is the one place a
+				// reader looks for them before they have a session in mind.
+				name: 'Release notes',
+				aliases: ['changelog', 'updates', 'what is new'],
+				desc: "Show what changed the first time a new version runs. The notes stay available through the Show what's new command.",
+				control: { type: 'toggle', key: 'showReleaseNotes' },
+			},
 		]),
-		audioInputGroup(ctx.settings, ctx.devices, ctx.sampleRates),
-		outputFormatGroup(ctx.outputFormat),
+		audioInputGroup(
+			ctx.settings,
+			ctx.devices,
+			ctx.sampleRates,
+			systemAudioAvailable,
+		),
+		outputFormatGroup(ctx.outputFormat, ctx.settings),
 		fileStorageGroup(ctx.settings),
 		...sectionItems([
+			// First among the entries: a feature with a button of its own is
+			// looked for by its own name, above the sections a recording is
+			// tuned with.
+			quickNotesPage(ctx),
 			audioSplittingPage(ctx.settings),
-			multiTrackPage(ctx.settings, ctx.devices),
+			multiTrackPage(ctx.settings, ctx.devices, systemAudioAvailable),
 			audioPlayerPage(ctx.settings),
 			{
 				// Forty-odd settings with a scope of their own: the style guide's
@@ -129,9 +159,9 @@ export function buildSettingsDefinitions(
 					// nothing floats on the page beside the section it configures.
 					transcriptionGroup(ctx, enginesPage(ctx)),
 					transcriptOutputGroup(ctx.settings),
-					autoChaptersGroup(ctx, 'chapters'),
+					autoChaptersGroup(ctx, ProfileSection.Chapters),
 					...llmGroup(ctx),
-					transcriptionAdvancedGroup(ctx, 'advanced'),
+					transcriptionAdvancedGroup(ctx, ProfileSection.Advanced),
 				],
 			},
 			audioProcessingPage(ctx.settings),

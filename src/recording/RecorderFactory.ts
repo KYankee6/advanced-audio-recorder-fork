@@ -7,7 +7,8 @@
  */
 
 import { CHUNK_TIMESLICE_MS } from '../constants';
-import { CHANNEL_MODE_SOURCE, type ChannelMode } from '../audio/downmix';
+import { ChannelMode } from '../audio/downmix';
+import { PcmSampleFormat } from '../audio/pcm';
 import { PcmStreamRecorder } from './PcmStreamRecorder';
 
 /** Configuration for a batch of MediaRecorders. */
@@ -84,6 +85,8 @@ export function detachRecorderHandlers(recorders: MediaRecorder[]): void {
  * @param channelModes - Channel layout per stream (aligned by index)
  * applied by each recorder's capture worklet; a missing entry keeps
  * the source pass-through
+ * @param sampleFormat - How one captured sample is stored, shared by every
+ * recorder of the session because it is one file's representation
  * @returns The created recorders, in stream order
  */
 export function createPcmRecorders(
@@ -91,6 +94,7 @@ export function createPcmRecorders(
 	sampleRate: number,
 	onChunk: (index: number, data: ArrayBuffer) => void,
 	channelModes: readonly ChannelMode[] = [],
+	sampleFormat: PcmSampleFormat = PcmSampleFormat.Int16,
 ): PcmStreamRecorder[] {
 	return streams.map(
 		(stream, index) =>
@@ -100,7 +104,8 @@ export function createPcmRecorders(
 				(data: ArrayBuffer) => {
 					onChunk(index, data);
 				},
-				channelModes[index] ?? CHANNEL_MODE_SOURCE,
+				channelModes[index] ?? ChannelMode.Source,
+				sampleFormat,
 			),
 	);
 }

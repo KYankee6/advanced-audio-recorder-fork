@@ -20,6 +20,7 @@ import {
 	PLUGIN_LOG_PREFIX,
 	TRANSCRIPTION_PROVIDER_IDS,
 } from '../../constants';
+import { EngineLabel } from '../../providers/providers';
 import { whisperPromptValue } from '../dictionaryBias';
 import type { TranscriptSegment } from '../TranscriptTypes';
 import { LOCAL_WHISPER_CAPABILITIES } from './capabilities';
@@ -96,7 +97,8 @@ function readU32LE(bytes: Uint8Array, offset: number): number {
 		(bytes[offset]! |
 			(bytes[offset + 1]! << 8) |
 			(bytes[offset + 2]! << 16) |
-			(bytes[offset + 3]! << 24)) >>> 0
+			(bytes[offset + 3]! << 24)) >>>
+		0
 	);
 }
 
@@ -320,7 +322,7 @@ function removeTempFile(
  */
 export class LocalWhisperProvider implements TranscriptionProvider {
 	readonly id = TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER;
-	readonly label = 'Local whisper.cpp';
+	readonly label = EngineLabel.LocalWhisper;
 	readonly requiresNetwork = false;
 	readonly capabilities: ProviderCapabilities = LOCAL_WHISPER_CAPABILITIES;
 	private readonly node = loadNodeModules();
@@ -366,9 +368,19 @@ export class LocalWhisperProvider implements TranscriptionProvider {
 				await this.runFfmpeg(
 					node,
 					[
-						'-nostdin', '-v', 'error', '-y',
-						'-i', rawPath,
-						'-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath,
+						'-nostdin',
+						'-v',
+						'error',
+						'-y',
+						'-i',
+						rawPath,
+						'-ar',
+						'16000',
+						'-ac',
+						'1',
+						'-c:a',
+						'pcm_s16le',
+						wavPath,
 					],
 					'ffmpeg could not convert the recording',
 					options,
@@ -397,11 +409,18 @@ export class LocalWhisperProvider implements TranscriptionProvider {
 			await this.runFfmpeg(
 				node,
 				[
-					'-nostdin', '-v', 'error', '-y',
-					'-i', wavPath,
-					'-f', 'segment',
-					'-segment_time', String(LOCAL_WHISPER_CHUNK_SECONDS),
-					'-c', 'copy',
+					'-nostdin',
+					'-v',
+					'error',
+					'-y',
+					'-i',
+					wavPath,
+					'-f',
+					'segment',
+					'-segment_time',
+					String(LOCAL_WHISPER_CHUNK_SECONDS),
+					'-c',
+					'copy',
 					node.path.join(chunkDir, 'chunk_%04d.wav'),
 				],
 				'ffmpeg could not split the recording for chunked transcription',
@@ -455,9 +474,18 @@ export class LocalWhisperProvider implements TranscriptionProvider {
 			result.segments = dedupeAdjacentSegments(result.segments);
 			// Diarization is a best-effort enhancement: a failure must never
 			// discard the transcript whisper already produced.
-			if (options.diarize && this.config.diarizer && result.segments.length) {
+			if (
+				options.diarize &&
+				this.config.diarizer &&
+				result.segments.length
+			) {
 				try {
-					await this.applyDiarization(node, wavPath, result.segments, options);
+					await this.applyDiarization(
+						node,
+						wavPath,
+						result.segments,
+						options,
+					);
 				} catch (error) {
 					console.warn(
 						`${PLUGIN_LOG_PREFIX} local diarization failed:`,
@@ -543,7 +571,10 @@ export class LocalWhisperProvider implements TranscriptionProvider {
 	}
 
 	/** Reads and maps one whisper.cpp `-oj` output file. */
-	private readWhisperJson(node: NodeModules, partBase: string): WhisperResult {
+	private readWhisperJson(
+		node: NodeModules,
+		partBase: string,
+	): WhisperResult {
 		let raw: string;
 		try {
 			raw = node.fs.readFileSync(`${partBase}.json`, 'utf8');
@@ -639,7 +670,11 @@ export class LocalWhisperProvider implements TranscriptionProvider {
 		node.fs.writeFileSync(
 			segPath,
 			JSON.stringify(
-				segments.map((s) => ({ start: s.start, end: s.end, text: s.text })),
+				segments.map((s) => ({
+					start: s.start,
+					end: s.end,
+					text: s.text,
+				})),
 			),
 		);
 		try {

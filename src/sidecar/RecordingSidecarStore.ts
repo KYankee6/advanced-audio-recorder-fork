@@ -20,7 +20,7 @@ import type { PlayerMarker } from '../markers/markerModel';
 import type { PartFailure } from '../transcription/partFailure';
 import { serializeMarkers } from '../markers/markerModel';
 import { mergeParticipantNames } from '../speakers/participantRoster';
-import { TRANSCRIPT_FILE_FORMATS } from '../transcription/TranscriptTypes';
+import { TranscriptFileFormat } from '../transcription/TranscriptTypes';
 import {
 	cloneSpeakerEntry,
 	cloneTranscriptSection,
@@ -50,7 +50,7 @@ export const SIDECAR_SUFFIX = '.markers.json';
  */
 const RECORDABLE_OUTPUT_EXTENSIONS = new Set<string>([
 	'md',
-	...TRANSCRIPT_FILE_FORMATS,
+	...Object.values(TranscriptFileFormat),
 ]);
 
 /** Whether a vault path could be a recorded transcript output. */
@@ -257,6 +257,36 @@ export class RecordingSidecarStore {
 		return this.mutate(path, (sidecar) => {
 			replaceSpeakers(sidecar, entries);
 			applyParticipants(sidecar, participants);
+		});
+	}
+
+	/**
+	 * Appends speakers to the end of the roster inside one mutation, leaving
+	 * every stored entry as it is. A speaker created after the transcription
+	 * (a transcript line split off to a new speaker) thereby joins the roster
+	 * without writing back the rest of it as the caller last read it, which
+	 * would undo a name assigned since. An entry whose label is already
+	 * stored is skipped rather than replacing that speaker.
+	 * @param path - Vault-relative recording path
+	 * @param entries - Speakers to append, in order
+	 */
+	async addSpeakers(
+		path: string,
+		entries: readonly SpeakerEntry[],
+	): Promise<void> {
+		return this.mutate(path, (sidecar) => {
+			const stored = new Set(
+				sidecar.transcript.speakers.map((entry) => entry.label),
+			);
+			const added = entries.filter((entry) => !stored.has(entry.label));
+			if (added.length === 0) {
+				return false;
+			}
+			sidecar.transcript.speakers = [
+				...sidecar.transcript.speakers,
+				...added.map(cloneSpeakerEntry),
+			];
+			return true;
 		});
 	}
 

@@ -22,14 +22,19 @@
 import {
 	ANTHROPIC_MODELS_DOC_URL,
 	DEEPGRAM_MODELS_DOC_URL,
+	DEEPSEEK_MODELS_DOC_URL,
 	DEFAULT_ANTHROPIC_BASE_URL,
 	DEFAULT_DEEPGRAM_BASE_URL,
+	DEFAULT_DEEPSEEK_BASE_URL,
 	DEFAULT_GEMINI_BASE_URL,
+	DEFAULT_MISTRAL_BASE_URL,
 	DEFAULT_OPENAI_BASE_URL,
 	GEMINI_MODELS_DOC_URL,
 	LLM_PROVIDER_IDS,
+	MISTRAL_MODELS_DOC_URL,
 	OPENAI_MODELS_DOC_URL,
 	TRANSCRIPTION_PROVIDER_IDS,
+	VOXTRAL_MODELS_DOC_URL,
 	WHISPER_API_MODELS_DOC_URL,
 } from '../constants';
 import type {
@@ -45,6 +50,8 @@ export const ACCOUNT_IDS = {
 	DEEPGRAM: 'deepgram',
 	GEMINI: 'gemini',
 	ANTHROPIC: 'anthropic',
+	MISTRAL: 'mistral',
+	DEEPSEEK: 'deepseek',
 } as const;
 
 /** One account id. */
@@ -57,11 +64,37 @@ export const ENGINE_IDS = {
 	DEEPGRAM: 'deepgram',
 	GEMINI: 'gemini',
 	ANTHROPIC: 'anthropic',
+	/** Speech catalogue: the voxtral-* ids reached through the Mistral account. */
+	VOXTRAL: 'voxtral',
+	/** Chat catalogue: the mistral-* ids reached through the same account. */
+	MISTRAL_LLM: 'mistral-llm',
+	DEEPSEEK: 'deepseek',
 	LOCAL_WHISPER: 'local-whisper',
 } as const;
 
 /** One engine id. */
 export type EngineId = (typeof ENGINE_IDS)[keyof typeof ENGINE_IDS];
+
+/**
+ * The name each engine is shown under, declared once. The registry below, the
+ * transcription registry, and every provider client read it from here, so the
+ * dropdown, the cost estimate and an error message cannot name one engine two
+ * ways.
+ */
+export const EngineLabel = {
+	WhisperApi: 'Whisper API (OpenAI-compatible)',
+	OpenAi: 'OpenAI',
+	Deepgram: 'Deepgram',
+	Gemini: 'Google Gemini',
+	Anthropic: 'Anthropic (Claude)',
+	Voxtral: 'Mistral Voxtral',
+	Mistral: 'Mistral',
+	DeepSeek: 'DeepSeek',
+	LocalWhisper: 'Local whisper.cpp (desktop)',
+} as const;
+
+/** One engine label (derived from {@link EngineLabel}). */
+export type EngineLabel = (typeof EngineLabel)[keyof typeof EngineLabel];
 
 /** Description shown under every stored key field. */
 const STORED_LOCALLY_DESC =
@@ -134,7 +167,7 @@ export interface ProviderModels {
 export interface EngineDescriptor {
 	readonly id: EngineId;
 	/** Display label, used wherever the engine is named. */
-	readonly label: string;
+	readonly label: EngineLabel;
 	/** Public pricing page; empty for the free local engine. */
 	readonly pricingUrl: string;
 	/** Account it is reached through; null for the local engine. */
@@ -220,6 +253,20 @@ export const ACCOUNTS: Record<AccountId, ProviderConnection> = {
 		keyFieldDesc: STORED_LOCALLY_DESC,
 		missingKeyMessage: 'Set the Google Gemini API key in settings.',
 	},
+	[ACCOUNT_IDS.MISTRAL]: {
+		baseUrlKey: 'mistralBaseUrl',
+		defaultBaseUrl: DEFAULT_MISTRAL_BASE_URL,
+		apiKeyKey: 'mistralApiKey',
+		baseUrl: (s) => s.mistralBaseUrl,
+		setBaseUrl: (s, url) => (s.mistralBaseUrl = url),
+		apiKey: (s) => s.mistralApiKey,
+		setApiKey: (s, key) => (s.mistralApiKey = key),
+		baseUrlFieldDesc:
+			'Mistral API base (default https://api.mistral.ai/v1). Shared by the Voxtral and Mistral engines.',
+		keyFieldName: 'Mistral API key',
+		keyFieldDesc: STORED_LOCALLY_DESC,
+		missingKeyMessage: 'Set the Mistral API key in settings.',
+	},
 	[ACCOUNT_IDS.ANTHROPIC]: {
 		baseUrlKey: 'anthropicBaseUrl',
 		defaultBaseUrl: DEFAULT_ANTHROPIC_BASE_URL,
@@ -234,6 +281,20 @@ export const ACCOUNTS: Record<AccountId, ProviderConnection> = {
 		keyFieldDesc: STORED_LOCALLY_DESC,
 		missingKeyMessage: 'Set the Anthropic API key in settings.',
 	},
+	[ACCOUNT_IDS.DEEPSEEK]: {
+		baseUrlKey: 'deepSeekBaseUrl',
+		defaultBaseUrl: DEFAULT_DEEPSEEK_BASE_URL,
+		apiKeyKey: 'deepSeekApiKey',
+		baseUrl: (s) => s.deepSeekBaseUrl,
+		setBaseUrl: (s, url) => (s.deepSeekBaseUrl = url),
+		apiKey: (s) => s.deepSeekApiKey,
+		setApiKey: (s, key) => (s.deepSeekApiKey = key),
+		baseUrlFieldDesc:
+			'DeepSeek API base (default https://api.deepseek.com).',
+		keyFieldName: 'DeepSeek API key',
+		keyFieldDesc: STORED_LOCALLY_DESC,
+		missingKeyMessage: 'Set the DeepSeek API key in settings.',
+	},
 };
 
 /**
@@ -243,7 +304,7 @@ export const ACCOUNTS: Record<AccountId, ProviderConnection> = {
 export const ENGINES: Record<EngineId, EngineDescriptor> = {
 	[ENGINE_IDS.WHISPER_API]: {
 		id: ENGINE_IDS.WHISPER_API,
-		label: 'Whisper API (OpenAI-compatible)',
+		label: EngineLabel.WhisperApi,
 		pricingUrl: 'https://openai.com/api/pricing/',
 		account: ACCOUNT_IDS.OPENAI,
 		transcriptionId: TRANSCRIPTION_PROVIDER_IDS.WHISPER_API,
@@ -273,7 +334,7 @@ export const ENGINES: Record<EngineId, EngineDescriptor> = {
 	},
 	[ENGINE_IDS.OPENAI_LLM]: {
 		id: ENGINE_IDS.OPENAI_LLM,
-		label: 'OpenAI',
+		label: EngineLabel.OpenAi,
 		pricingUrl: 'https://openai.com/api/pricing/',
 		account: ACCOUNT_IDS.OPENAI,
 		transcriptionId: null,
@@ -301,7 +362,7 @@ export const ENGINES: Record<EngineId, EngineDescriptor> = {
 	},
 	[ENGINE_IDS.DEEPGRAM]: {
 		id: ENGINE_IDS.DEEPGRAM,
-		label: 'Deepgram',
+		label: EngineLabel.Deepgram,
 		pricingUrl: 'https://deepgram.com/pricing',
 		account: ACCOUNT_IDS.DEEPGRAM,
 		transcriptionId: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
@@ -325,7 +386,7 @@ export const ENGINES: Record<EngineId, EngineDescriptor> = {
 	},
 	[ENGINE_IDS.GEMINI]: {
 		id: ENGINE_IDS.GEMINI,
-		label: 'Google Gemini',
+		label: EngineLabel.Gemini,
 		pricingUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
 		account: ACCOUNT_IDS.GEMINI,
 		// One catalogue for both jobs: the same ids transcribe and write, so a
@@ -355,7 +416,7 @@ export const ENGINES: Record<EngineId, EngineDescriptor> = {
 	},
 	[ENGINE_IDS.ANTHROPIC]: {
 		id: ENGINE_IDS.ANTHROPIC,
-		label: 'Anthropic (Claude)',
+		label: EngineLabel.Anthropic,
 		pricingUrl: 'https://www.anthropic.com/pricing',
 		account: ACCOUNT_IDS.ANTHROPIC,
 		transcriptionId: null,
@@ -381,9 +442,93 @@ export const ENGINES: Record<EngineId, EngineDescriptor> = {
 			set: (settings, value) => (settings.llmAnthropicMaxTokens = value),
 		},
 	},
+	[ENGINE_IDS.VOXTRAL]: {
+		id: ENGINE_IDS.VOXTRAL,
+		label: EngineLabel.Voxtral,
+		pricingUrl: 'https://mistral.ai/pricing/api',
+		account: ACCOUNT_IDS.MISTRAL,
+		transcriptionId: TRANSCRIPTION_PROVIDER_IDS.VOXTRAL,
+		llmId: null,
+		uploadLimitMb: 0,
+		uploadChunk: null,
+		models: {
+			modelKey: 'voxtralModel',
+			modelsKey: 'voxtralModels',
+			model: (s) => s.voxtralModel,
+			setModel: (s, id) => (s.voxtralModel = id),
+			models: (s) => s.voxtralModels,
+			setModels: (s, ids) => (s.voxtralModels = ids),
+			pickerName: 'Model',
+			pickerDesc:
+				'Pick a Voxtral model (e.g. voxtral-mini-latest). A recording of up to three hours is sent whole for consistent speaker labels.',
+			docLabel: 'Voxtral model list',
+			docUrl: VOXTRAL_MODELS_DOC_URL,
+		},
+		maxTokens: null,
+	},
+	[ENGINE_IDS.MISTRAL_LLM]: {
+		id: ENGINE_IDS.MISTRAL_LLM,
+		label: EngineLabel.Mistral,
+		pricingUrl: 'https://mistral.ai/pricing/api',
+		account: ACCOUNT_IDS.MISTRAL,
+		// A second catalogue over the same account, exactly as OpenAI is: the
+		// voxtral-* ids transcribe and the mistral-* ids write, so one list
+		// could not serve both.
+		transcriptionId: null,
+		llmId: LLM_PROVIDER_IDS.MISTRAL,
+		uploadLimitMb: 0,
+		uploadChunk: null,
+		models: {
+			modelKey: 'llmMistralModel',
+			modelsKey: 'llmMistralModels',
+			model: (s) => s.llmMistralModel,
+			setModel: (s, id) => (s.llmMistralModel = id),
+			models: (s) => s.llmMistralModels,
+			setModels: (s, ids) => (s.llmMistralModels = ids),
+			pickerName: 'Model',
+			pickerDesc:
+				'Pick a Mistral model (e.g. mistral-medium-latest, mistral-small-latest).',
+			docLabel: 'Mistral models',
+			docUrl: MISTRAL_MODELS_DOC_URL,
+		},
+		maxTokens: {
+			key: 'llmMistralMaxTokens',
+			get: (settings) => settings.llmMistralMaxTokens,
+			set: (settings, value) => (settings.llmMistralMaxTokens = value),
+		},
+	},
+	[ENGINE_IDS.DEEPSEEK]: {
+		id: ENGINE_IDS.DEEPSEEK,
+		label: EngineLabel.DeepSeek,
+		pricingUrl: 'https://api-docs.deepseek.com/quick_start/pricing',
+		account: ACCOUNT_IDS.DEEPSEEK,
+		// The vendor has no audio endpoint, so its one catalogue only writes.
+		transcriptionId: null,
+		llmId: LLM_PROVIDER_IDS.DEEPSEEK,
+		uploadLimitMb: 0,
+		uploadChunk: null,
+		models: {
+			modelKey: 'llmDeepSeekModel',
+			modelsKey: 'llmDeepSeekModels',
+			model: (s) => s.llmDeepSeekModel,
+			setModel: (s, id) => (s.llmDeepSeekModel = id),
+			models: (s) => s.llmDeepSeekModels,
+			setModels: (s, ids) => (s.llmDeepSeekModels = ids),
+			pickerName: 'Model',
+			pickerDesc:
+				'Pick a DeepSeek model (e.g. deepseek-flash, deepseek-v4-pro).',
+			docLabel: 'DeepSeek models',
+			docUrl: DEEPSEEK_MODELS_DOC_URL,
+		},
+		maxTokens: {
+			key: 'llmDeepSeekMaxTokens',
+			get: (settings) => settings.llmDeepSeekMaxTokens,
+			set: (settings, value) => (settings.llmDeepSeekMaxTokens = value),
+		},
+	},
 	[ENGINE_IDS.LOCAL_WHISPER]: {
 		id: ENGINE_IDS.LOCAL_WHISPER,
-		label: 'Local whisper.cpp (desktop)',
+		label: EngineLabel.LocalWhisper,
 		// Runs on the user's machine: no account, no catalogue, no rate card,
 		// and a file it reads from disk rather than uploads.
 		pricingUrl: '',

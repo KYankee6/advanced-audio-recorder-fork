@@ -59,6 +59,8 @@ Each command answers with one line: the state it left behind, or why it did noth
 
 Transcription is a paid job, so the command opens the transcribe dialog in Obsidian and starts it there, where it reports progress and can be cancelled - the same thing [transcribe on save](transcription.md) does. The answer says the run was started, not that it finished.
 
+One session the command cannot start is one that records this computer's own output, whether that is **Include system audio** under [Audio input](settings-reference.md#audio-input) or a track whose **Track N source** is **System audio (this computer)**. The host grants that capture only in answer to a user action in a focused Obsidian window, and a command typed in a terminal is neither, so `advanced-audio-recorder:record` answers with the reason and starts nothing. Start such a recording from the ribbon icon, the command palette or a hotkey. A track recording a loopback **input device** has no such restriction and records from the command line like any microphone - see [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
+
 ---
 
 ## Switching the input device
@@ -66,6 +68,18 @@ Transcription is a paid job, so the command opens the transcribe dialog in Obsid
 You do not have to open the settings tab to change which microphone records. Run the **Select audio input device** command from the command palette (`Ctrl/Cmd + P`) and a quick-pick modal opens, listing every input the plugin detected. Choose one and it is saved to your settings **immediately** - a confirmation notice reports the device that is now selected, and the next recording uses it.
 
 This is the quickest way to switch mics between recordings - for example, moving from a laptop's built-in microphone to a headset before a meeting. The same choice is also available, alongside the sample rate, under [Audio input settings](settings-reference.md#audio-input).
+
+### Recording this computer's own output
+
+A recording that has to carry the other side of a call needs more than a microphone, and there are two ways to ask for it.
+
+The short one is **Include system audio**, the switch under [Audio input](settings-reference.md#audio-input) beside the input device. With it on, a recording captures two tracks - the microphone exactly as the rows around that switch describe it, and this computer's own output - and mixes them into one file, written as `<file prefix>-multitrack-<timestamp>.<ext>` the way any merged session is. Nothing else is configured: the second track has no device to pick, no filtering to choose and no place in the mix to set, because those answers are what the switch decides. Two mixed tracks are one file to write at the end, so automatic splitting has nothing to rotate and is skipped for such a session, with a notice saying so. Electron grants the machine's output on Windows only, and the switch says so where the build cannot; it is off on mobile, which cannot open two captures at once, and it stands down while multi-track recording is on.
+
+![The Include system audio switch turned on under Audio input, above the description of what the paired session records and of the platforms that grant the system output](images/settings-include-system-audio.png)
+
+The long one is a track of your own, through **Track N source**, which is where to go when the pairing's fixed answers are not the wanted ones: a session of three tracks rather than two, one file per track rather than a mix, or a level correction on the remote side. See [Multi-track recording](multi-track-recording.md).
+
+Either way this is the direct capture, which Electron grants on Windows alone. An input that carries the machine's output, such as a Stereo Mix device or a virtual cable, is marked `(system audio)` in both dropdowns on every platform, so it can be told apart from a microphone. Such an input exists only where the operating system or an installed virtual cable publishes one, and recording it is how a call's remote participants reach a recording everywhere else. See [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
 
 ---
 
@@ -100,10 +114,9 @@ The active recording duration is checked before the file is read, so long sessio
 
 ## The status bar while recording
 
-Once a session is active, the ribbon icon changes from a plain microphone to an active recording indicator, and the **status bar** (bottom-right of the Obsidian window) shows the live recording controls.
+Once a session is active, the ribbon microphone turns red and pulses, and the **status bar** (bottom-right of the Obsidian window) shows the live recording controls.
 
 ![Status bar showing Recording with Add marker, Pause, and Stop buttons](images/status-bar-recording.png)
-_Figure: The recording status bar with the live label, control buttons, stats, and input meter._
 
 The status bar shows a label and a row of icon buttons:
 
@@ -147,7 +160,6 @@ To drop a marker:
 If you always drop the same kind, two dedicated commands skip the kind selector: **Add bookmark at current recording position** and **Add chapter at current recording position**. They obey the same recording-or-paused gate and can each be bound to a hotkey, so a single keypress drops a pre-typed marker and only the name is left to fill in.
 
 ![Marker naming dialog with a name field and a bookmark/chapter kind selector](images/dialog-add-marker.png)
-_Figure: The naming dialog that opens when you add a marker while recording._
 
 Two details make this reliable:
 
@@ -197,7 +209,7 @@ For longer recordings the save can take a noticeable moment. The status bar show
 | 80%      | `Cleaning up...`      |
 | 100%     | `Saved`               |
 
-While saving is in progress the ribbon icon switches from the recording indicator to a **save** icon, then returns to the plain microphone once the file is written.
+While saving is in progress the ribbon icon switches to a **save** icon, then returns to the microphone, no longer red, once the file is written.
 
 A recording that is slow to save is expected behaviour for long captures, not an error. For multi-part recordings, see [Automatic splitting](#automatic-splitting); for the full list of output formats and how each is encoded, see [Formats](formats.md).
 
@@ -293,6 +305,7 @@ These settings shape the recording workflow. See the [settings reference](settin
 | **Sample rate**                      | Capture sample rate in Hz (default 44100).                                                              | [Audio input](settings-reference.md#audio-input)                                |
 | **Recording channels**               | Keep the device channel layout, or record mono (mix all channels, or keep only the left/right channel). | [Audio input](settings-reference.md#audio-input)                                |
 | **Recording format**                 | The output container/codec (default WebM); offline formats are labelled `(offline)`.                    | [Output format](settings-reference.md#output-format)                            |
+| **Bit depth**                        | How much of each sample a WAV recording keeps (default 16-bit integer); desktop capture only.           | [Output format](settings-reference.md#output-format)                            |
 | **Audio bitrate**                    | Compression quality for the recording (default 128 kbps).                                               | [Output format](settings-reference.md#output-format)                            |
 | **Save folder**                      | The vault folder recordings are written to (default vault root).                                        | [File storage](settings-reference.md#file-storage)                              |
 | **Save recordings near active file** | Writes the file beside the active note instead; takes priority over Save folder.                        | [File storage](settings-reference.md#file-storage)                              |

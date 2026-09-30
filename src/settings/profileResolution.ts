@@ -15,13 +15,13 @@
  */
 
 import type { AudioRecorderSettings } from './settingsSchema';
-import type { LlmTask } from '../transcription/llmPostProcess';
+import { LlmTask } from '../transcription/llmPostProcess';
 import {
 	findProfile,
 	profilesOfKind,
 	selectedProfile,
 	type Profile,
-	type ProfileKindId,
+	ProfileKindId,
 } from './profiles';
 import { parseDictionary } from '../transcription/dictionary';
 import {
@@ -31,11 +31,11 @@ import {
 } from '../speakers/participantRoster';
 
 /** The kind of profile holding the prompt for each post-processing task. */
-const PROMPT_KIND_OF_TASK: Record<LlmTask, ProfileKindId> = {
-	cleanup: 'llmCleanup',
-	summary: 'llmSummary',
-	custom: 'llmCustom',
-	translate: 'llmTranslate',
+export const PROMPT_KIND_OF_TASK: Record<LlmTask, ProfileKindId> = {
+	[LlmTask.Cleanup]: ProfileKindId.LlmCleanup,
+	[LlmTask.Summary]: ProfileKindId.LlmSummary,
+	[LlmTask.Custom]: ProfileKindId.LlmCustom,
+	[LlmTask.Translate]: ProfileKindId.LlmTranslate,
 };
 
 /**
@@ -73,7 +73,7 @@ export function resolveDictionaryTermList(
 	if (!settings.transcriptionAdvancedSettingsEnabled) {
 		return [];
 	}
-	return parseDictionary(selectedBody(settings, 'dictionary'));
+	return parseDictionary(selectedBody(settings, ProfileKindId.Dictionary));
 }
 
 /**
@@ -87,7 +87,7 @@ export function resolveDictionaryTermList(
 export function resolveChapterGuidance(
 	settings: AudioRecorderSettings,
 ): string {
-	return selectedBody(settings, 'chapterPrompt');
+	return selectedBody(settings, ProfileKindId.ChapterPrompt);
 }
 
 /**
@@ -107,6 +107,20 @@ export function resolveLlmPrompt(
 }
 
 /**
+ * Resolves the instruction a dictated quick note is rewritten with: the
+ * selected profile's body, or '' when none is selected or the stored id points
+ * at a removed profile. Unlike a post-processing task, '' here means the text
+ * is inserted as it was recognized, since quick notes ship no default prompt.
+ * @param settings - The active settings
+ * @returns The selected profile's instruction, or '' for none
+ */
+export function resolveQuickNotePrompt(
+	settings: AudioRecorderSettings,
+): string {
+	return selectedBody(settings, ProfileKindId.QuickNote).trim();
+}
+
+/**
  * The participant names a transcription run carries into the recording's
  * sidecar: those of the selected profile, or an empty list when none is
  * selected or the stored id points at a removed profile.
@@ -116,7 +130,9 @@ export function resolveLlmPrompt(
 export function resolveRunParticipants(
 	settings: AudioRecorderSettings,
 ): string[] {
-	return parseParticipantBody(selectedBody(settings, 'participants'));
+	return parseParticipantBody(
+		selectedBody(settings, ProfileKindId.Participants),
+	);
 }
 
 /**
@@ -131,7 +147,7 @@ export function participantsOf(
 	id: string,
 ): string[] {
 	const profile = findProfile(
-		profilesOfKind(settings.profiles, 'participants'),
+		profilesOfKind(settings.profiles, ProfileKindId.Participants),
 		id,
 	);
 	return profile ? parseParticipantBody(profile.body) : [];
@@ -156,7 +172,7 @@ export function addParticipantsToProfile(
 	names: readonly string[],
 ): Profile[] | undefined {
 	const target = findProfile(profiles, id);
-	if (!target || target.kind !== 'participants') {
+	if (!target || target.kind !== ProfileKindId.Participants) {
 		return undefined;
 	}
 	const current = parseParticipantBody(target.body);

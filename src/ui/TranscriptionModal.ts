@@ -1,7 +1,9 @@
 /**
  * Modal that configures and runs transcription for a single audio file.
- * The per-run options (engine, language, diarization, the participant profile
- * a diarized run stores with the recording, destination, file format, in-note
+ * Language, the participant profile and the destination are shown up front;
+ * every other option sits in a collapsed More options block. The per-run options
+ * (engine, language, diarization, the participant profile a diarized run
+ * stores with the recording, destination, file format, in-note
  * toggles, the advanced settings that reveal the dictionary and two-pass mode,
  * and LLM post-processing) default from settings and can be overridden here for
  * this run only - the saved settings are never mutated. Shows progress and allows cancellation; the detailed
@@ -30,6 +32,7 @@ import {
 	addToggle,
 	type SettingsSectionContext,
 } from '../settings/settingControls';
+import { ProfileTextSource } from '../settings/ProfileTextSource';
 import { formatTimecode } from '../utils/TimeUtils';
 import { readAudioMetadata } from '../utils/AudioFileAnalyzer';
 import {
@@ -40,6 +43,7 @@ import {
 	effectiveTranscriptDestination,
 	formatUsd,
 	isProviderAvailableOnPlatform,
+	languageNote,
 	providerSupportsDiarization,
 	wordTimestampsNote,
 	wordTimestampsSelectable,
@@ -47,22 +51,24 @@ import {
 	transcribeFile,
 	TranscriptionCancelledError,
 	type CancellationToken,
+	CostEstimateUnpricedReason,
 	type CostEstimate,
 	type CostEstimateLine,
 	type LlmTask,
 	type SessionCostTracker,
 	type TranscribeRunCost,
-	type TranscriptDestination,
-	type TranscriptFileFormat,
+	TranscriptDestination,
+	TranscriptFileFormat,
 	type Transcript,
 	type TranscriptOutputSidecar,
 } from '../transcription/api';
 import { CancellationSource } from '../utils/cancellation';
 import {
 	profilesOfKind,
+	selectedProfile,
 	selectedProfileId,
 	setSelectedProfileId,
-	type ProfileKindId,
+	ProfileKindId,
 } from '../settings/profiles';
 import type { SaveProgress } from '../types';
 
@@ -125,7 +131,7 @@ function formatCostLine(line: CostEstimateLine): string {
 	if (line.usd !== null) {
 		return `~${formatUsd(line.usd)}`;
 	}
-	return line.reason === 'no-duration'
+	return line.reason === CostEstimateUnpricedReason.NoDuration
 		? 'estimate unavailable (duration unreadable)'
 		: 'no built-in rate';
 }
@@ -150,6 +156,8 @@ export class TranscriptionModal extends PluginModal {
 	private runStartedAt = 0;
 	private progressFillEl: HTMLElement | null = null;
 	private configEl: HTMLElement | null = null;
+	/** Whether the More options block is expanded; kept across config re-renders. */
+	private advancedOpen = false;
 	/** Container for the pre-run estimate and the session total lines. */
 	private costEstimateEl: HTMLElement | null = null;
 	/** Live "cost so far" line while a multi-part run is in flight. */
@@ -224,8 +232,8 @@ export class TranscriptionModal extends PluginModal {
 		this.configEl = contentEl.createDiv({ cls: 'aar-transcribe-options' });
 		this.renderConfig();
 
-		// Pre-run cost estimate and session total; refreshed on every config
-		// re-render (the engine dropdown triggers one) and when the duration
+		// Pre-run cost estimate and session total; refreshed whenever a control
+		// changes a value, on every config re-render, and when the duration
 		// probe finishes. The probe is kicked off lazily from
 		// updateCostEstimate only when a priced line actually needs the
 		// duration, so a disabled estimate, a free local run, or an auto-run
@@ -309,6 +317,7 @@ export class TranscriptionModal extends PluginModal {
 		}
 		container.empty();
 		const s = this.runSettings;
+		const profileText = new ProfileTextSource(this.app.vault);
 		const ctx: SettingsSectionContext = {
 			containerEl: container,
 			settings: s,
@@ -320,9 +329,106 @@ export class TranscriptionModal extends PluginModal {
 			saveDebounced: () => {
 				/* no debounced persistence in the dialog */
 			},
+			// Every control here writes into the run snapshot the estimate is
+			// computed from, and the dialog persists nothing, so the two hooks
+			// that would otherwise be the refresh point are no-ops. Re-pricing
+			// therefore hangs off the one hook every control passes through,
+			// instead of a `rerender` flag each price-affecting control has to
+			// remember - which the LLM task and the two-pass toggle did not.
+			onValueChanged: () => {
+				this.updateCostEstimate();
+			},
 		};
 
+		const canDiarize = providerSupportsDiarization(s.transcriptionProvider);
+		// Whether speaker labels will actually be produced for this run; gates the
+		// Include speakers toggle below the same way it gates the toggle itself.
+		const diarizes = effectiveDiarize(
+			s.transcriptionProvider,
+			s.transcriptionDiarize,
+		);
+		addText(ctx, {
+			name: 'Language',
+			// The same sentence the settings tab shows, so one engine cannot be
+			// described two ways: on an engine that detects the language itself
+			// it says the request drops the code and that auto chapters still
+			// read it, which is also why the row is not disabled there.
+			desc: languageNote(s.transcriptionProvider),
+			get: () => s.transcriptionLanguage,
+			set: (v) => (s.transcriptionLanguage = v.trim() || 'auto'),
+		});
+		if (diarizes) {
+			// Only meaningful with diarization: the roster this profile fills is
+			// written alongside the speakers the run detects, and there are none
+			// without it.
+			const speakerProfiles = profilesOfKind(
+				s.profiles,
+				ProfileKindId.Participants,
+			);
+			// A stored id whose profile was removed reads as None here.
+			const selectedSpeakerProfileId = selectedProfileId(
+				s,
+				ProfileKindId.Participants,
+			);
+			addDropdown(ctx, {
+				name: 'Participant profile',
+				desc: profileText.describe(
+					'Names saved with this recording, so the Rename speakers dialog suggests them. Profiles are created there.',
+					selectedProfile(s, ProfileKindId.Participants),
+				),
+				options: [
+					{ value: '', label: 'None' },
+					...speakerProfiles.map((profile) => ({
+						value: profile.id,
+						label: profile.name,
+					})),
+				],
+				get: () => selectedSpeakerProfileId,
+				set: (v) => {
+					// Affects this run (runSettings clone); persist as the
+					// remembered choice for the next dialog and transcribe-on-save.
+					setSelectedProfileId(s, ProfileKindId.Participants, v);
+					void this.options.onProfileSelected?.(
+						ProfileKindId.Participants,
+						v,
+					);
+				},
+				// Re-render so the line naming the picked roster's text follows
+				// the pick.
+				rerender: true,
+			});
+		}
 		addDropdown(ctx, {
+			name: 'Destination',
+			options: TRANSCRIPT_DESTINATION_OPTIONS,
+			get: () => s.transcriptDestination,
+			set: (v) => (s.transcriptDestination = v as TranscriptDestination),
+			rerender: true,
+		});
+		// Everything past the three rows most runs touch sits in a collapsed
+		// native <details> block, so the dialog stays short enough to reach
+		// Transcribe without scrolling. Its open state survives the re-renders
+		// the controls inside trigger, and it opens by itself when the stored
+		// engine cannot run here, so the reason Transcribe is blocked is shown.
+		const advancedEl = container.createEl('details', {
+			cls: 'aar-transcribe-advanced',
+		});
+		advancedEl.open =
+			this.advancedOpen || !this.isSelectedEngineAvailable();
+		advancedEl.createEl('summary', {
+			cls: 'aar-transcribe-advanced-summary',
+			// Not "Advanced": that word already names the Advanced settings
+			// switch this block holds, which in turn reveals the two-pass mode.
+			text: 'More options',
+		});
+		advancedEl.addEventListener('toggle', () => {
+			this.advancedOpen = advancedEl.open;
+		});
+		const advancedCtx: SettingsSectionContext = {
+			...ctx,
+			containerEl: advancedEl,
+		};
+		addDropdown(advancedCtx, {
 			name: 'Engine',
 			// Explain the blocked run when the stored engine cannot execute
 			// here (a local whisper.cpp selection synced to mobile), so the
@@ -345,20 +451,7 @@ export class TranscriptionModal extends PluginModal {
 			// capabilities (enabled only when the engine can diarize).
 			rerender: true,
 		});
-		addText(ctx, {
-			name: 'Language',
-			desc: 'ISO code (e.g. en, ru, es) or "auto" to detect.',
-			get: () => s.transcriptionLanguage,
-			set: (v) => (s.transcriptionLanguage = v.trim() || 'auto'),
-		});
-		const canDiarize = providerSupportsDiarization(s.transcriptionProvider);
-		// Whether speaker labels will actually be produced for this run; gates the
-		// Include speakers toggle below the same way it gates the toggle itself.
-		const diarizes = effectiveDiarize(
-			s.transcriptionProvider,
-			s.transcriptionDiarize,
-		);
-		addToggle(ctx, {
+		addToggle(advancedCtx, {
 			name: 'Speaker diarization',
 			desc: canDiarize
 				? 'Request speaker labels (providers detect the speaker count automatically).'
@@ -376,36 +469,7 @@ export class TranscriptionModal extends PluginModal {
 			// without diarization there are no speaker labels to include.
 			rerender: true,
 		});
-		if (diarizes) {
-			// Only meaningful with diarization: the roster this profile fills is
-			// written alongside the speakers the run detects, and there are none
-			// without it.
-			const speakerProfiles = profilesOfKind(s.profiles, 'participants');
-			// A stored id whose profile was removed reads as None here.
-			const selectedSpeakerProfileId = selectedProfileId(
-				s,
-				'participants',
-			);
-			addDropdown(ctx, {
-				name: 'Participant profile',
-				desc: 'Names saved with this recording, so the Rename speakers dialog suggests them. Profiles are created there.',
-				options: [
-					{ value: '', label: 'None' },
-					...speakerProfiles.map((profile) => ({
-						value: profile.id,
-						label: profile.name,
-					})),
-				],
-				get: () => selectedSpeakerProfileId,
-				set: (v) => {
-					// Affects this run (runSettings clone); persist as the
-					// remembered choice for the next dialog and transcribe-on-save.
-					setSelectedProfileId(s, 'participants', v);
-					void this.options.onProfileSelected?.('participants', v);
-				},
-			});
-		}
-		addToggle(ctx, {
+		addToggle(advancedCtx, {
 			name: 'Word-level timestamps',
 			desc: wordTimestampsNote(s.transcriptionProvider),
 			// Reflect what this run will produce: a stored "off" reads as on
@@ -424,7 +488,7 @@ export class TranscriptionModal extends PluginModal {
 		// It reveals the dictionary term biasing and the two-pass mode; off keeps
 		// a single plain pass with no biasing. Defaults from the saved setting
 		// and, like every dialog control, never persists to plugin data.
-		addToggle(ctx, {
+		addToggle(advancedCtx, {
 			name: 'Advanced settings',
 			desc: 'Reveal the dictionary and the experimental two-pass mode for this run. Off keeps a single plain pass with no term biasing.',
 			get: () => s.transcriptionAdvancedSettingsEnabled,
@@ -433,17 +497,23 @@ export class TranscriptionModal extends PluginModal {
 			rerender: true,
 		});
 		if (s.transcriptionAdvancedSettingsEnabled) {
-			const profiles = profilesOfKind(s.profiles, 'dictionary');
+			const profiles = profilesOfKind(
+				s.profiles,
+				ProfileKindId.Dictionary,
+			);
 			// A stored id whose profile was removed reads as None here.
 			const selectedDictionaryProfileId = selectedProfileId(
 				s,
-				'dictionary',
+				ProfileKindId.Dictionary,
 			);
-			addDropdown(ctx, {
+			addDropdown(advancedCtx, {
 				name: 'Dictionary',
-				desc: providerSupportsDictionary(s.transcriptionProvider)
-					? 'Bias recognition toward a named glossary, or None.'
-					: 'The selected engine cannot bias recognition; the dictionary is ignored.',
+				desc: profileText.describe(
+					providerSupportsDictionary(s.transcriptionProvider)
+						? 'Bias recognition toward a named glossary, or None.'
+						: 'The selected engine cannot bias recognition; the dictionary is ignored.',
+					selectedProfile(s, ProfileKindId.Dictionary),
+				),
 				options: [
 					{ value: '', label: 'None' },
 					...profiles.map((profile) => ({
@@ -455,9 +525,15 @@ export class TranscriptionModal extends PluginModal {
 				set: (v) => {
 					// Affects this run (runSettings clone); persist as the
 					// remembered choice for the next dialog and transcribe-on-save.
-					setSelectedProfileId(s, 'dictionary', v);
-					void this.options.onProfileSelected?.('dictionary', v);
+					setSelectedProfileId(s, ProfileKindId.Dictionary, v);
+					void this.options.onProfileSelected?.(
+						ProfileKindId.Dictionary,
+						v,
+					);
 				},
+				// Re-render so the line naming the picked glossary's text
+				// follows the pick.
+				rerender: true,
 			});
 
 			// Advanced two-pass mode: the sub-toggle under the advanced settings,
@@ -465,7 +541,7 @@ export class TranscriptionModal extends PluginModal {
 			// run can be enabled (or skipped) for this file. It reuses the
 			// Dictionary terms picked above; the length safeguard stays in the
 			// settings tab, so only the on/off decision is per-run here.
-			addToggle(ctx, {
+			addToggle(advancedCtx, {
 				name: 'Advanced two-pass transcription',
 				desc: 'Transcribe twice and bias the second pass with LLM-generated context (names, jargon, English acronyms), reusing the Dictionary terms above. Roughly 2x the engine cost plus LLM calls. The length safeguard stays in settings.',
 				get: () => s.transcriptionAdvancedEnabled,
@@ -473,15 +549,8 @@ export class TranscriptionModal extends PluginModal {
 			});
 		}
 
-		addDropdown(ctx, {
-			name: 'Destination',
-			options: TRANSCRIPT_DESTINATION_OPTIONS,
-			get: () => s.transcriptDestination,
-			set: (v) => (s.transcriptDestination = v as TranscriptDestination),
-			rerender: true,
-		});
-		if (s.transcriptDestination !== 'note') {
-			addDropdown(ctx, {
+		if (s.transcriptDestination !== TranscriptDestination.Note) {
+			addDropdown(advancedCtx, {
 				name: 'File format',
 				options: TRANSCRIPT_FILE_FORMAT_OPTIONS,
 				get: () => s.transcriptFileFormat,
@@ -493,15 +562,15 @@ export class TranscriptionModal extends PluginModal {
 		// rendered into the note (note/both). For file/link only the sidecar
 		// file is produced, so these toggles would have no effect.
 		if (
-			s.transcriptDestination === 'note' ||
-			s.transcriptDestination === 'both'
+			s.transcriptDestination === TranscriptDestination.Note ||
+			s.transcriptDestination === TranscriptDestination.Both
 		) {
-			addToggle(ctx, {
+			addToggle(advancedCtx, {
 				name: 'Include timestamps',
 				get: () => s.transcriptIncludeTimestamps,
 				set: (v) => (s.transcriptIncludeTimestamps = v),
 			});
-			addToggle(ctx, {
+			addToggle(advancedCtx, {
 				name: 'Include speakers',
 				desc: diarizes
 					? undefined
@@ -512,7 +581,7 @@ export class TranscriptionModal extends PluginModal {
 			});
 		}
 
-		addToggle(ctx, {
+		addToggle(advancedCtx, {
 			name: 'LLM post-processing',
 			desc: 'Clean up, summarize, or apply a custom instruction with an LLM.',
 			get: () => s.llmPostProcessEnabled,
@@ -523,7 +592,7 @@ export class TranscriptionModal extends PluginModal {
 			// Only the task is per-run here; the LLM provider, endpoint, key,
 			// and model stay in settings (a key cannot be entered safely in a
 			// transient dialog), so switching providers belongs in the tab.
-			addDropdown(ctx, {
+			addDropdown(advancedCtx, {
 				name: 'LLM task',
 				options: LLM_TASK_OPTIONS,
 				get: () => s.llmPostProcessTask,
@@ -531,7 +600,7 @@ export class TranscriptionModal extends PluginModal {
 			});
 		}
 		if (s.transcriptionAutoChaptersEnabled) {
-			addToggle(ctx, {
+			addToggle(advancedCtx, {
 				name: 'Generate chapters',
 				desc: 'After transcribing, ask the LLM to add titled chapters to the enhanced player.',
 				get: () => s.transcriptionAutoChaptersOnTranscribe,
@@ -543,17 +612,20 @@ export class TranscriptionModal extends PluginModal {
 			if (s.transcriptionAutoChaptersOnTranscribe) {
 				const chapterProfiles = profilesOfKind(
 					s.profiles,
-					'chapterPrompt',
+					ProfileKindId.ChapterPrompt,
 				);
 				// A stored id whose profile was removed reads as None here.
 				const selectedChapterProfileId = selectedProfileId(
 					s,
-					'chapterPrompt',
+					ProfileKindId.ChapterPrompt,
 				);
-				// Compact one-line picker (no description) so the section does
-				// not grow tall; the guidance profile steers the chaptering.
-				addDropdown(ctx, {
+				// Compact picker whose only description is the line naming the
+				// picked guidance's text, so the section does not grow tall.
+				addDropdown(advancedCtx, {
 					name: 'Chapter profile',
+					desc: profileText.status(
+						selectedProfile(s, ProfileKindId.ChapterPrompt),
+					),
 					options: [
 						{ value: '', label: 'None (base prompt)' },
 						...chapterProfiles.map((profile) => ({
@@ -565,20 +637,22 @@ export class TranscriptionModal extends PluginModal {
 					set: (v) => {
 						// Affects this run and, persisted, the after-transcription
 						// generation which reads the plugin settings.
-						setSelectedProfileId(s, 'chapterPrompt', v);
+						setSelectedProfileId(s, ProfileKindId.ChapterPrompt, v);
 						void this.options.onProfileSelected?.(
-							'chapterPrompt',
+							ProfileKindId.ChapterPrompt,
 							v,
 						);
 					},
+					rerender: true,
 				});
 			}
 		}
 		// Re-evaluated on every rerender (the Engine dropdown triggers one),
 		// so the Transcribe button tracks the freshly selected engine.
 		this.refreshRunButtonState();
-		// The estimate depends on the engine/model picked for this run, so it
-		// tracks the config re-render too.
+		// The estimate is computed from the whole snapshot, so it is drawn on
+		// the first render and on any re-render; a control that changes a value
+		// without reshaping the config refreshes it through onValueChanged.
 		this.updateCostEstimate();
 	}
 
@@ -680,9 +754,13 @@ export class TranscriptionModal extends PluginModal {
 			const suffix = estimate.hasUnpriced
 				? ' (excludes unpriced parts)'
 				: '';
+			// Named as this run's forecast because it sits directly above the
+			// session total, which is a different quantity: an unlabelled
+			// "estimated total" beside an accumulated one reads as a broken
+			// calculation rather than as two answers to two questions.
 			el.createDiv({
 				cls: 'aar-transcribe-cost-total',
-				text: `Estimated total: ~${formatUsd(estimate.totalUsd)}${suffix}`,
+				text: `Estimated total for this run: ~${formatUsd(estimate.totalUsd)}${suffix}`,
 			});
 		}
 		// Every line past the transcription one is an LLM step (context agents,
@@ -746,7 +824,11 @@ export class TranscriptionModal extends PluginModal {
 		note.createSpan({ text: '.' });
 	}
 
-	/** Renders the running per-session spending line under the estimate. */
+	/**
+	 * Renders the running per-session spending, set under its own heading so it
+	 * reads as a second figure rather than as the tail of the estimate above it:
+	 * the two cover different spans and are never meant to be subtracted.
+	 */
 	private renderSessionTotal(el: HTMLElement): void {
 		const tracker = this.options.costTracker;
 		if (!tracker?.hasEntries()) {
@@ -770,8 +852,16 @@ export class TranscriptionModal extends PluginModal {
 		}
 		const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : '';
 		el.createDiv({
+			cls: 'aar-transcribe-cost-session-title',
+			text: 'Session spending',
+		});
+		el.createDiv({
 			cls: 'aar-transcribe-cost-session',
 			text: `Spent this session: ~${formatUsd(tracker.totalUsd())}${suffix}`,
+		});
+		el.createDiv({
+			cls: 'aar-transcribe-cost-note',
+			text: 'Everything priced since Obsidian started; this run is not counted yet.',
 		});
 	}
 

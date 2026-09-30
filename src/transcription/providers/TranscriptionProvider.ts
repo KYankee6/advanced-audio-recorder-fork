@@ -7,6 +7,7 @@
  * @module transcription/providers/TranscriptionProvider
  */
 
+import type { EngineLabel } from '../../providers/providers';
 import type { TranscriptionProviderId } from '../../settings/settingsSchema';
 import type { WhisperResult } from './whisperResponse';
 
@@ -88,7 +89,16 @@ export interface AudioPayload {
  * flat keyword list. A property of the engine's API, so it lives with the rest
  * of its capabilities rather than as a hard-coded id check at the call site.
  */
-export type AdvancedBiasChannel = 'prompt' | 'keyterm';
+export const AdvancedBiasChannel = {
+	/** A Whisper-style prompt sentence the terms are woven into. */
+	Prompt: 'prompt',
+	/** A flat keyword list sent alongside the audio. */
+	Keyterm: 'keyterm',
+} as const;
+
+/** One biasing channel (derived from {@link AdvancedBiasChannel}). */
+export type AdvancedBiasChannel =
+	(typeof AdvancedBiasChannel)[keyof typeof AdvancedBiasChannel];
 
 /**
  * What an engine does with a request for per-word timing.
@@ -99,7 +109,18 @@ export type AdvancedBiasChannel = 'prompt' | 'keyterm';
  * whisper.cpp return segment-level timing and nothing finer. A switch offered
  * on all four told the user nothing about which of those they would get.
  */
-export type WordTimestampSupport = 'requested' | 'always' | 'none';
+export const WordTimestampSupport = {
+	/** The request carries the granularity and the engine honours it. */
+	Requested: 'requested',
+	/** Per-word timing comes back whether it was asked for or not. */
+	Always: 'always',
+	/** Segment-level timing only, with nothing finer available. */
+	None: 'none',
+} as const;
+
+/** What an engine does with the request (derived from {@link WordTimestampSupport}). */
+export type WordTimestampSupport =
+	(typeof WordTimestampSupport)[keyof typeof WordTimestampSupport];
 
 /**
  * What a provider can accept in a single request. The service uses these
@@ -163,6 +184,16 @@ export interface ProviderCapabilities {
 	 * no such operation must not be asked for one.
 	 */
 	supportsSpeechTranslation: boolean;
+	/**
+	 * Whether the engine reads the configured language hint. Every engine did
+	 * until Voxtral, whose `timestamp_granularities` is documented as
+	 * incompatible with `language` - and since the granularity is what makes the
+	 * response carry segments at all, it is the hint that has to go. Gates the
+	 * language row the way {@link supportsDiarization} gates the diarization
+	 * toggle: a value that cannot reach the request is never sent, and the row
+	 * says so rather than looking as though it applied.
+	 */
+	readsLanguageHint: boolean;
 }
 
 /** A provider that transcribes a single audio payload. */
@@ -173,8 +204,8 @@ export interface TranscriptionProvider {
 	 * (and therefore the engine registry) do not know about.
 	 */
 	readonly id: TranscriptionProviderId;
-	/** Human-readable label. */
-	readonly label: string;
+	/** Human-readable label, one of the engine names. */
+	readonly label: EngineLabel;
 	/** Whether the provider makes network calls (affects availability). */
 	readonly requiresNetwork: boolean;
 	/** What the provider accepts in a single request. */

@@ -18,6 +18,7 @@
 import {
 	App,
 	DropdownComponent,
+	Notice,
 	PluginSettingTab,
 	Setting,
 	TFolder,
@@ -26,7 +27,7 @@ import {
 	requireApiVersion,
 	setIcon,
 } from 'obsidian';
-import type { Plugin } from 'obsidian';
+import type { Plugin, TFile } from 'obsidian';
 import type { SettingDefinitionItem } from 'obsidian';
 import {
 	createSettingsRenderMode,
@@ -34,6 +35,7 @@ import {
 } from './settingsRenderMode';
 import {
 	CONTROL_WRITE_EFFECTS,
+	LAYOUT_TRACK_FIELDS,
 	SETTINGS_TAB_CLASS,
 	buildSettingsDefinitions,
 	collectDebouncedControlKeys,
@@ -44,25 +46,37 @@ import {
 	type ProfileCatalogue,
 } from './settingsDefinitions';
 import { LegacySettingsRenderer } from './legacySettingsRenderer';
-import type { AudioRecorderSettings } from './settingsSchema';
+import {
+	TrackProcessingMode,
+	TrackSourceKind,
+	normalizeTrackProcessingMode,
+	normalizeTrackSourceKind,
+	type AudioRecorderSettings,
+} from './settingsSchema';
 import {
 	getSupportedSampleRates,
 	buildMimeType,
+	effectiveBitrate,
 	listFormatAvailability,
 	resolveEffectiveOutputFormat,
 	type FormatAvailabilityEntry,
 } from '../audio/AudioCapabilityDetector';
 import { AUDIO_FORMAT_IDS } from '../audio/formatRegistry';
+import { recordingBitrateFormat } from '../audio/AudioFormatConverter';
 import { isOfflineEncodingSupported } from '../audio/AudioEncoder';
-import { CHANNEL_MODE_SOURCE, normalizeChannelMode } from '../audio/downmix';
+import { ChannelMode, normalizeChannelMode } from '../audio/downmix';
+import { normalizePcmSampleFormat } from '../audio/pcm';
+import { PCM_SAMPLE_FORMAT_LABELS } from './labels';
 import {
 	audioDeviceApi,
 	channelSelectionAvailable,
+	deviceOptionLabel,
 	getAudioInputDeviceSnapshot,
+	recordingEncodingFor,
 	type AudioInputDeviceSnapshot,
 } from '../recording/AudioStreamHandler';
 import { getEncoderDescription } from '../ui/formatDescriptions';
-import { TestRecorder } from '../recording/TestRecorder';
+import { MemoryRecorder } from '../recording/MemoryRecorder';
 import { TextInputSuggest } from '../ui/TextInputSuggest';
 import { DOCS_URL, FORMAT_WAV } from '../constants';
 import { SystemDiagnostics } from '../diagnostics/SystemDiagnostics';
@@ -87,8 +101,14 @@ import {
 	type ProfileKindId,
 } from './profiles';
 import { PROFILE_KINDS, type ProfileKind } from './profileKinds';
+import { ProfileTextChoice, ProfileTextSource } from './ProfileTextSource';
+import { appendTextToNote, readNoteText } from './ProfileNoteStore';
+import { ConfirmModal } from '../ui/ConfirmModal';
 import { ProfileNameModal } from '../ui/ProfileNameModal';
-import { closeSettingsPage } from '../obsidian/settingsNavigation';
+import {
+	closeSettings,
+	closeSettingsPage,
+} from '../obsidian/settingsNavigation';
 import { ENGINES, type EngineId } from '../providers/providers';
 import {
 	applyEngineSettingsField,
@@ -97,8 +117,13 @@ import {
 	type EngineSettingsStore,
 } from '../providers/engineSettings';
 import { ModelIdModal } from '../ui/ModelIdModal';
+import { fillBitrateDropdown } from './settingControls';
 import type { SettingsSectionContext } from './settingControls';
-import { isMultiTrackCaptureSupported } from '../platform/capabilities';
+import { BITRATE_ROW_DESC } from './sections/outputFormatSection';
+import {
+	isMultiTrackCaptureSupported,
+	isPcmWavCaptureSupported,
+} from '../platform/capabilities';
 import { effectiveWordTimestamps } from '../transcription/providers/capabilities';
 
 /** Debounce delay for saving text settings, in milliseconds. */
@@ -126,7 +151,7 @@ const EMPTY_DEVICE_SNAPSHOT: AudioInputDeviceSnapshot = {
  */
 export class AudioRecorderSettingTab extends PluginSettingTab {
 	plugin: AudioRecorderPluginInterface;
-	private readonly testRecorder = new TestRecorder();
+	private readonly testRecorder = new MemoryRecorder();
 	private testAudioElement: HTMLAudioElement | null = null;
 	/**
 	 * Device-change listener active while the settings tab is open.
@@ -193,6 +218,18 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 				this.getFolderOptions(),
 			);
 		},
+		// The same for the file control, narrowed by the filter it declares.
+		attachFileSuggest: (
+			inputEl: HTMLInputElement,
+			filter?: (file: TFile) => boolean,
+		): void => {
+			new TextInputSuggest(this.app, inputEl, () =>
+				this.app.vault
+					.getFiles()
+					.filter((file) => filter?.(file) ?? true)
+					.map((file) => file.path),
+			);
+		},
 	});
 
 	/**
@@ -208,6 +245,25 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	 * carries names the field here and the profile by id.
 	 */
 	private readonly profileAccess = new Map<string, ProfileKindId>();
+
+	/**
+	 * Base control keys addressing the note a profile's body is read from,
+	 * resolved to the profile the same way a body key is.
+	 */
+	private readonly profileNotes = new Map<string, ProfileKindId>();
+
+	/**
+	 * Base control keys addressing a profile's Source row, resolved to the
+	 * profile the same way a body key is.
+	 */
+	private readonly profileChoices = new Map<string, ProfileKindId>();
+
+	/**
+	 * Where each profile's text comes from, and what its Source row is set to.
+	 * One for the tab, because a switch to a note that is not picked yet is
+	 * state of these pages until the settings close.
+	 */
+	private readonly profileText = new ProfileTextSource(this.app.vault);
 
 	/**
 	 * Base control keys addressing whether a profile is the selected one. The
@@ -262,6 +318,9 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 				renderFormatRow: (setting): void => {
 					this.renderFormatRow(setting);
 				},
+				renderBitrateRow: (setting): void => {
+					this.renderBitrateRow(setting);
+				},
 				renderSummaryRow: (setting): void => {
 					this.renderSummaryRow(setting);
 				},
@@ -286,8 +345,7 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 				inputs: Object.fromEntries(
 					this.deviceSnapshot.devices.map((device) => [
 						device.deviceId,
-						device.label ||
-							`Audio device ${device.deviceId.substring(0, 8)}`,
+						deviceOptionLabel(device),
 					]),
 				),
 				channelSelectable: (deviceId): boolean => {
@@ -367,12 +425,22 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	 * @returns The stored value
 	 */
 	override getControlValue(key: string): unknown {
-		const field = this.profileFieldFor(key);
+		const field = this.profileFieldFor(key, this.profileAccess);
 		if (field) {
 			// A profile deleted while its page was open leaves the controls of
 			// that page standing until the page is torn down; an empty body is
 			// what they read then.
 			return field.profile?.body ?? '';
+		}
+		const source = this.profileFieldFor(key, this.profileNotes);
+		if (source) {
+			return source.profile?.sourcePath ?? '';
+		}
+		const choice = this.profileFieldFor(key, this.profileChoices);
+		if (choice) {
+			return choice.profile
+				? this.profileText.choice(choice.profile)
+				: ProfileTextChoice.Typed;
 		}
 		const selection = this.profileSelectionFor(key);
 		if (selection) {
@@ -397,7 +465,13 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 				return source?.deviceId ?? '';
 			}
 			if (track.field === 'channelMode') {
-				return source?.channelMode ?? CHANNEL_MODE_SOURCE;
+				return source?.channelMode ?? ChannelMode.Source;
+			}
+			if (track.field === 'processing') {
+				return source?.processing ?? TrackProcessingMode.Global;
+			}
+			if (track.field === 'kind') {
+				return source?.kind ?? TrackSourceKind.InputDevice;
 			}
 			// A track placed nowhere in particular sits at the centre, at the
 			// level it was captured at.
@@ -409,8 +483,10 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		// A feature switched on where the platform cannot honour it reads as
 		// off, so the control never claims a result this device cannot give.
 		// The stored value is left alone, so the setting survives a sync back
-		// to a device that can.
-		if (key === 'enableMultiTrack') {
+		// to a device that can. The system-audio pairing answers here for the
+		// same reason and to the same fact: it opens two captures at once,
+		// which is the ability the multi-track switch needs as well.
+		if (key === 'enableMultiTrack' || key === 'includeSystemAudio') {
 			return stored === true && isMultiTrackCaptureSupported();
 		}
 		// The same rule with an engine in the platform's place, and the row
@@ -448,7 +524,7 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		key: string,
 		value: unknown,
 	): void | Promise<void> {
-		const field = this.profileFieldFor(key);
+		const field = this.profileFieldFor(key, this.profileAccess);
 		if (field) {
 			if (field.profile) {
 				field.profile.body = String(value);
@@ -457,6 +533,38 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 			// is live in memory either way, only the write to disk waits.
 			this.saveTextSettingDebounced();
 			return;
+		}
+		const source = this.profileFieldFor(key, this.profileNotes);
+		if (source) {
+			return source.profile
+				? this.bindProfileNote(source.profile, String(value))
+				: this.commit();
+		}
+		const choice = this.profileFieldFor(key, this.profileChoices);
+		if (choice) {
+			const chosen =
+				value === ProfileTextChoice.Note
+					? ProfileTextChoice.Note
+					: ProfileTextChoice.Typed;
+			const note =
+				choice.profile && chosen === ProfileTextChoice.Typed
+					? this.profileText.note(choice.profile)
+					: null;
+			if (choice.profile && note) {
+				return this.detachProfileNote(choice.profile, note);
+			}
+			if (
+				choice.profile &&
+				this.profileText.choose(choice.profile, chosen)
+			) {
+				return this.commit();
+			}
+			// Nothing stored changed, but the page trades its fields and its
+			// Source line. Drawn after this write returns, as every other
+			// redraw is, so the renderer finishes the change it is handling.
+			return Promise.resolve().then(() => {
+				this.rerender();
+			});
 		}
 		const selection = this.profileSelectionFor(key);
 		if (selection) {
@@ -485,7 +593,14 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		const track = parseTrackControlKey(key);
 		if (track) {
 			this.writeTrackSource(track.track, track.field, value);
-			return this.plugin.saveSettings();
+			// The rows of the Output format section are built from the channel
+			// layout the session will have, which a track's own fields move as
+			// surely as the three keys marked reshapesTree do. This branch
+			// returns before the effects table is consulted, so the same
+			// rebuild is asked for here.
+			return LAYOUT_TRACK_FIELDS.has(track.field)
+				? this.commit()
+				: this.plugin.saveSettings();
 		}
 		const effect = CONTROL_WRITE_EFFECTS[key];
 		const settings = this.plugin.settings as unknown as Record<
@@ -523,7 +638,15 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	private getCompressionDescription(format: string): string {
 		const encoder = getEncoderDescription(format);
 		if (format === FORMAT_WAV) {
-			return `Uncompressed WAV (larger size). Encoder: ${encoder}.`;
+			// The width is named only where the capture is what decides it.
+			// Where WAV goes through a compressed intermediate, the encoder
+			// states the width and the setting above has no say in it, so
+			// reporting the setting's value here would be a claim about the
+			// file that the file does not honour.
+			const depth = isPcmWavCaptureSupported()
+				? ` at ${PCM_SAMPLE_FORMAT_LABELS[normalizePcmSampleFormat(this.plugin.settings.recordingBitDepth)]}`
+				: '';
+			return `Uncompressed WAV${depth} (larger size). Encoder: ${encoder}.`;
 		}
 		if (
 			isOfflineEncodingSupported(format) &&
@@ -555,18 +678,20 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	}
 
 	/**
-	 * The profile whose body a control key addresses. The key names the kind
+	 * The profile whose field a control key addresses. The key names the kind
 	 * the field belongs to and the profile it belongs to, so a row on one
 	 * profile's page can never write to another's.
 	 * @param key - The control key to resolve
+	 * @param access - Base keys of the field being asked about, by kind
 	 * @returns The profile, or undefined for any other key. The `profile` is
 	 * undefined when the key addresses a kind that no longer holds this id.
 	 */
 	private profileFieldFor(
 		key: string,
+		access: ReadonlyMap<string, ProfileKindId>,
 	): { profile: Profile | undefined } | undefined {
 		const parsed = parseProfileControlKey(key);
-		const kind = parsed && this.profileAccess.get(parsed.base);
+		const kind = parsed && access.get(parsed.base);
 		if (!parsed || !kind) {
 			return undefined;
 		}
@@ -594,7 +719,9 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	/**
 	 * Writes one field of a track's audio source. The sources live in a Map
 	 * keyed by track number, so a control key addresses an entry rather than a
-	 * settings property; clearing the device drops the entry entirely.
+	 * settings property; a device track left without a device drops the entry
+	 * entirely, whether the device was cleared or the source kind moved off
+	 * the system output.
 	 * @param track - The track number the control belongs to
 	 * @param field - Which half of the source the control writes
 	 * @param value - The value the control produced
@@ -606,6 +733,33 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	): void {
 		const sources = this.plugin.settings.trackAudioSources;
 		const current = sources.get(track);
+		if (field === 'kind') {
+			// The one field that configures a track by itself: choosing the
+			// system output is the whole configuration of such a track, and
+			// there is no device to bind it to.
+			const kind = normalizeTrackSourceKind(value);
+			if (kind === TrackSourceKind.InputDevice && !current?.deviceId) {
+				// A device track without a device is the unconfigured state,
+				// and an unconfigured track has no entry - the same rule the
+				// device dropdown applies when it is cleared. Written anyway,
+				// the entry is one capture skips, the settings validator
+				// refuses, and data.json carries for good.
+				sources.delete(track);
+				return;
+			}
+			// The track it already was, or the empty one the source row is
+			// allowed to bring into being on its own. Said as one fallback
+			// rather than as a field-by-field default ahead of a spread,
+			// which reads as two assignments the spread then discards.
+			sources.set(track, {
+				...(current ?? {
+					deviceId: '',
+					channelMode: ChannelMode.Source,
+				}),
+				kind,
+			});
+			return;
+		}
 		if (field !== 'deviceId') {
 			if (!current) {
 				// No device on this track: there is nothing to bind a layout
@@ -614,9 +768,14 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 			}
 			sources.set(track, {
 				...current,
+				// Every remaining field but one holds a number; the two that
+				// hold a named value are coerced by their own normalizer, so
+				// a hand-edited or stale value cannot reach the capture.
 				...(field === 'channelMode'
 					? { channelMode: normalizeChannelMode(value) }
-					: { [field]: Number(value) }),
+					: field === 'processing'
+						? { processing: normalizeTrackProcessingMode(value) }
+						: { [field]: Number(value) }),
 			});
 			return;
 		}
@@ -630,7 +789,7 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		sources.set(track, {
 			...current,
 			deviceId,
-			channelMode: current?.channelMode ?? CHANNEL_MODE_SOURCE,
+			channelMode: current?.channelMode ?? ChannelMode.Source,
 		});
 	}
 
@@ -683,6 +842,8 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		const ofKind = (): Profile[] =>
 			profilesOfKind(this.plugin.settings.profiles, kindId);
 		this.profileAccess.set(kind.bodyKey, kindId);
+		this.profileNotes.set(kind.noteKey, kindId);
+		this.profileChoices.set(kind.choiceKey, kindId);
 		this.profileSelections.set(kind.selectionKey, kindId);
 		const rejection = (id: string, name: string): string | undefined =>
 			profileNameRejection(
@@ -701,15 +862,51 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 			selectionDesc: kind.selectionDesc,
 			selectedId: (settings) => selectedProfileId(settings, kindId),
 			selectionKey: kind.selectionKey,
+			choiceKey: kind.choiceKey,
 			bodyKey: kind.bodyKey,
+			noteKey: kind.noteKey,
+			sourcePath: (id) => findProfile(ofKind(), id)?.sourcePath ?? '',
+			readsNote: (id) => {
+				const profile = findProfile(ofKind(), id);
+				return (
+					profile !== undefined &&
+					this.profileText.choice(profile) === ProfileTextChoice.Note
+				);
+			},
+			sourceRejection: (path) =>
+				path === '' ||
+				this.app.vault.getFileByPath(path)?.extension === 'md'
+					? undefined
+					: 'No note at this path.',
+			openSource: (id): void => {
+				const profile = findProfile(ofKind(), id);
+				if (profile?.sourcePath === undefined) {
+					return;
+				}
+				const note = this.profileText.note(profile);
+				if (!note) {
+					new Notice(
+						`${this.profileText.missingNote(profile.name, profile.sourcePath)}.`,
+					);
+					return;
+				}
+				closeSettings(this.app);
+				// Opened as the file the path resolves to. As link text, a '#',
+				// '^' or '|' in the note's name would be read as link syntax, and
+				// a link that resolves to nothing creates an empty note.
+				void this.app.workspace.getLeaf('tab').openFile(note);
+			},
+			// A note gone from the vault leaves the body it was last read into,
+			// and the entry and the page say which text that is.
 			entries: (settings) =>
 				profilesOfKind(settings.profiles, kindId).map((profile) => ({
 					id: profile.id,
 					name: profile.name,
-					summary:
-						profile.id === selectedProfileId(settings, kindId)
-							? `In use, ${kind.summary(profile)}`
-							: kind.summary(profile),
+					summary: this.profileText.summary(
+						profile,
+						profile.id === selectedProfileId(settings, kindId),
+					),
+					status: this.profileText.status(profile),
 				})),
 			visible: kind.visible,
 			add: (): void => {
@@ -797,6 +994,123 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 			() => this.plugin.settings,
 			() => this.commit(),
 		);
+	}
+
+	/**
+	 * Points a profile at the note its Note row names, and saves. The save reads
+	 * the note into the body, and the tree is read again because the page trades
+	 * its editor for the note and the entry counts what the note holds.
+	 *
+	 * A note whose text would take the place of text typed for the profile is
+	 * asked about first, because that text exists nowhere else once the note is
+	 * read. Nothing is stored while the question is open, and nothing for a note
+	 * that cannot be read, since its text cannot be weighed against the typed
+	 * text.
+	 * @param profile - The profile whose Note row was edited
+	 * @param path - The note's vault path, or '' when the row was emptied
+	 * @returns Resolves once the change is saved, or once the question is open
+	 */
+	private async bindProfileNote(
+		profile: Profile,
+		path: string,
+	): Promise<void> {
+		const note = path === '' ? null : this.app.vault.getFileByPath(path);
+		const noteText =
+			note === null
+				? ''
+				: await this.readRowNote(note, 'so it was not picked');
+		if (noteText === null) {
+			// The field holds the path just picked. Drawn again, the page
+			// holds what is stored.
+			this.rerender();
+			return;
+		}
+		const question =
+			note === null
+				? null
+				: this.profileText.typedTextQuestion(profile, path, noteText);
+		if (note === null || question === null) {
+			this.profileText.bindNote(profile, path);
+			return this.commit();
+		}
+		// The field holds the path just picked. Drawn again, the page holds
+		// what is stored, which is what stays when the question is cancelled.
+		this.rerender();
+		new ConfirmModal(this.app, {
+			title: question.title,
+			message: question.message,
+			confirmText: question.confirmText,
+			onConfirm: () => {
+				const moved = question.moveIntoNote
+					? appendTextToNote(this.app.vault, note, profile.body)
+					: Promise.resolve();
+				void moved.then(
+					() => {
+						this.profileText.bindNote(profile, path);
+						return this.commit();
+					},
+					(error: unknown) => {
+						// Pointed at the note without the text, the profile
+						// would lose it, so it stays as it is.
+						const message =
+							error instanceof Error
+								? error.message
+								: String(error);
+						new Notice(
+							`The typed text was not added to ${path}: ${message}`,
+						);
+					},
+				);
+			},
+		}).open();
+	}
+
+	/**
+	 * Detaches a profile from its note on a choice of typed text, and saves.
+	 * The text the note holds becomes the typed text, so the note is read now:
+	 * the body holds the text of the last vault event, which trails an edit the
+	 * editor has not saved yet. A note that cannot be read leaves that text.
+	 * @param profile - The profile whose Source row was set to typed text
+	 * @param note - The note the profile is read from
+	 * @returns Resolves once the change is saved
+	 */
+	private async detachProfileNote(
+		profile: Profile,
+		note: TFile,
+	): Promise<void> {
+		const text = await this.readRowNote(
+			note,
+			'so the typed text is the text last read from it',
+		);
+		if (text !== null) {
+			profile.body = text;
+		}
+		this.profileText.choose(profile, ProfileTextChoice.Typed);
+		return this.commit();
+	}
+
+	/**
+	 * The text of a note a profile row is about to act on, read as it stands
+	 * now. A note that cannot be read is reported in a notice finished with
+	 * what that means for the row.
+	 * @param note - The note to read
+	 * @param consequence - What the failed read means, e.g. "so it was not picked"
+	 * @returns The note's text below its frontmatter, or null when unread
+	 */
+	private async readRowNote(
+		note: TFile,
+		consequence: string,
+	): Promise<string | null> {
+		try {
+			return await readNoteText(this.app, note);
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : String(error);
+			new Notice(
+				`${note.path} could not be read, ${consequence}: ${message}`,
+			);
+			return null;
+		}
 	}
 
 	/**
@@ -891,17 +1205,121 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 	}
 
 	/**
+	 * Fills the bitrate row. Which bitrates a recording can use depends on the
+	 * format and the sample rate chosen above it, and which of those the
+	 * device's own encoder accepts is settled by an asynchronous probe, so
+	 * neither a fixed option map nor a whole-control disable expresses it.
+	 * @param setting - The row to fill
+	 */
+	private renderBitrateRow(setting: Setting): void {
+		const settings = this.plugin.settings;
+		// The format the stored bitrate is really spent on, which for a
+		// lossless target is the intermediate the recorder writes rather than
+		// the container the file ends up in - a FLAC recording is captured as
+		// Opus at this rate and losslessly wrapped afterwards, so the values
+		// on offer are the ones that codec reaches and the note names it.
+		//
+		// Null means the capture is raw PCM, or that nothing can be recorded
+		// in this format here at all. The definition's visible predicate hides
+		// the row in that case, but the renderer draws every row before
+		// applying it, so the predicate alone still left a desktop WAV install
+		// running ten encoder probes and holding a live callback able to write
+		// settings.bitrate for a row nobody can see.
+		const encodedAt = recordingBitrateFormat(settings.recordingFormat);
+		if (encodedAt === null) {
+			return;
+		}
+		setting.addDropdown((dropdown) => {
+			// The stored value is left alone: drawing a row is not an edit,
+			// and the summary line below reads the same effectiveBitrate this
+			// selects with, so the two agree without one writing for the other.
+			// The same counter the format probe is guarded by, which hide()
+			// bumps: an answer arriving after the tab was left must not write
+			// into a tree nobody is looking at.
+			const generation = this.formatAvailabilityGeneration;
+			// The file the recording will really produce: the rate the
+			// encoder writes at, which is the device's own rather than the
+			// requested one, and the layout the capture has. The summary
+			// line and the session snapshot read the same answer, so a floor
+			// that moves with the rate lands on one value everywhere; asked
+			// at the requested rate, the row offered 24 kbps for MP3 while
+			// the line beneath it said 32.
+			const encoding = recordingEncodingFor(settings);
+			fillBitrateDropdown(dropdown, {
+				format: encodedAt,
+				sampleRate: encoding.sampleRate,
+				numberOfChannels: encoding.numberOfChannels,
+				selected: settings.bitrate,
+				isStale: () => this.formatAvailabilityGeneration !== generation,
+				// The encoder's answer arrives after the row is on screen. A
+				// rate it refuses is one the recording would fail on, so the
+				// move it forces is a real edit and is saved as one.
+				//
+				// Saved through commit, which redraws the tab, rather than
+				// through saveSettings alone: the summary line beneath reads
+				// this value, and patching it in place would put its wording
+				// in a second place able to drift from renderSummaryRow. The
+				// redraw is paid at most once per configuration, because the
+				// value it writes is one the encoder accepts and the next
+				// fill has nothing left to move.
+				onSettled: (bitrate) => {
+					settings.bitrate = bitrate;
+					void this.commit();
+				},
+				// Which values are on offer changes with the format, the sample
+				// rate and the encoder, so the row says what decided them
+				// rather than leaving a shorter list unexplained.
+				onNote: (note) => {
+					setting.setDesc(`${BITRATE_ROW_DESC} ${note}`);
+				},
+			});
+			dropdown.onChange(async (value) => {
+				settings.bitrate = parseInt(value, 10);
+				// The summary row beneath reads this, so the tree is rebuilt
+				// rather than patched.
+				await this.commit();
+			});
+		});
+	}
+
+	/**
 	 * Fills the row that summarises the effective output, which is derived from
 	 * the format and bitrate rows rather than stored.
 	 * @param setting - The row to fill
 	 */
 	private renderSummaryRow(setting: Setting): void {
-		const format = this.plugin.settings.recordingFormat;
-		const kbps = Math.round(this.plugin.settings.bitrate / 1000);
+		const settings = this.plugin.settings;
+		const format = settings.recordingFormat;
+		// Read through the same function the row above offers from, so one
+		// stored value cannot be shown here as a different rate.
+		const encodedAt = recordingBitrateFormat(format);
+		let rate = '';
+		if (encodedAt !== null) {
+			// The bitrate encoding will really use, not the one on file: a
+			// value left behind by a format change is lifted to that format's
+			// floor before it reaches an encoder, silently, so the line has
+			// to say so.
+			const kbps = Math.round(
+				effectiveBitrate(
+					encodedAt,
+					settings.bitrate,
+					recordingEncodingFor(settings).sampleRate,
+				) / 1000,
+			);
+			// A lossless target is not captured losslessly, so the rate alone
+			// would read as the bitrate of the finished file, which is not a
+			// choice anyone made. The codec it is really spent on is named
+			// instead, which is the only place a FLAC recording says that its
+			// audio went through Opus first.
+			rate =
+				encodedAt === format
+					? `, ${String(kbps)} kbps`
+					: `, ${String(kbps)} kbps captured as ${encodedAt.toUpperCase()}`;
+		}
 		setting.descEl
 			.createDiv()
 			.setText(
-				`Output: ${format.toUpperCase()}, ${String(kbps)} kbps. ${this.getCompressionDescription(format)}`,
+				`Output: ${format.toUpperCase()}${rate}. ${this.getCompressionDescription(format)}`,
 			);
 	}
 
@@ -956,9 +1374,15 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		descEl: HTMLElement,
 	): Promise<void> {
 		const generation = ++this.formatAvailabilityGeneration;
+		// Asked about the audio these settings will produce, not the codec
+		// alone: a merged multi-track MP4 is encoded by mediabunny after the
+		// mix, and at 22.05 kHz that asks Chromium for HE-AAC, which it does
+		// not have. The codec alone said yes and the recording failed at its
+		// end.
+		const encoding = recordingEncodingFor(this.plugin.settings);
 		let entries: FormatAvailabilityEntry[];
 		try {
-			entries = await listFormatAvailability();
+			entries = await listFormatAvailability(encoding);
 		} catch {
 			// Probing failed entirely: leave the options selectable, the
 			// recording-start validation still guards the session
@@ -993,10 +1417,13 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		// appendChild adopts the detached node into descEl's document.
 		const note = createDiv({ cls: 'aar-format-fallback-note' });
 		try {
-			const effective = await resolveEffectiveOutputFormat(stored);
-			note.textContent = `This device cannot record ${stored.toUpperCase()}; recordings are saved as ${effective.format.toUpperCase()} instead.`;
+			const effective = await resolveEffectiveOutputFormat(
+				stored,
+				encoding,
+			);
+			note.textContent = `${storedEntry.reason} Recordings are saved as ${effective.format.toUpperCase()} instead.`;
 		} catch {
-			note.textContent = `This device cannot record ${stored.toUpperCase()}. Select a different format.`;
+			note.textContent = `${storedEntry.reason} Select a different format.`;
 		}
 		if (generation !== this.formatAvailabilityGeneration) {
 			return;
@@ -1165,6 +1592,9 @@ export class AudioRecorderSettingTab extends PluginSettingTab {
 		this.deviceRefreshGeneration++;
 		this.formatAvailabilityGeneration++;
 		this.saveTextSettingDebounced.run();
+		// A switch to a note that was never picked stored nothing, so the
+		// next visit opens the page on the text it really applies.
+		this.profileText.forgetChoices();
 		// On the legacy path the renderer holds the rows and their cleanups;
 		// releasing it is what runs them when the tab is left. On 1.13 the
 		// framework runs them itself and this renderer holds nothing.

@@ -28,6 +28,7 @@ import {
 import {
 	accountKeyMissing,
 	ENGINE_IDS,
+	EngineLabel,
 	engineAccess,
 	missingModelMessage,
 	type EngineId,
@@ -41,13 +42,16 @@ import {
 	DEEPGRAM_KEYTERM_LIMIT,
 	DEEPGRAM_KEYWORDS_LIMIT,
 	deepgramBiasMechanism,
+	DeepgramBiasMechanism,
 	termsWithinDeepgramKeyterm,
+	termsWithinVoxtralContextBias,
 	termsWithinWhisperPrompt,
 	type DictionaryBiasPlan,
 } from '../dictionaryBias';
 import { DeepgramProvider } from './DeepgramProvider';
 import { GeminiProvider } from './GeminiProvider';
 import { LocalWhisperProvider } from './LocalWhisperProvider';
+import { VoxtralProvider } from './VoxtralProvider';
 import { WhisperApiProvider } from './WhisperApiProvider';
 import { GEMINI_TOKEN_RATES, type TokenRate } from './geminiRates';
 import type { TranscriptionProvider } from './TranscriptionProvider';
@@ -123,7 +127,7 @@ function cloudEngineFactory(
 export interface TranscriptionEngineDescriptor {
 	readonly id: TranscriptionProviderId;
 	/** Display label, used in dropdowns and cost-estimate lines. */
-	readonly label: string;
+	readonly label: EngineLabel;
 	/** Public pricing page; absent for the free local engine. */
 	readonly pricingUrl?: string;
 	/**
@@ -176,6 +180,19 @@ const DEEPGRAM_RATES: readonly [string, number][] = [
 	['nova-2', 0.0043],
 	['nova', 0.0043],
 	['base', 0.0125],
+];
+
+/**
+ * Approximate Voxtral rates, USD per audio minute.
+ *
+ * The realtime fragment is longer than the batch one, so a saved
+ * `voxtral-mini-transcribe-realtime-2602` never resolves through the cheaper
+ * batch rate under the longest-match rule below. Only the batch catalogue is
+ * seeded, but a user may type either id.
+ */
+const VOXTRAL_RATES: readonly [string, number][] = [
+	['voxtral-mini-transcribe-realtime', 0.006],
+	['voxtral-mini', 0.003],
 ];
 
 /**
@@ -252,7 +269,7 @@ export const TRANSCRIPTION_ENGINES: Record<
 		id: TRANSCRIPTION_PROVIDER_IDS.WHISPER_API,
 		// The engine is named for what it does; the service behind it is named
 		// once in the provider registry.
-		label: 'Whisper API (OpenAI-compatible)',
+		label: EngineLabel.WhisperApi,
 		pricingUrl: 'https://openai.com/api/pricing/',
 		model: (s) => s.whisperApiModel,
 		pricing: (model) =>
@@ -266,7 +283,7 @@ export const TRANSCRIPTION_ENGINES: Record<
 	},
 	[TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM]: {
 		id: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
-		label: 'Deepgram',
+		label: EngineLabel.Deepgram,
 		pricingUrl: 'https://deepgram.com/pricing',
 		model: (s) => s.deepgramModel,
 		pricing: (model) => perMinutePricing(matchRate(DEEPGRAM_RATES, model)),
@@ -283,7 +300,7 @@ export const TRANSCRIPTION_ENGINES: Record<
 					reason: 'model-unsupported',
 				};
 			}
-			if (mechanism === 'keyterm') {
+			if (mechanism === DeepgramBiasMechanism.Keyterm) {
 				const applied = termsWithinDeepgramKeyterm(terms);
 				if (applied.length < terms.length) {
 					return {
@@ -319,7 +336,7 @@ export const TRANSCRIPTION_ENGINES: Record<
 	},
 	[TRANSCRIPTION_PROVIDER_IDS.GEMINI]: {
 		id: TRANSCRIPTION_PROVIDER_IDS.GEMINI,
-		label: 'Google Gemini',
+		label: EngineLabel.Gemini,
 		pricingUrl: 'https://ai.google.dev/gemini-api/docs/pricing',
 		model: (s) => s.geminiModel,
 		pricing: (model) =>
@@ -332,9 +349,40 @@ export const TRANSCRIPTION_ENGINES: Record<
 			(config) => new GeminiProvider(config),
 		),
 	},
+	[TRANSCRIPTION_PROVIDER_IDS.VOXTRAL]: {
+		id: TRANSCRIPTION_PROVIDER_IDS.VOXTRAL,
+		label: EngineLabel.Voxtral,
+		pricingUrl: 'https://mistral.ai/pricing/api',
+		model: (s) => s.voxtralModel,
+		pricing: (model) => perMinutePricing(matchRate(VOXTRAL_RATES, model)),
+		// One flat cap on the number of context_bias entries, the same shape
+		// Deepgram's keyterm mechanism has, and the same for every model in the
+		// catalogue - so the model argument is deliberately unread: the service
+		// passes the configured Deepgram model id into it, which is only ever
+		// the right answer for Deepgram. The cap counts entries on the wire
+		// rather than terms in the list, because the encoding decides how many
+		// entries a list becomes, and a notice built on any other count reports
+		// a number the request never carried.
+		planDictionary: (_model, terms) => {
+			const applied = termsWithinVoxtralContextBias(terms);
+			if (applied.length < terms.length) {
+				return {
+					applied,
+					omitted: terms.slice(applied.length),
+					reason: 'context-bias-limit',
+				};
+			}
+			return { applied, omitted: [] };
+		},
+		biasUnsupportedReason: () => null,
+		create: cloudEngineFactory(
+			ENGINE_IDS.VOXTRAL,
+			(config) => new VoxtralProvider(config),
+		),
+	},
 	[TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER]: {
 		id: TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER,
-		label: 'Local whisper.cpp (desktop)',
+		label: EngineLabel.LocalWhisper,
 		// Runs on the user's machine, so there is no rate card to link.
 		model: () => '',
 		pricing: () => ({ kind: 'free' }),

@@ -11,50 +11,43 @@
  * @jest-environment jsdom
  */
 
-import { App, Modal } from 'obsidian';
 import { menuInstances } from '../mocks/obsidian';
 import { at } from '../helpers/assertions';
 import { allEls, clickControl, control, el } from '../helpers/dom';
-import { MARKER, PLAYER } from '../helpers/selectors';
+import { MARKER, PLAYBACK, PLAYER } from '../helpers/selectors';
 import { PLAYBACK_ACTIONS } from 'src/actions/playbackActions';
+import { renderPlaybackStatusBar } from 'src/ui/StatusBar';
 import { registerActionCommands } from 'src/actions/registerActionCommands';
 import { AudioPlayer } from 'src/player/AudioPlayer';
 import {
 	AudioPlayerRegistry,
 	playbackKey,
 } from 'src/player/AudioPlayerRegistry';
-import { WaveformPeakCache, type AudioDecoder } from 'src/player/WaveformData';
 import type { RecordingSidecarStore } from 'src/sidecar/RecordingSidecarStore';
 import type { PlayerMarker } from 'src/markers/markerModel';
+import { WaveformPeakCache } from 'src/player/WaveformData';
 import type { ResolvedPlayerSettings } from 'src/player/playerSettings';
 import type { PlaybackControlsState } from 'src/player/playbackControls';
-import type { TFile } from 'obsidian';
 import {
 	installSharedAudio,
 	makeMarkerStore,
+	makePlayerApp,
+	makePlayerContainer,
+	makePlayerFile,
+	makeRefusingDecoder,
 	timeText,
 	tick,
 } from '../helpers/playbackHarness';
-import { partial } from '../helpers/doubles';
 import { MediaSessionBridge } from 'src/player/MediaSessionBridge';
 import {
 	installMediaSession,
 	type MediaSessionDouble,
 } from '../helpers/mediaSession';
 import { asMockPlugin, mockPluginHost } from '../helpers/obsidianMock';
-import { createMockApp } from '../helpers/createApp';
 
-const app = createMockApp({
-	vault: {
-		getResourcePath: () => 'app://media',
-		readBinary: () => Promise.resolve(new ArrayBuffer(0)),
-	},
-	fileManager: { generateMarkdownLink: () => '[[rec.mp4]]' },
-}).app;
+const app = makePlayerApp();
 
-const decoder: AudioDecoder = {
-	decode: () => Promise.reject(new Error('no decode in tests')),
-};
+const decoder = makeRefusingDecoder();
 
 const PLAIN: ResolvedPlayerSettings = {
 	showWaveform: false,
@@ -67,20 +60,6 @@ const WITH_MARKERS: ResolvedPlayerSettings = {
 	enableMarkers: true,
 	skipSeconds: 10,
 };
-
-function makeFile(): TFile {
-	return partial<TFile>({
-		path: 'rec.mp4',
-		extension: 'mp4',
-		stat: { mtime: 1, size: 1000 },
-	});
-}
-
-function makeContainer(): HTMLElement {
-	const el = new Modal(new App()).contentEl.createDiv();
-	document.body.appendChild(el);
-	return el;
-}
 
 /**
  * Mounts a real AudioPlayer for the file into a fresh container and hands the
@@ -96,11 +75,11 @@ function mountPlayerChild(
 	store: RecordingSidecarStore = makeMarkerStore(),
 	startSeconds: number | null = null,
 ): { container: HTMLElement; player: AudioPlayer } {
-	const container = makeContainer();
+	const container = makePlayerContainer();
 	const player = new AudioPlayer(
 		container,
 		app,
-		makeFile(),
+		makePlayerFile(),
 		PLAIN,
 		registry,
 		new WaveformPeakCache(),
@@ -131,7 +110,7 @@ function mountPlayer(
 
 /** A container nested in a CodeMirror editor, so the player is editable. */
 function makeEditableContainer(): HTMLElement {
-	const editor = makeContainer();
+	const editor = makePlayerContainer();
 	editor.addClass('cm-editor');
 	return editor.createDiv();
 }
@@ -145,7 +124,7 @@ function mountMarkerPlayer(
 	new AudioPlayer(
 		container,
 		app,
-		makeFile(),
+		makePlayerFile(),
 		WITH_MARKERS,
 		registry,
 		new WaveformPeakCache(),
@@ -309,6 +288,36 @@ describe('timecode seek stays in sync with the embedded player', () => {
 	});
 });
 
+describe('the volume set in the embed', () => {
+	// The status bar draws its volume track filled up to the thumb, from the
+	// snapshot the registry publishes. A volume moved in the embed reaches the
+	// status bar only through that snapshot, so the fill has to follow it
+	// there, or the strip shows the old level beside a thumb at the new one.
+	it('fills the status-bar volume track up to the level set in the embed', async () => {
+		const shared = sharedAudio();
+		const registry = new AudioPlayerRegistry();
+		const statusBarItem = makePlayerContainer();
+		registry.subscribePlayback((state) => {
+			if (state) {
+				renderPlaybackStatusBar(statusBarItem, state);
+			}
+		});
+		const container = mountPlayer(registry);
+		await tick();
+		startPlaybackAt(registry, shared.audio, 30);
+		const embedVolume = el<HTMLInputElement>(container, PLAYER.volume);
+
+		embedVolume.value = '0.3';
+		embedVolume.dispatchEvent(new Event('input', { bubbles: true }));
+
+		const barVolume = el<HTMLInputElement>(statusBarItem, PLAYBACK.volume);
+		expect(barVolume.value).toBe('0.3');
+		expect(barVolume.style.getPropertyValue('--slider-fill-ratio')).toBe(
+			'0.3',
+		);
+	});
+});
+
 describe('status-bar markers follow the player edit mode', () => {
 	it('withholds markers and persists nothing for a read-only player', async () => {
 		const shared = installSharedAudio();
@@ -320,7 +329,7 @@ describe('status-bar markers follow the player edit mode', () => {
 			});
 			// Reading view container (not inside a CodeMirror editor)
 			const store = makeMarkerStore();
-			mountMarkerPlayer(registry, store, makeContainer());
+			mountMarkerPlayer(registry, store, makePlayerContainer());
 			await tick();
 			shared.audio.setReady(1);
 			shared.audio.setDuration(600);
@@ -638,7 +647,7 @@ describe('playback commands drive the same playback as the controls', () => {
 			const { plugin } = withPlaybackCommands(registry);
 			const store = makeMarkerStore();
 			// Reading view container (not inside a CodeMirror editor)
-			mountMarkerPlayer(registry, store, makeContainer());
+			mountMarkerPlayer(registry, store, makePlayerContainer());
 			await tick();
 			startPlaybackAt(registry, shared.audio, 30);
 

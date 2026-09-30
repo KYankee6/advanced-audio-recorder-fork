@@ -5,7 +5,7 @@
  * @module tests/unit/settingsDefinitions.test
  */
 
-import type { Setting, SettingDefinitionItem } from 'obsidian';
+import type { Setting, SettingDefinitionItem, TFile } from 'obsidian';
 import {
 	groupOf,
 	listIn,
@@ -19,21 +19,23 @@ import {
 	type RenderDefinition,
 	type RowDefinition,
 } from '../helpers/declarativeSettings';
-import {
-	DEFAULT_SETTINGS,
-	type AudioRecorderSettings,
-} from 'src/settings/settingsSchema';
+import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
 import type { ProfileSection } from 'src/settings/profileKinds';
 import {
 	CHANNEL_MODE_LABELS,
 	CONVERSION_LINK_ACTION_LABELS,
+	PCM_SAMPLE_FORMAT_LABELS,
 	LLM_PROVIDER_LABELS,
 	LLM_TASK_LABELS,
 	TRANSCRIPTION_PROVIDER_LABELS,
 	TRANSCRIPT_DESTINATION_LABELS,
 	TRANSCRIPT_FILE_FORMAT_LABELS,
 } from 'src/settings/labels';
-import { ENGINE_IDS, type EngineId } from 'src/providers/providers';
+import {
+	ENGINE_IDS,
+	type EngineId,
+	EngineLabel,
+} from 'src/providers/providers';
 import {
 	CLEANUP_HIGHPASS_STEP_HZ,
 	MAX_CLEANUP_HIGHPASS_HZ,
@@ -56,21 +58,38 @@ import {
 	type ProfileCatalogue,
 	type SettingsDefinitionContext,
 } from 'src/settings/settingsDefinitions';
-import { setPlatform } from '../helpers/platform';
+import {
+	setPlatform,
+	useDesktopPlatform,
+	useMobilePlatform,
+} from '../helpers/platform';
 import { maybeEl } from '../helpers/dom';
+import {
+	installDisplayMediaHost,
+	type DisplayMediaHost,
+	type DisplayMediaHostOptions,
+} from '../helpers/displayMediaHost';
+import { MAX_TRACK_COUNT } from 'src/settings/sections/controlKeys';
+import type { AudioSource } from 'src/settings/settingsSchema';
 import { SETTING } from '../helpers/selectors';
 import { partial } from '../helpers/doubles';
+import { at } from '../helpers/assertions';
+import { defaultSettings } from '../helpers/settingsFixtures';
 
 describe('settings definitions', () => {
 	let settings: AudioRecorderSettings;
 	let renderDocs: jest.Mock;
 	let renderFormatRow: jest.Mock;
+	let renderBitrateRow: jest.Mock;
 	let addModel: jest.Mock;
 	let addProfile: jest.Mock;
 	let renameProfile: jest.Mock;
 	let removeProfile: jest.Mock;
 	let reorderProfile: jest.Mock;
-	let profileEntries: Array<{ id: string; name: string; summary: string }>;
+	let openProfileSource: jest.Mock;
+	let profileSourcePath: string;
+	let profileReadsNote: boolean;
+	let profileEntries: ReturnType<ProfileCatalogue['entries']>;
 	let selectedProfileId: string;
 	let declareListAddRow: boolean;
 	let removeModel: jest.Mock;
@@ -80,21 +99,35 @@ describe('settings definitions', () => {
 	let diagnostics: { [K in keyof DiagnosticsActions]: jest.Mock };
 
 	beforeEach(() => {
-		settings = { ...DEFAULT_SETTINGS };
+		settings = defaultSettings();
 		// Stands in for the real body with one marker element, so a test can see
 		// which host it was rendered into and whether it survived.
 		renderDocs = jest.fn((host: HTMLElement) => {
 			host.createDiv({ cls: 'aar-doc-callout' });
 		});
 		renderFormatRow = jest.fn();
+		renderBitrateRow = jest.fn();
 		addModel = jest.fn();
 		addProfile = jest.fn();
 		renameProfile = jest.fn();
 		removeProfile = jest.fn();
 		reorderProfile = jest.fn();
+		openProfileSource = jest.fn();
+		profileSourcePath = '';
+		profileReadsNote = false;
 		profileEntries = [
-			{ id: 'a', name: 'Standup', summary: '3 terms' },
-			{ id: 'b', name: 'Legal', summary: 'In use, 12 terms' },
+			{
+				id: 'a',
+				name: 'Standup',
+				summary: 'Typed text, 3 terms',
+				status: 'Uses the text typed in the settings.',
+			},
+			{
+				id: 'b',
+				name: 'Legal',
+				summary: 'In use, note, 12 terms',
+				status: 'Uses the text of Glossaries/Legal.md.',
+			},
 		];
 		selectedProfileId = 'b';
 		declareListAddRow = false;
@@ -116,6 +149,7 @@ describe('settings definitions', () => {
 		sampleRates: [44100, 48000],
 		outputFormat: {
 			renderFormatRow: renderFormatRow as (setting: Setting) => void,
+			renderBitrateRow: renderBitrateRow as (setting: Setting) => void,
 			renderSummaryRow: renderSummaryRow as (setting: Setting) => void,
 		},
 		renderDocumentationLink: renderDocs as (host: HTMLElement) => void,
@@ -137,6 +171,7 @@ describe('settings definitions', () => {
 				'Guidance prompt',
 			),
 			catalogue('transcription', 'Participant profiles', 'Participants'),
+			catalogue('quickNotes', 'Quick note profiles', 'Instruction'),
 		],
 		declareListAddRow,
 		transcriptionBlocks: {
@@ -171,7 +206,13 @@ describe('settings definitions', () => {
 		selectionDesc: 'Offer this profile in the Transcribe dialog.',
 		selectedId: () => selectedProfileId,
 		selectionKey: `${heading} id`,
+		choiceKey: `${heading}.choice`,
 		bodyKey: `${heading}.body`,
+		noteKey: `${heading}.note`,
+		sourcePath: () => profileSourcePath,
+		readsNote: () => profileReadsNote,
+		sourceRejection: () => undefined,
+		openSource: openProfileSource as (id: string) => void,
 		entries: () => profileEntries,
 		visible: () => true,
 		add: addProfile as () => void,
@@ -256,6 +297,21 @@ describe('settings definitions', () => {
 				(renderDefinitionOf(build()) as { searchable?: boolean })
 					.searchable,
 			).toBe(false);
+		});
+
+		it('keeps the release notes switch beside the callout', () => {
+			// Both rows are about the plugin itself rather than about the
+			// recording being set up, which is why they share the block above
+			// everything a session is configured with.
+			const top = partial<GroupDefinition>(at(build(), 0, 'block'));
+
+			expect(rowNamesIn(top)).toEqual(['Documentation', 'Release notes']);
+			expect(rowIn(top, 'Release notes').control).toEqual(
+				expect.objectContaining({
+					type: 'toggle',
+					key: 'showReleaseNotes',
+				}),
+			);
 		});
 	});
 
@@ -352,8 +408,7 @@ describe('settings definitions', () => {
 				);
 			}
 			expect(
-				listIn(pageOf(build(), 'Whisper API (OpenAI-compatible)'))
-					.items,
+				listIn(pageOf(build(), EngineLabel.WhisperApi)).items,
 			).toHaveLength(2);
 		});
 
@@ -375,9 +430,7 @@ describe('settings definitions', () => {
 
 			// An engine entry reports what it holds: the model it uses once it
 			// is reachable, and what is missing until then.
-			expect(displayValue('Whisper API (OpenAI-compatible)')).toBe(
-				'whisper-1',
-			);
+			expect(displayValue(EngineLabel.WhisperApi)).toBe('whisper-1');
 			expect(displayValue('Dictionary profiles')).toBe('Legal');
 
 			// Both halves are needed to run, so an engine reachable but with
@@ -385,9 +438,7 @@ describe('settings definitions', () => {
 			// reading as configured.
 			settings.whisperApiModel = '';
 
-			expect(displayValue('Whisper API (OpenAI-compatible)')).toBe(
-				'No model',
-			);
+			expect(displayValue(EngineLabel.WhisperApi)).toBe('No model');
 		});
 
 		it('counts a configured engine by its account, not by its engines', () => {
@@ -431,7 +482,7 @@ describe('settings definitions', () => {
 
 			expect(statusOf('Transcription')).toBe('warning');
 			expect(statusOf('Engines')).toBe('warning');
-			expect(statusOf('Whisper API (OpenAI-compatible)')).toBe('warning');
+			expect(statusOf(EngineLabel.WhisperApi)).toBe('warning');
 		});
 
 		it('clears the trail once the engine can run', () => {
@@ -444,7 +495,7 @@ describe('settings definitions', () => {
 
 			expect(statusOf('Transcription')).toBeNull();
 			expect(statusOf('Engines')).toBeNull();
-			expect(statusOf('Whisper API (OpenAI-compatible)')).toBeNull();
+			expect(statusOf(EngineLabel.WhisperApi)).toBeNull();
 		});
 
 		it('leaves an engine no job calls unmarked', () => {
@@ -456,7 +507,9 @@ describe('settings definitions', () => {
 			settings.whisperApiModel = 'whisper-1';
 			settings.deepgramApiKey = '';
 
-			expect(entryStatusOf(pageOf(build(), 'Deepgram'))).toBeNull();
+			expect(
+				entryStatusOf(pageOf(build(), EngineLabel.Deepgram)),
+			).toBeNull();
 		});
 
 		it('marks every engine page from the same answer', () => {
@@ -475,7 +528,7 @@ describe('settings definitions', () => {
 				.filter((page) => entryStatusOf(page) === 'warning')
 				.map((page) => page.name);
 
-			expect(marked).toEqual(['Deepgram']);
+			expect(marked).toEqual([EngineLabel.Deepgram]);
 		});
 
 		it('says which half the local engine is still missing', () => {
@@ -483,7 +536,7 @@ describe('settings definitions', () => {
 			// configured - the entry said it was.
 			settings.transcriptionEnabled = true;
 			const local = (): string | undefined =>
-				entryValueOf(pageOf(build(), 'Local whisper.cpp (desktop)'));
+				entryValueOf(pageOf(build(), EngineLabel.LocalWhisper));
 
 			expect(local()).toBe('No binary');
 
@@ -617,6 +670,22 @@ describe('settings definitions', () => {
 			);
 		});
 
+		it('keeps the language row editable on an engine that ignores it', () => {
+			// Unlike the diarization and word-timestamp rows below, this field
+			// has a reader no engine gates: auto chapters fall back to it when
+			// a transcript carries no detected language. Disabling the row on
+			// the engine that does not send it left that fallback with no way
+			// to be set at all, so the note carries the distinction instead.
+			settings.transcriptionEnabled = true;
+			settings.transcriptionProvider = TRANSCRIPTION_PROVIDER_IDS.VOXTRAL;
+			const row = rowOf(build(), TRANSCRIPTION, 'Language');
+
+			expect(isVisible('Language')).toBe(true);
+			expect(disabledOf(row.control)).toBe(false);
+			expect(row.desc).toMatch(/does not reach its request/);
+			expect(row.desc).toMatch(/Auto chapters still read it/);
+		});
+
 		it('keeps diarization visible but disabled on an engine without it', () => {
 			settings.transcriptionEnabled = true;
 			settings.transcriptionProvider =
@@ -675,7 +744,7 @@ describe('settings definitions', () => {
 		it('hosts a provider key on that provider\u2019s page', () => {
 			// A password field is the one row no control type covers, and it
 			// belongs to the service rather than to either use of it.
-			expect(pageEntryNames('Deepgram')).toEqual([
+			expect(pageEntryNames(EngineLabel.Deepgram)).toEqual([
 				'Base URL',
 				'Deepgram API key',
 				'Model',
@@ -692,7 +761,7 @@ describe('settings definitions', () => {
 			settings.deepgramModel = 'nova-3';
 			const definitions = build();
 
-			const picker = rowOf(definitions, 'Deepgram', 'Model');
+			const picker = rowOf(definitions, EngineLabel.Deepgram, 'Model');
 			expect(picker.control?.type).toBe('dropdown');
 			expect(picker.control?.key).toBe('deepgramModel');
 			expect(picker.control?.options).toEqual({
@@ -701,7 +770,7 @@ describe('settings definitions', () => {
 			});
 
 			const catalogue = pageOf(
-				groupOf(definitions, 'Deepgram')
+				groupOf(definitions, EngineLabel.Deepgram)
 					.items as SettingDefinitionItem[],
 				'Model catalogue',
 			);
@@ -712,7 +781,7 @@ describe('settings definitions', () => {
 			// An emptied catalogue has nothing to pick, and the entry below is
 			// where ids are added; a blank dropdown would be a dead end.
 			settings.deepgramModels = [];
-			const picker = rowOf(build(), 'Deepgram', 'Model');
+			const picker = rowOf(build(), EngineLabel.Deepgram, 'Model');
 
 			expect(picker.control?.options).toEqual({});
 			expect(picker.control?.disabled).toBe(true);
@@ -721,6 +790,47 @@ describe('settings definitions', () => {
 
 	describe('the multi-track section', () => {
 		const MULTI = 'Multi-track recording';
+
+		/**
+		 * The granting hosts a case installed, taken back down whatever the
+		 * case did. Drained here rather than at the end of a test body: an
+		 * assertion that fails first would otherwise leave the desktop
+		 * require in place for every later case, and the suite is randomized.
+		 */
+		let hosts: (() => void)[] = [];
+
+		afterEach(() => {
+			hosts.forEach((undo) => {
+				undo();
+			});
+			hosts = [];
+		});
+
+		/**
+		 * Installs a host that can grant the system output for this case.
+		 * @param options - Which half of the host to leave missing
+		 * @returns The installed host
+		 */
+		const withGrantingHost = (
+			options: DisplayMediaHostOptions = {},
+		): DisplayMediaHost => {
+			const host = installDisplayMediaHost(options);
+			hosts.push(host.restore);
+			return host;
+		};
+
+		/** A track map whose only track records the system output. */
+		const systemAudioOnTrackOne = (): Map<number, AudioSource> =>
+			new Map([
+				[
+					1,
+					{
+						deviceId: '',
+						channelMode: 'source' as const,
+						kind: 'system-audio' as const,
+					},
+				],
+			]);
 
 		/** Whether a row's visible predicate holds for the current settings. */
 		const isVisible = (name: string): boolean => {
@@ -760,6 +870,128 @@ describe('settings definitions', () => {
 				'mic-1': 'Built-in microphone',
 				'iface-1': 'Audio interface',
 			});
+		});
+
+		// A system-audio track is configured by being one: it names no
+		// device, so the rows that describe a device have nothing to say.
+		it('hides the device rows of a track that records the system output', () => {
+			settings.enableMultiTrack = true;
+			settings.trackAudioSources = systemAudioOnTrackOne();
+
+			expect(isVisible('Track 1 source')).toBe(true);
+			expect(isVisible('Track 1 input')).toBe(false);
+			expect(isVisible('Track 1 channels')).toBe(false);
+		});
+
+		// The row states which of the two answers applies here rather than
+		// offering a choice that would fail at the start of a recording.
+		it('says the system output is available where the host can grant it', () => {
+			withGrantingHost();
+			settings.enableMultiTrack = true;
+
+			const desc = rowOf(build(), MULTI, 'Track 1 source').desc;
+
+			expect(desc).toMatch(/this computer's own output/);
+			expect(desc).not.toMatch(/unavailable on this build/);
+		});
+
+		// Whether the host can grant the output is a fact of the platform
+		// and the installed build, identical on all eight source rows, and
+		// reading it costs a synchronous trip through the remote module.
+		// Asked inside the row loop it was paid once per track, on every
+		// rebuild of the settings tree - and the framework rebuilds the tree
+		// whenever the device list changes.
+		it('asks the host once for the section, not once per track', () => {
+			const host = withGrantingHost();
+			settings.enableMultiTrack = true;
+			settings.maxTracks = MAX_TRACK_COUNT;
+
+			build();
+
+			// Two lookups make one answer: the session carrying the handler,
+			// and the capturer naming a video source for the grant.
+			expect(host.probeCount()).toBe(2);
+		});
+
+		// That one answer is also what the audio-input switch reports, so a
+		// row offering the system output cannot sit in the same tab as one
+		// saying this build has not got it.
+		it('reports the host the same way on the audio-input switch', () => {
+			withGrantingHost();
+			settings.enableMultiTrack = true;
+
+			const definitions = build();
+
+			expect(
+				rowOf(definitions, MULTI, 'Track 1 source').desc,
+			).not.toMatch(/unavailable on this build/);
+			expect(
+				rowOf(definitions, 'Audio input', 'Include system audio').desc,
+			).not.toMatch(/Windows only/);
+		});
+
+		it('offers the source row for every track it offers an input for', () => {
+			settings.enableMultiTrack = true;
+			const control = rowOf(build(), MULTI, 'Track 1 source').control;
+
+			expect(control?.key).toBe('track.1.kind');
+			expect(control?.options).toEqual({
+				'input-device': 'Input device',
+				'system-audio': 'System audio (this computer)',
+			});
+		});
+
+		// Without a device there is nothing to place in the mix, unless the
+		// track is the system output, which is configured by its kind alone.
+		it.each([{ row: 'Track 1 level' }, { row: 'Track 1 position' }])(
+			'unblocks $row on a system-audio track',
+			({ row }) => {
+				settings.enableMultiTrack = true;
+				settings.outputMode = 'single';
+				settings.trackAudioSources = systemAudioOnTrackOne();
+				const disabled = rowOf(build(), MULTI, row).control?.disabled;
+
+				expect(typeof disabled === 'function' && disabled()).toBe(
+					false,
+				);
+			},
+		);
+
+		// The three filters are constraints of getUserMedia, and a
+		// system-audio track is granted by the host instead. Offered anyway,
+		// the row took an edit that reached nothing and then reported a
+		// choice the capture had never made.
+		it('hides the processing row of a track that records the system output', () => {
+			settings.enableMultiTrack = true;
+			settings.trackAudioSources = systemAudioOnTrackOne();
+
+			expect(isVisible('Track 1 processing')).toBe(false);
+		});
+
+		// The three global filters suit a microphone in a room and ruin a
+		// system-loopback input, and one session can hold both.
+		it('offers a processing profile per track and disables it without a device', () => {
+			settings.enableMultiTrack = true;
+			const control = rowOf(build(), MULTI, 'Track 1 processing').control;
+
+			expect(control?.key).toBe('track.1.processing');
+			expect(control?.options).toEqual({
+				global: 'Same as global settings',
+				voice: 'Voice (microphone in a room)',
+				raw: 'Raw (system audio or line input)',
+			});
+			expect(
+				typeof control?.disabled === 'function' && control.disabled(),
+			).toBe(true);
+
+			settings.trackAudioSources.set(1, {
+				deviceId: 'mic-1',
+				channelMode: 'source',
+			});
+			const assigned = rowOf(build(), MULTI, 'Track 1 processing').control
+				?.disabled;
+
+			expect(typeof assigned === 'function' && assigned()).toBe(false);
 		});
 
 		it('disables the channel layout of a track whose device has one channel', () => {
@@ -807,6 +1039,47 @@ describe('settings definitions', () => {
 				);
 			},
 		);
+	});
+
+	// The one switch that records a call without a track being configured for
+	// it. It sits on the audio-input block, beside the microphone it pairs the
+	// system output with, rather than on the page it stands in for.
+	describe('the system-audio switch', () => {
+		const INPUT = 'Audio input';
+		const SWITCH = 'Include system audio';
+
+		it('pairs the microphone with the system output from one row', () => {
+			const control = rowOf(build(), INPUT, SWITCH).control;
+
+			expect(control?.type).toBe('toggle');
+			expect(control?.key).toBe('includeSystemAudio');
+		});
+
+		// A per-track configuration already says what every track records, so
+		// the pairing stands down for it - and a switch still taking edits
+		// would report a second system-audio track no session would open.
+		it('stands down while the tracks are configured by hand', () => {
+			expect(disabledOf(rowOf(build(), INPUT, SWITCH).control)).toBe(
+				false,
+			);
+
+			settings.enableMultiTrack = true;
+
+			expect(disabledOf(rowOf(build(), INPUT, SWITCH).control)).toBe(
+				true,
+			);
+		});
+
+		// Said on the row rather than left to the first refused recording, and
+		// said without taking the switch away: a vault synced from a machine
+		// that can record the system output has to show the setting it carries
+		// on one that cannot, or it cannot be turned off there either.
+		it('says where this build cannot be granted the system output', () => {
+			const row = rowOf(build(), INPUT, SWITCH);
+
+			expect(row.desc).toMatch(/Windows only/);
+			expect(disabledOf(row.control)).toBe(false);
+		});
 	});
 
 	describe('the audio splitting section', () => {
@@ -859,8 +1132,7 @@ describe('settings definitions', () => {
 				desc?: string;
 				action?: (el: HTMLElement, index: number) => void;
 			}>;
-		} =>
-			listIn(pageOf(build(), 'Whisper API (OpenAI-compatible)')) as never;
+		} => listIn(pageOf(build(), EngineLabel.WhisperApi)) as never;
 
 		it('declares the saved models as a list the user can edit', () => {
 			seedModels();
@@ -930,9 +1202,9 @@ describe('settings definitions', () => {
 			// It runs a binary against a file on disk: there is no list of
 			// served ids to keep, so its page holds the paths instead.
 			expect(() =>
-				pageOf(build(), 'Local whisper.cpp (desktop)'),
+				pageOf(build(), EngineLabel.LocalWhisper),
 			).not.toThrow();
-			expect(pageEntryNames('Local whisper.cpp (desktop)')).toEqual([
+			expect(pageEntryNames(EngineLabel.LocalWhisper)).toEqual([
 				'Binary and model paths',
 			]);
 		});
@@ -965,7 +1237,7 @@ describe('settings definitions', () => {
 				list.items.map(
 					(item) => (item as { displayValue?: string }).displayValue,
 				),
-			).toEqual(['3 terms', 'In use, 12 terms']);
+			).toEqual(['Typed text, 3 terms', 'In use, note, 12 terms']);
 			for (const item of list.items) {
 				expect((item as { type?: string }).type).toBe('page');
 			}
@@ -1022,6 +1294,105 @@ describe('settings definitions', () => {
 			expect(
 				stacked?.items.map((item) => (item as RowDefinition).name),
 			).toContain('Terms');
+		});
+
+		it('says on the page where the profile text comes from, through a choice of its own', () => {
+			const page = profilePageOf('Dictionary profiles', 'Standup');
+			const source = rowIn(page, 'Source');
+
+			expect(source.control).toEqual({
+				type: 'dropdown',
+				key: 'Dictionary profiles.choice#a',
+				options: { typed: 'Typed text', note: 'Note' },
+			});
+			// The row states the text in use, so it is never inferred from
+			// which of the fields below happen to be shown.
+			expect(source.desc).toBe('Uses the text typed in the settings.');
+		});
+
+		it('shows the note rows or the editor as the page is set, never both', () => {
+			const page = profilePageOf('Dictionary profiles', 'Standup');
+			const shown = (predicate: unknown): boolean =>
+				typeof predicate === 'function'
+					? (predicate as () => boolean)()
+					: predicate !== false;
+			const stacked = (page.items as GroupDefinition[]).find((item) =>
+				(item.cls ?? '').split(' ').includes(STACKED_TEXT_CLASS),
+			);
+			const note = rowIn(page, 'Note');
+			const control = note.control as {
+				type: string;
+				key: string;
+				placeholder?: string;
+				filter?: (file: TFile) => boolean;
+			};
+
+			expect(control).toEqual(
+				expect.objectContaining({
+					type: 'file',
+					key: 'Dictionary profiles.note#a',
+					// An example path would read as a note already picked.
+					placeholder: 'Pick a note',
+				}),
+			);
+			// Only notes are offered: a body is text, and an audio file is not.
+			expect(control.filter?.(partial<TFile>({ extension: 'md' }))).toBe(
+				true,
+			);
+			expect(control.filter?.(partial<TFile>({ extension: 'wav' }))).toBe(
+				false,
+			);
+			expect(shown(stacked?.visible)).toBe(true);
+			expect(shown(note.visible)).toBe(false);
+			expect(shown(rowIn(page, 'Open note').visible)).toBe(false);
+
+			// Switched to a note that is not picked yet: the editor steps aside
+			// at once, and there is no note to open.
+			profileReadsNote = true;
+
+			expect(shown(stacked?.visible)).toBe(false);
+			expect(shown(note.visible)).toBe(true);
+			expect(shown(rowIn(page, 'Open note').visible)).toBe(false);
+
+			// The predicates read the catalogue live, so a note picked after the
+			// page was built is what they answer for.
+			profileSourcePath = 'Glossaries/Standup.md';
+
+			expect(shown(rowIn(page, 'Open note').visible)).toBe(true);
+			rowIn(page, 'Open note').action?.(createDiv(), 0);
+			expect(openProfileSource).toHaveBeenCalledWith('a');
+		});
+
+		it('names the text of the profile in use under the picker, on a line of its own', () => {
+			const picker = rowIn(
+				groupOf(build(), 'Advanced'),
+				'Use by default',
+			);
+			const desc = picker.desc as DocumentFragment;
+
+			expect(picker.control).toEqual(
+				expect.objectContaining({
+					type: 'dropdown',
+					key: 'Dictionary profiles id',
+				}),
+			);
+			expect(desc.textContent).toBe(
+				'Offer this profile in the Transcribe dialog.' +
+					'Uses the text of Glossaries/Legal.md.',
+			);
+			expect(desc.lastChild?.textContent).toBe(
+				'Uses the text of Glossaries/Legal.md.',
+			);
+
+			// None applies no text, so the picker says only what it is for.
+			selectedProfileId = '';
+
+			expect(
+				rowIn(groupOf(build(), 'Advanced'), 'Use by default').desc,
+			).toBe('Offer this profile in the Transcribe dialog.');
+			expect(entryValueOf(pageOf(build(), 'Dictionary profiles'))).toBe(
+				'None',
+			);
 		});
 
 		it('renames and deletes from the page of the profile itself', () => {
@@ -1085,21 +1456,50 @@ describe('settings definitions', () => {
 			);
 
 			expect(providers).toEqual([
-				'Whisper API (OpenAI-compatible)',
-				'OpenAI',
-				'Deepgram',
-				'Google Gemini',
-				'Anthropic (Claude)',
-				'Local whisper.cpp (desktop)',
+				EngineLabel.WhisperApi,
+				EngineLabel.OpenAi,
+				EngineLabel.Deepgram,
+				EngineLabel.Gemini,
+				EngineLabel.Anthropic,
+				EngineLabel.Voxtral,
+				EngineLabel.Mistral,
+				EngineLabel.DeepSeek,
+				EngineLabel.LocalWhisper,
 			]);
 			// A provider that both transcribes and answers prompts keeps one
 			// key and one endpoint, with a catalogue per capability.
 			// One catalogue for both jobs, because the ids are the same family.
 			// One catalogue for both jobs, and the ceiling of the engine that
 			// has to honour it.
-			expect(pageEntryNames('Google Gemini')).toEqual([
+			expect(pageEntryNames(EngineLabel.Gemini)).toEqual([
 				'Base URL',
 				'Google Gemini API key',
+				'Model',
+				'Model catalogue',
+				'Max output tokens',
+			]);
+			// Two catalogues over one account, because the voxtral-* ids
+			// transcribe and the mistral-* ids write: each engine gets its own
+			// page, and both pages carry the same endpoint and key.
+			expect(pageEntryNames(EngineLabel.Voxtral)).toEqual([
+				'Base URL',
+				'Mistral API key',
+				'Model',
+				'Model catalogue',
+			]);
+			expect(pageEntryNames(EngineLabel.Mistral)).toEqual([
+				'Base URL',
+				'Mistral API key',
+				'Model',
+				'Model catalogue',
+				'Max output tokens',
+			]);
+			// A vendor that only writes gets one page with its own key, so
+			// pointing post-processing at it never touches the transcription
+			// account.
+			expect(pageEntryNames(EngineLabel.DeepSeek)).toEqual([
+				'Base URL',
+				'DeepSeek API key',
 				'Model',
 				'Model catalogue',
 				'Max output tokens',
@@ -1110,11 +1510,7 @@ describe('settings definitions', () => {
 			// The link lists the ids the endpoint serves, so it belongs with
 			// those ids; hanging it off the API-key row put a model catalogue
 			// under a password field.
-			const picker = rowOf(
-				build(),
-				'Whisper API (OpenAI-compatible)',
-				'Model',
-			);
+			const picker = rowOf(build(), EngineLabel.WhisperApi, 'Model');
 			const desc = picker.desc;
 			if (!(desc instanceof DocumentFragment)) {
 				throw new Error('The picker carries no link');
@@ -1128,10 +1524,10 @@ describe('settings definitions', () => {
 		it('offers a chunk size only on the engine that splits an upload', () => {
 			// A limit is the engine's own fact, and so is the field holding the
 			// chunk size, so no second engine can edit the first one's.
-			expect(pageEntryNames('Whisper API (OpenAI-compatible)')).toContain(
+			expect(pageEntryNames(EngineLabel.WhisperApi)).toContain(
 				'Upload chunk size',
 			);
-			expect(pageEntryNames('Deepgram')).not.toContain(
+			expect(pageEntryNames(EngineLabel.Deepgram)).not.toContain(
 				'Upload chunk size',
 			);
 		});
@@ -1164,6 +1560,71 @@ describe('settings definitions', () => {
 			expect(childNamesOf('Auto chapters')).toContain(
 				'Chapter guidance profiles',
 			);
+		});
+
+		it('gives quick notes an entry of their own on the main tab, first among the entries', () => {
+			// A feature with a button of its own is looked for by its own
+			// name, not inside the page of the pipeline it runs through.
+			const entries = build()
+				.flatMap((item) =>
+					'type' in item && item.type === 'group'
+						? (item.items ?? [])
+						: [item],
+				)
+				.filter((item) => 'type' in item && item.type === 'page')
+				.map((item) => item.name);
+
+			expect(entries[0]).toBe('Quick notes');
+			expect(
+				pageOf(build(), 'Transcription').items.map(
+					(item) => (item as GroupDefinition).heading,
+				),
+			).not.toContain('Quick notes');
+			expect(pageEntryNames('Quick notes')).toEqual([
+				'Enable quick notes',
+				'Transcription is off',
+				'Quick note transcription engine',
+				'Quick note rewrite engine',
+				'Use by default',
+				'Quick note profiles',
+			]);
+		});
+
+		it('says on the entry and on the page when quick notes wait for transcription', () => {
+			// Switched on with transcription off, the feature has no engine to
+			// dictate through and shows no button; the entry says why instead
+			// of reading "On" over nothing.
+			const visible = (predicate: unknown): boolean =>
+				typeof predicate === 'function'
+					? (predicate as () => boolean)()
+					: predicate !== false;
+			const page = (): GroupDefinition => pageOf(build(), 'Quick notes');
+			const row = (name: string): unknown =>
+				(
+					(page().items[0] as GroupDefinition).items.find(
+						(item) => item.name === name,
+					) as { visible?: unknown }
+				).visible;
+
+			settings.quickNotesEnabled = false;
+			settings.transcriptionEnabled = false;
+			expect(entryValueOf(page())).toBe('Off');
+			expect(visible(row('Transcription is off'))).toBe(false);
+			expect(visible(row('Quick note transcription engine'))).toBe(false);
+			expect(visible(row('Quick note rewrite engine'))).toBe(false);
+
+			settings.quickNotesEnabled = true;
+			expect(entryValueOf(page())).toBe('Needs transcription');
+			expect(entryStatusOf(page())).toBe('warning');
+			expect(visible(row('Transcription is off'))).toBe(true);
+
+			settings.transcriptionEnabled = true;
+			settings.whisperApiKey = 'sk-test';
+			expect(entryValueOf(page())).toBe('On');
+			expect(entryStatusOf(page())).toBeNull();
+			expect(visible(row('Transcription is off'))).toBe(false);
+			expect(visible(row('Quick note transcription engine'))).toBe(true);
+			expect(visible(row('Quick note rewrite engine'))).toBe(true);
 		});
 
 		it('leaves the transcription page holding blocks and entries only', () => {
@@ -1778,6 +2239,97 @@ describe('settings definitions', () => {
 		});
 	});
 
+	describe('the output format section', () => {
+		it('draws the bitrate row by hand rather than declaring its options', () => {
+			// The list depends on the format and the sample rate chosen above
+			// it, and its options are blocked one by one against the device's
+			// encoder. A declared dropdown carries a fixed option map and
+			// disables only as a whole, so neither is expressible.
+			const row = rowOf(build(), 'Output format', 'Audio bitrate');
+			const host = {} as Setting;
+
+			row.render?.(host);
+
+			expect(row.control).toBeUndefined();
+			expect(renderBitrateRow).toHaveBeenCalledWith(host);
+		});
+
+		describe('whether the bitrate row applies to the chosen format', () => {
+			beforeEach(() => {
+				// The only container this browser records, so a lossless
+				// target goes through it rather than being written directly.
+				(global as Record<string, unknown>).MediaRecorder = {
+					isTypeSupported: (mime: string): boolean =>
+						mime === 'audio/webm',
+				};
+			});
+
+			afterEach(() => {
+				delete (global as Record<string, unknown>).MediaRecorder;
+			});
+
+			/** Whether the bitrate row's own predicate holds right now. */
+			const bitrateRowVisible = (): boolean => {
+				const { visible } = rowOf(
+					build(),
+					'Output format',
+					'Audio bitrate',
+				);
+				return typeof visible === 'function'
+					? visible()
+					: visible !== false;
+			};
+
+			it.each([
+				// Its own rate, spent on its own encoder.
+				['mp3', false, true],
+				// Captured as Opus at this rate and wrapped losslessly after
+				// the stop, so the value still decides what the file holds.
+				['flac', false, true],
+				// Mobile has no direct PCM capture, so WAV goes the same way.
+				['wav', true, true],
+				// Desktop WAV is raw PCM: nothing is encoded at any rate.
+				['wav', false, false],
+			])(
+				'recording %s with mobile=%s shows the row: %s',
+				(format, mobile, expected) => {
+					if (mobile) {
+						useMobilePlatform();
+					} else {
+						useDesktopPlatform();
+					}
+					settings.recordingFormat = format;
+
+					expect(bitrateRowVisible()).toBe(expected);
+				},
+			);
+		});
+
+		// The width is a property of the raw PCM capture, so on a platform
+		// that records WAV through a compressed intermediate there is nothing
+		// able to honour the choice. The row stays on screen all the same: a
+		// vault synced from a machine that does record raw PCM carries the
+		// setting, and a user who cannot see it cannot move it back either.
+		describe('the bit depth row', () => {
+			it('offers the width on a platform that captures raw PCM', () => {
+				useDesktopPlatform();
+				const row = rowOf(build(), 'Output format', 'Bit depth');
+
+				expect(disabledOf(row.control)).toBe(false);
+				expect(row.control?.key).toBe('recordingBitDepth');
+				expect(row.desc).toMatch(/Applies to WAV recordings only/);
+			});
+
+			it('shows it locked where WAV is not captured as raw PCM', () => {
+				useMobilePlatform();
+				const row = rowOf(build(), 'Output format', 'Bit depth');
+
+				expect(disabledOf(row.control)).toBe(true);
+				expect(row.desc).toMatch(/Not available on this device/);
+			});
+		});
+	});
+
 	describe('dropdown options', () => {
 		/**
 		 * Every dropdown whose options are a settled label map, paired with the
@@ -1795,6 +2347,11 @@ describe('settings definitions', () => {
 				heading: 'Output format',
 				name: 'Update links after conversion',
 				labels: CONVERSION_LINK_ACTION_LABELS,
+			},
+			{
+				heading: 'Output format',
+				name: 'Bit depth',
+				labels: PCM_SAMPLE_FORMAT_LABELS,
 			},
 			{
 				heading: 'Audio input',
@@ -1955,7 +2512,7 @@ describe('settings definitions', () => {
 		it('accepts the ceiling of the answer budget an engine may write', () => {
 			// The reported defect: the row showed 32000 and refused to store it.
 			const row = rowIn(
-				pageOf(build(), 'Anthropic (Claude)'),
+				pageOf(build(), EngineLabel.Anthropic),
 				'Max output tokens',
 			);
 
@@ -1972,8 +2529,10 @@ describe('settings definitions', () => {
 		});
 
 		it('accepts the round numbers a model catalogue quotes', () => {
-			const row = rowIn(pageOf(build(), 'OpenAI'), 'Max output tokens')
-				.control as { min?: number; max?: number; step?: number };
+			const row = rowIn(
+				pageOf(build(), EngineLabel.OpenAi),
+				'Max output tokens',
+			).control as { min?: number; max?: number; step?: number };
 
 			for (const tokens of [4000, 8000, 16000, 32000]) {
 				expect(numberControlRejection(row, tokens)).toBeUndefined();

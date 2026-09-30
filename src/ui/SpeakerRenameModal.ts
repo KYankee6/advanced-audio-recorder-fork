@@ -14,14 +14,17 @@
  * reading the transcript behind it. Name suggestions come from the recording's
  * own participant roster (stored in the same sidecar), optionally widened by a
  * settings profile, and every applied name joins both. Applied mappings are
- * kept in the sidecar history so the last rename can be undone, merging two
- * speakers into one name is rejected for now, and a note without timecode links
- * is only touched after the user opts in.
+ * kept in the sidecar history so the last rename can be undone, giving two
+ * speakers the same name merges them (diarization routinely splits one person
+ * into two labels) behind one confirmation, since already-written text cannot
+ * be split again afterwards, and a note without timecode links is only touched
+ * after the user opts in.
  * @module ui/SpeakerRenameModal
  */
 
 import { Notice, Setting } from 'obsidian';
 import type { App, ButtonComponent, DropdownComponent, TFile } from 'obsidian';
+import { confirmAction } from './ConfirmModal';
 import { PluginModal } from './PluginModal';
 import { PLUGIN_LOG_PREFIX } from '../constants';
 import { SpeakerPreviewPlayer } from '../player/SpeakerPreviewPlayer';
@@ -29,9 +32,17 @@ import {
 	addProfile,
 	createProfile,
 	effectiveProfileId,
+	findProfile,
 	profileNameRejection,
+	ProfileKindId,
 	profilesOfKind,
 } from '../settings/profiles';
+import {
+	appendParticipantsToNote,
+	readProfileNotes,
+	type ProfileNotesRead,
+} from '../settings/ProfileNoteStore';
+import { ProfileTextSource } from '../settings/ProfileTextSource';
 import type { AudioRecorderSettings } from '../settings/settingsSchema';
 import {
 	addParticipantsToProfile,
@@ -45,9 +56,12 @@ import type {
 import { mergeParticipantNames } from '../speakers/participantRoster';
 import { speakerPreviewRange } from '../speakers/speakerPreview';
 import {
-	duplicateAssignedNames,
+	addedMerges,
+	labelCollisionNames,
 	planHasWork,
 	planSpeakerRename,
+	speakerMerges,
+	type SpeakerMerge,
 	type SpeakerNameEntry,
 } from '../speakers/speakerRename';
 import {
@@ -124,9 +138,22 @@ export class SpeakerRenameModal extends PluginModal {
 	 * render, so the profile a transcription ran with re-selects itself.
 	 */
 	private selectedProfileId = '';
+	/**
+	 * The settings the suggestions read participant profiles from, with every
+	 * roster kept in a note read as the dialog is drawn, so a name added to the
+	 * note a moment ago is suggested, and the rosters whose note could not be
+	 * read, which the picker names. The settings the dialog was built with,
+	 * with nothing unread, until the first draw reads them.
+	 */
+	private rosterNotes: ProfileNotesRead;
 	/** Whether to rewrite notes that carry no timecode links to scope by. */
 	private allowBroad = false;
 	private profileDropdown: DropdownComponent | null = null;
+	/**
+	 * Rewrites the picker's description for the profile now picked. Held so a
+	 * profile created in the dialog is described without rebuilding it.
+	 */
+	private describeProfilePick: (() => void) | null = null;
 	private newProfileInput: HTMLInputElement | null = null;
 	/** Plays a speaker's first turn; created lazily on the first preview. */
 	private preview: SpeakerPreviewPlayer | null = null;
@@ -137,6 +164,10 @@ export class SpeakerRenameModal extends PluginModal {
 		private readonly options: SpeakerRenameModalOptions,
 	) {
 		super(app);
+		this.rosterNotes = {
+			settings: options.getSettings(),
+			unread: new Set(),
+		};
 	}
 
 	override onOpen(): void {
@@ -154,6 +185,13 @@ export class SpeakerRenameModal extends PluginModal {
 	private async render(): Promise<void> {
 		const settings = this.options.getSettings();
 		this.section = await this.loadSection();
+		this.rosterNotes = await readProfileNotes(
+			this.app,
+			settings,
+			profilesOfKind(settings.profiles, ProfileKindId.Participants).map(
+				(profile) => profile.id,
+			),
+		);
 		const section = this.section;
 		const { contentEl } = this;
 		contentEl.empty();
@@ -189,7 +227,7 @@ export class SpeakerRenameModal extends PluginModal {
 		// of that meeting are suggested without the user picking anything. A
 		// profile deleted since resolves to the recording's own roster.
 		this.selectedProfileId = effectiveProfileId(
-			profilesOfKind(settings.profiles, 'participants'),
+			profilesOfKind(settings.profiles, ProfileKindId.Participants),
 			section.participantProfileId ?? '',
 		);
 		this.renderProfilePicker(settings, section);
@@ -382,27 +420,49 @@ export class SpeakerRenameModal extends PluginModal {
 		section: TranscriptSection,
 	): void {
 		const stored = section.participants.length;
-		new Setting(this.contentEl)
+		const suggests = `This recording suggests ${
+			stored > 0
+				? `${String(stored)} stored name${stored > 1 ? 's' : ''}`
+				: 'no names yet'
+		}. Pick a profile to add its names to the suggestions; every name you apply is saved to both.`;
+		const picker = new Setting(this.contentEl)
 			.setName('Participant profile')
-			.setDesc(
-				`This recording suggests ${
-					stored > 0
-						? `${String(stored)} stored name${stored > 1 ? 's' : ''}`
-						: 'no names yet'
-				}. Pick a profile to add its names to the suggestions; every name you apply is saved to both.`,
-			)
 			.addDropdown((dropdown) => {
 				dropdown.addOption(RECORDING_ROSTER_OPTION, 'This recording');
 				for (const profile of profilesOfKind(
 					settings.profiles,
-					'participants',
+					ProfileKindId.Participants,
 				)) {
 					dropdown.addOption(profile.id, profile.name);
 				}
 				dropdown.setValue(this.selectedProfileId);
-				dropdown.onChange((value) => (this.selectedProfileId = value));
+				dropdown.onChange((value) => {
+					this.selectedProfileId = value;
+					this.describeProfilePick?.();
+				});
 				this.profileDropdown = dropdown;
 			});
+		// Rewritten in place on every pick: rebuilding the dialog would drop
+		// the names already typed into it.
+		const profileText = new ProfileTextSource(
+			this.app.vault,
+			this.rosterNotes.unread,
+		);
+		this.describeProfilePick = (): void => {
+			picker.setDesc(
+				profileText.describe(
+					suggests,
+					findProfile(
+						profilesOfKind(
+							this.options.getSettings().profiles,
+							ProfileKindId.Participants,
+						),
+						this.selectedProfileId,
+					),
+				),
+			);
+		};
+		this.describeProfilePick();
 		new Setting(this.contentEl)
 			.setName('New profile')
 			.addText((text) => {
@@ -425,7 +485,7 @@ export class SpeakerRenameModal extends PluginModal {
 	private suggestionPool(): string[] {
 		return mergeParticipantNames(
 			this.section?.participants ?? [],
-			participantsOf(this.options.getSettings(), this.selectedProfileId),
+			participantsOf(this.rosterNotes.settings, this.selectedProfileId),
 		);
 	}
 
@@ -442,7 +502,7 @@ export class SpeakerRenameModal extends PluginModal {
 		// name than one created there.
 		const rejection = profileNameRejection(
 			settings.profiles,
-			'participants',
+			ProfileKindId.Participants,
 			'',
 			name,
 		);
@@ -454,12 +514,13 @@ export class SpeakerRenameModal extends PluginModal {
 			}
 			return;
 		}
-		const created = createProfile('participants', name);
+		const created = createProfile(ProfileKindId.Participants, name);
 		settings.profiles = addProfile(settings.profiles, created);
 		await this.options.saveSettings();
 		this.selectedProfileId = created.id;
 		this.profileDropdown?.addOption(created.id, created.name);
 		this.profileDropdown?.setValue(created.id);
+		this.describeProfilePick?.();
 		if (this.newProfileInput) {
 			this.newProfileInput.value = '';
 		}
@@ -484,26 +545,31 @@ export class SpeakerRenameModal extends PluginModal {
 				for (const [label, input] of this.inputs) {
 					entries.push({ label, name: input.value });
 				}
-				const duplicates = duplicateAssignedNames(entries);
-				if (duplicates.length > 0) {
-					// Naming a speaker after another speaker's engine label is a
-					// distinct mistake (it would make their lines textually
-					// indistinguishable forever), so it gets its own explanation
-					// instead of the generic shared-name message.
-					const labels = new Set(entries.map((entry) => entry.label));
-					const labelCollisions = duplicates.filter((name) =>
-						labels.has(name),
-					);
+				// Two speakers given the same real name is a merge and goes
+				// ahead (behind the confirmation below); a name equal to
+				// another speaker's engine LABEL is still refused, because it
+				// says nothing about which of the two the user meant and
+				// leaves the roster unable to answer it either.
+				const collisions = labelCollisionNames(entries);
+				if (collisions.length > 0) {
 					new Notice(
-						labelCollisions.length > 0
-							? `A name cannot equal another speaker's label ` +
-									`(${labelCollisions.join(', ')}): their lines ` +
-									'would become indistinguishable in the outputs. ' +
-									'Give the speakers real, distinct names instead.'
-							: `Two speakers cannot share a name (${duplicates.join(
-									', ',
-								)}). Give each a distinct name.`,
+						`A name cannot equal another speaker's label ` +
+							`(${collisions.join(', ')}): nothing could then tell ` +
+							'their lines apart in the outputs. To make them one ' +
+							'speaker, give both rows the same real name instead.',
 					);
+					return;
+				}
+				const merges = addedMerges(
+					speakerMerges(
+						section.speakers.map((entry) => ({
+							label: entry.label,
+							name: entry.name ?? '',
+						})),
+					),
+					speakerMerges(entries),
+				);
+				if (merges.length > 0 && !(await this.confirmMerge(merges))) {
 					return;
 				}
 				const typed = new Map(
@@ -558,7 +624,10 @@ export class SpeakerRenameModal extends PluginModal {
 						this.describeCounts(applied),
 				);
 				new Notice(
-					this.describeOutcome(applied, { offerBroadOptIn: true }),
+					this.describeOutcome(applied, {
+						offerBroadOptIn: true,
+						ambiguous: plan.ambiguous,
+					}),
 				);
 				this.close();
 			} catch (error) {
@@ -576,6 +645,10 @@ export class SpeakerRenameModal extends PluginModal {
 	 * through the same plan/apply path, and the undone entry is removed from
 	 * the history - so each press walks one step further back and the button
 	 * disappears once the history is exhausted, instead of ping-ponging.
+	 *
+	 * A merge is the one rename this cannot walk back: both speakers render
+	 * as the same text by now, so the plan reports that text as ambiguous
+	 * and the outputs keep it while the roster steps back.
 	 */
 	private async undo(): Promise<void> {
 		const section = this.section;
@@ -614,6 +687,7 @@ export class SpeakerRenameModal extends PluginModal {
 					new Notice(
 						this.describeOutcome(applied, {
 							offerBroadOptIn: false,
+							ambiguous: plan.ambiguous,
 						}),
 					);
 				} else {
@@ -638,6 +712,33 @@ export class SpeakerRenameModal extends PluginModal {
 	}
 
 	/**
+	 * Asks before a merge is written into the outputs. Giving two diarized
+	 * labels one name is a supported and often necessary fix - engines split
+	 * one person across labels - but it is the single step this dialog cannot
+	 * walk back: once both speakers render as the same text, nothing in a note
+	 * or a transcript file says which of them a line belonged to, so undo and
+	 * every later rename can only leave those lines alone. Only a merge the
+	 * stored roster does not already carry is asked about, so re-applying or
+	 * healing an existing one never nags.
+	 * @param merges - The merges this apply would newly create
+	 * @returns True when the user confirmed, false when they backed out
+	 */
+	private confirmMerge(merges: readonly SpeakerMerge[]): Promise<boolean> {
+		const merged = merges
+			.map((merge) => `${merge.labels.join(', ')} become ${merge.name}`)
+			.join('; ');
+		return confirmAction(this.app, {
+			title: 'Merge speakers?',
+			message:
+				`${merged}. Their lines become one speaker in every ` +
+				'output. This cannot be undone: merged lines are the same ' +
+				'text afterwards, so nothing can tell them apart again - ' +
+				'only a new transcription restores separate labels.',
+			confirmText: 'Merge',
+		});
+	}
+
+	/**
 	 * Adds the entered names to the selected settings profile, so they are
 	 * suggested for the next recording that picks it. A no-op when no profile
 	 * is selected or nothing new was entered - the recording's own roster grows
@@ -657,16 +758,53 @@ export class SpeakerRenameModal extends PluginModal {
 			return;
 		}
 		const settings = this.options.getSettings();
-		// Undefined is a roster that did not grow - every name entered was
-		// already in it - and there is then nothing to save.
-		const grown = addParticipantsToProfile(
-			settings.profiles,
-			this.selectedProfileId,
-			names,
-		);
-		if (grown) {
-			settings.profiles = grown;
-			await this.options.saveSettings();
+		const target = findProfile(settings.profiles, this.selectedProfileId);
+		if (!target) {
+			return;
+		}
+		// The roster only feeds the suggestions of the next recording, and the
+		// rename is what the user applied: a roster that cannot be written is
+		// reported, and the rename goes ahead.
+		try {
+			// A roster kept in a note grows in the note. Its body is only the
+			// text last read from there, so a name added to the body alone
+			// would be gone with the next read.
+			if (
+				target.kind === ProfileKindId.Participants &&
+				target.sourcePath !== undefined
+			) {
+				const profileText = new ProfileTextSource(this.app.vault);
+				const note = profileText.note(target);
+				if (!note) {
+					new Notice(
+						`${profileText.missingNote(target.name, target.sourcePath)}, so the new names were not added to it.`,
+					);
+					return;
+				}
+				await appendParticipantsToNote(this.app.vault, note, names);
+				return;
+			}
+			// Undefined is a roster that did not grow - every name entered was
+			// already in it - and there is then nothing to save.
+			const grown = addParticipantsToProfile(
+				settings.profiles,
+				this.selectedProfileId,
+				names,
+			);
+			if (grown) {
+				settings.profiles = grown;
+				await this.options.saveSettings();
+			}
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : String(error);
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} Failed to add names to profile ${target.name}:`,
+				error,
+			);
+			new Notice(
+				`The new names were not added to profile "${target.name}": ${message}`,
+			);
 		}
 	}
 
@@ -687,11 +825,12 @@ export class SpeakerRenameModal extends PluginModal {
 	 * Builds the outcome notice from what the rename actually touched.
 	 * @param applied - Counts of rewritten notes and files
 	 * @param options - `offerBroadOptIn` names the toggle that would rewrite
-	 *   an unscopable note, which only an apply can act on
+	 *   an unscopable note, which only an apply can act on; `ambiguous` are the
+	 *   display texts a merge left shared, which no rule may touch
 	 */
 	private describeOutcome(
 		applied: SpeakerRenameApplyResult,
-		options: { offerBroadOptIn: boolean },
+		options: { offerBroadOptIn: boolean; ambiguous: readonly string[] },
 	): string {
 		const targets: string[] = [];
 		if (applied.updatedNotes > 0) {
@@ -748,7 +887,20 @@ export class SpeakerRenameModal extends PluginModal {
 					'longer exist and were skipped; transcribe again to ' +
 					'refresh them.'
 				: '';
-		const rest = `${unscopable}${alreadyCurrent}${unmatched}${missing}${failed}`;
+		// The one outcome the user cannot act on: merged speakers render as one
+		// text, so a later assignment that wants them apart again has nothing
+		// to tell their lines apart by. Say which text stayed and what does
+		// undo it, instead of moving both speakers' lines to one of the names.
+		const ambiguous =
+			options.ambiguous.length > 0
+				? ` Left as it is: ${options.ambiguous
+						.map((name) => `"${name}"`)
+						.join(', ')} - shown by more than one speaker, and ` +
+					'merged lines are the same text, so nothing can tell them ' +
+					'apart again. Transcribe the recording again for separate ' +
+					'labels.'
+				: '';
+		const rest = `${unscopable}${alreadyCurrent}${unmatched}${missing}${failed}${ambiguous}`;
 		if (targets.length === 0) {
 			return `No speaker labels were rewritten.${rest}`;
 		}

@@ -4,14 +4,15 @@
  * @module transcription/transcriptOutput
  */
 
-import { MarkdownView, Notice } from 'obsidian';
+import { Notice } from 'obsidian';
 import type { App, TFile } from 'obsidian';
 import { PLUGIN_LOG_PREFIX } from '../constants';
 import { resolveUniquePathInDirectory } from '../audio/RecordingFileManager';
 import { directoryOf } from '../utils/paths';
+import { findNoteView } from '../utils/noteViews';
 import { serializeTranscriptFile } from './transcriptFormat';
-import type {
-	Transcript,
+import {
+	type Transcript,
 	TranscriptDestination,
 	TranscriptFileFormat,
 } from './TranscriptTypes';
@@ -32,7 +33,9 @@ export function effectiveTranscriptDestination(
 	destination: TranscriptDestination,
 	hasHostNote: boolean,
 ): TranscriptDestination {
-	return !hasHostNote && destination === 'note' ? 'file' : destination;
+	return !hasHostNote && destination === TranscriptDestination.Note
+		? TranscriptDestination.File
+		: destination;
 }
 
 /**
@@ -67,7 +70,8 @@ export function buildTranscriptFilePath(
 ): string {
 	const dotIndex = audioPath.lastIndexOf('.');
 	const base = dotIndex > 0 ? audioPath.slice(0, dotIndex) : audioPath;
-	const suffix = format === 'json' ? 'transcript.json' : format;
+	const suffix =
+		format === TranscriptFileFormat.Json ? 'transcript.json' : format;
 	const label = languageLabel(language);
 	return label ? `${base}.${label}.${suffix}` : `${base}.${suffix}`;
 }
@@ -99,30 +103,6 @@ export async function writeTranscriptFile(
 		target,
 		serializeTranscriptFile(transcript, format),
 	);
-}
-
-/**
- * Finds the open, editable Markdown view for a specific note path, or null
- * when that note is not open in a Markdown leaf. Targets the note the
- * timecode links were generated against - not whatever happens to be active
- * when an async transcription finishes - so output never lands in an
- * unrelated file the user switched to mid-run.
- * @param app - Obsidian App
- * @param notePath - Vault path of the target note
- */
-function findNoteView(app: App, notePath: string): MarkdownView | null {
-	if (!notePath) {
-		return null;
-	}
-	const view = app.workspace
-		.getLeavesOfType('markdown')
-		.map((leaf) => leaf.view)
-		.find(
-			(candidate): candidate is MarkdownView =>
-				candidate instanceof MarkdownView &&
-				candidate.file?.path === notePath,
-		);
-	return view ?? null;
 }
 
 /**

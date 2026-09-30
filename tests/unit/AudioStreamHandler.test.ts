@@ -6,23 +6,43 @@
 import {
 	channelSelectionAvailable,
 	deviceMaxChannels,
+	effectiveOutputMode,
+	effectiveTrackLevelAlignment,
 	getAudioInputDeviceSnapshot,
 	getAudioStreams,
 	getAudioSourceName,
 	getOrderedTrackSources,
+	isLoopbackInputLabel,
 	isMultiTrackSessionEnabled,
+	isSystemAudioPairingEnabled,
 	missingCaptureIndexes,
+	recordingEncodingFor,
 	resolveCaptureDeviceId,
+	surplusSystemAudioTracks,
+	trackProcessingConstraints,
 	validateSelectedDevices,
 	watchStreamEndings,
+	type TrackAudioSource,
 } from 'src/recording/AudioStreamHandler';
 import { AudioStreamError } from 'src/errors';
 import { DEFAULT_SETTINGS } from 'src/settings/settingsSchema';
-import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
+import type {
+	AudioRecorderSettings,
+	TrackSourceKind,
+} from 'src/settings/settingsSchema';
+import type { OutputMode } from 'src/types';
 import { setPlatform, useDesktopPlatform } from '../helpers/platform';
 import { partial } from '../helpers/doubles';
 import { at } from '../helpers/assertions';
 import { withMediaDevices } from '../helpers/mediaMocks';
+import { systemAudioTrack } from '../helpers/settingsFixtures';
+import { captureSystemAudioStream } from 'src/recording/systemAudioSupport';
+
+// The capture asks the host for a grant, which no test environment can give.
+// Mocked here so the dispatch in getAudioStreams can be observed on its own.
+jest.mock('src/recording/systemAudioSupport', () => ({
+	captureSystemAudioStream: jest.fn(),
+}));
 
 /** Builds a MediaStream stub whose tracks record stop() calls. */
 function fakeStream(): { stream: MediaStream; stop: jest.Mock } {
@@ -125,6 +145,8 @@ describe('AudioStreamHandler', () => {
 					channelMode: 'mono-left',
 					gainDb: -6,
 					pan: -1,
+					processing: 'global',
+					kind: 'input-device',
 				},
 			]);
 			expect(getUserMedia).toHaveBeenCalledWith(
@@ -157,6 +179,82 @@ describe('AudioStreamHandler', () => {
 			// old Promise.all the stream never reached the caller and stayed
 			// captured until app restart.
 			expect(opened.stop).toHaveBeenCalledTimes(1);
+		});
+
+		// A session holding a microphone and a system-loopback input wants
+		// opposite treatment on the two: echo cancellation is what makes the
+		// room microphone usable and what silences the far end of the call.
+		it('opens each track with the processing that track asked for', async () => {
+			getUserMedia.mockResolvedValue(fakeStream().stream);
+
+			await getAudioStreams({
+				...multiTrackSettings,
+				inputNoiseSuppression: true,
+				inputEchoCancellation: true,
+				inputAutoGainControl: true,
+				trackAudioSources: new Map([
+					[
+						1,
+						{
+							deviceId: 'device-1',
+							channelMode: 'source' as const,
+							processing: 'voice' as const,
+						},
+					],
+					[
+						2,
+						{
+							deviceId: 'device-2',
+							channelMode: 'source' as const,
+							processing: 'raw' as const,
+						},
+					],
+				]),
+			});
+
+			expect(getUserMedia).toHaveBeenNthCalledWith(1, {
+				audio: {
+					deviceId: { exact: 'device-1' },
+					sampleRate: multiTrackSettings.sampleRate,
+					noiseSuppression: true,
+					echoCancellation: true,
+					autoGainControl: true,
+				},
+			});
+			expect(getUserMedia).toHaveBeenNthCalledWith(2, {
+				audio: {
+					deviceId: { exact: 'device-2' },
+					sampleRate: multiTrackSettings.sampleRate,
+					noiseSuppression: false,
+					echoCancellation: false,
+					autoGainControl: false,
+				},
+			});
+		});
+
+		it('opens a track that asked for nothing with the session-wide toggles', async () => {
+			getUserMedia.mockResolvedValue(fakeStream().stream);
+
+			await getAudioStreams({
+				...multiTrackSettings,
+				maxTracks: 1,
+				inputNoiseSuppression: false,
+				inputEchoCancellation: true,
+				inputAutoGainControl: false,
+				trackAudioSources: new Map([
+					[1, { deviceId: 'device-1', channelMode: 'source' }],
+				]),
+			});
+
+			expect(getUserMedia).toHaveBeenCalledWith({
+				audio: {
+					deviceId: { exact: 'device-1' },
+					sampleRate: multiTrackSettings.sampleRate,
+					noiseSuppression: false,
+					echoCancellation: true,
+					autoGainControl: false,
+				},
+			});
 		});
 	});
 
@@ -719,6 +817,386 @@ describe('AudioStreamHandler', () => {
 	});
 });
 
+describe('a system-audio track', () => {
+	const devices = withMediaDevices(() => ({
+		enumerateDevices: jest.fn().mockResolvedValue([]),
+	}));
+
+	const settings = {
+		...DEFAULT_SETTINGS,
+		enableMultiTrack: true,
+		maxTracks: 2,
+		trackAudioSources: new Map([
+			[1, { deviceId: 'mic-1', channelMode: 'source' as const }],
+			[
+				2,
+				{
+					deviceId: '',
+					channelMode: 'source' as const,
+					kind: 'system-audio' as const,
+				},
+			],
+		]),
+	};
+
+	beforeEach(() => {
+		useDesktopPlatform();
+		devices().enumerateDevices.mockResolvedValue([
+			{ kind: 'audioinput', deviceId: 'mic-1', label: 'Mic' },
+		]);
+	});
+
+	// getOrderedTrackSources drops a track with no device id, which is how a
+	// half-configured device track is ignored. A system-audio track has no
+	// id to give and would be dropped with them.
+	it('reaches the session without naming a device', () => {
+		const order = getOrderedTrackSources(settings);
+
+		expect(order.map((source) => source.trackNumber)).toEqual([1, 2]);
+		expect(at(order, 1).kind).toBe('system-audio');
+		expect(at(order, 1).deviceId).toBe('');
+	});
+
+	// Checked against the input list it is absent from by construction, so
+	// asking would refuse every start of a session that holds one.
+	it('does not make the session refuse to start', async () => {
+		await expect(
+			validateSelectedDevices(settings),
+		).resolves.toBeUndefined();
+	});
+
+	// getAudioStreams is the only place a capture is opened, so the choice
+	// between asking the host and asking the device list is made there.
+	it('is opened by asking the host rather than the device list', async () => {
+		const granted = partial<MediaStream>({ getTracks: () => [] });
+		const fromMicrophone = partial<MediaStream>({ getTracks: () => [] });
+		jest.mocked(captureSystemAudioStream).mockResolvedValue(granted);
+		const getUserMedia = jest.fn().mockResolvedValue(fromMicrophone);
+		Object.defineProperty(navigator, 'mediaDevices', {
+			value: { getUserMedia, enumerateDevices: jest.fn() },
+			configurable: true,
+		});
+
+		const result = await getAudioStreams(settings);
+
+		expect(captureSystemAudioStream).toHaveBeenCalledTimes(1);
+		expect(getUserMedia).toHaveBeenCalledTimes(1);
+		expect(result.streams).toEqual([fromMicrophone, granted]);
+	});
+
+	// Such a track shows no channel row, because it names no device whose
+	// layout there would be to describe. A layout stored while it was a
+	// device track would otherwise keep reducing the capture to one channel
+	// with no visible setting left that accounts for it.
+	it('carries no channel layout a hidden row could still be holding', () => {
+		const order = getOrderedTrackSources({
+			...settings,
+			trackAudioSources: new Map([
+				[
+					1,
+					{
+						...systemAudioTrack(),
+						channelMode: 'mono-left' as const,
+					},
+				],
+			]),
+		});
+
+		expect(at(order, 0).channelMode).toBe('source');
+	});
+
+	// One session holds one grant: the handler answering it lives on the
+	// Electron session, which keeps one at a time, so two tracks asking
+	// together overwrite and then clear each other's.
+	it('refuses a second one without opening any capture', async () => {
+		const getUserMedia = jest.fn();
+		Object.defineProperty(navigator, 'mediaDevices', {
+			value: { getUserMedia, enumerateDevices: jest.fn() },
+			configurable: true,
+		});
+		const twoGrants = {
+			...settings,
+			trackAudioSources: new Map([
+				[1, systemAudioTrack()],
+				[2, systemAudioTrack()],
+			]),
+		};
+
+		await expect(getAudioStreams(twoGrants)).rejects.toThrow(
+			'Track(s) 2 also record the system audio',
+		);
+
+		expect(captureSystemAudioStream).not.toHaveBeenCalled();
+		expect(getUserMedia).not.toHaveBeenCalled();
+	});
+});
+
+// One switch standing in for a whole track: the tracks it describes are
+// never stored, so the capture, the encoder and the session snapshot all have
+// to read them from the same place.
+describe('the system-audio pairing', () => {
+	/** The single-track session of a vault that asked for the system output. */
+	const paired: AudioRecorderSettings = {
+		...DEFAULT_SETTINGS,
+		includeSystemAudio: true,
+		audioDeviceId: 'mic-1',
+		recordingChannels: 'mono-mix',
+	};
+
+	const devices = withMediaDevices(() => ({
+		getUserMedia: jest.fn(),
+		enumerateDevices: jest.fn().mockResolvedValue([]),
+	}));
+
+	beforeEach(() => {
+		useDesktopPlatform();
+	});
+
+	// The capture opens a track list only where the settings describe one, and
+	// the pairing stores no tracks at all: the switch alone has to take the
+	// session down that path, or the recording is the microphone by itself.
+	it('opens both captures of a session that configured no tracks', async () => {
+		const fromHost = partial<MediaStream>({ getTracks: () => [] });
+		const fromMicrophone = partial<MediaStream>({ getTracks: () => [] });
+		jest.mocked(captureSystemAudioStream).mockResolvedValue(fromHost);
+		devices().getUserMedia.mockResolvedValue(fromMicrophone);
+
+		const { streams } = await getAudioStreams(paired);
+
+		expect(streams).toEqual([fromMicrophone, fromHost]);
+	});
+
+	// The microphone track is the single-track session as it stands - the
+	// input the device row names and the layout the channel row picks - so
+	// turning the switch on adds a track beside that recording rather than
+	// changing it.
+	it('records the single-track microphone beside the system output', () => {
+		expect(getOrderedTrackSources(paired)).toEqual([
+			{
+				trackNumber: 1,
+				deviceId: 'mic-1',
+				channelMode: 'mono-mix',
+				gainDb: 0,
+				pan: 0,
+				processing: 'global',
+				kind: 'input-device',
+			},
+			{
+				trackNumber: 2,
+				deviceId: '',
+				channelMode: 'source',
+				gainDb: 0,
+				pan: 0,
+				kind: 'system-audio',
+			},
+		]);
+	});
+
+	// A per-track configuration already says what every track records, and
+	// one session can capture the system output once: a pairing added to it
+	// would refuse the very sessions the switch exists to make easy.
+	it('stands down where the tracks are configured by hand', () => {
+		const configured = getOrderedTrackSources({
+			...paired,
+			enableMultiTrack: true,
+			maxTracks: 1,
+			trackAudioSources: new Map([
+				[1, { deviceId: 'iface-1', channelMode: 'source' as const }],
+			]),
+		});
+
+		expect(isSystemAudioPairingEnabled(paired)).toBe(true);
+		expect(configured.map((source) => source.kind)).toEqual([
+			'input-device',
+		]);
+	});
+
+	// Two captures at once is the ability the mobile app has not got, so a
+	// switch reaching it through a synced vault degrades to the single-track
+	// session it always was, exactly as the multi-track one does.
+	it('records one track where two captures cannot be opened', () => {
+		setPlatform({ isMobile: true, isMobileApp: true });
+
+		expect(getOrderedTrackSources(paired)).toEqual([]);
+	});
+
+	// The stored output mode belongs to the multi-track page, which the
+	// pairing shows nothing of: what it exists to produce is one recording of
+	// a call rather than a microphone file and a loudspeaker file.
+	it('mixes its tracks into one file whatever the page was left on', () => {
+		const separately: AudioRecorderSettings = {
+			...paired,
+			outputMode: 'multiple',
+		};
+
+		expect(effectiveOutputMode(separately)).toBe('single');
+		expect(recordingEncodingFor(separately).mergesTracks).toBe(true);
+	});
+
+	it('leaves the stored output mode to a session that configured tracks', () => {
+		expect(
+			effectiveOutputMode({
+				...DEFAULT_SETTINGS,
+				outputMode: 'multiple',
+			}),
+		).toBe('multiple');
+	});
+
+	// The state of a vault that never opened the device row, which is the one
+	// the settings reference calls the default. The microphone track carries
+	// no id there, the same way the single-track capture carries none, and a
+	// capture asked for an empty id would open nothing at all.
+	it('pairs the default microphone where no device was picked', () => {
+		const [microphone] = getOrderedTrackSources({
+			...paired,
+			audioDeviceId: '',
+		});
+
+		expect(microphone).toMatchObject({
+			deviceId: '',
+			kind: 'input-device',
+		});
+	});
+
+	// Match track levels is declared on the multi-track page under a predicate
+	// that hides it while multi-track is off, so the pairing can neither show
+	// it nor be configured through it.
+	it('leaves its tracks at the levels they were recorded at', () => {
+		expect(
+			effectiveTrackLevelAlignment({
+				...paired,
+				mixAlignTrackLevels: true,
+			}),
+		).toBe(false);
+	});
+
+	it('leaves the stored levelling to a session that configured tracks', () => {
+		expect(
+			effectiveTrackLevelAlignment({
+				...DEFAULT_SETTINGS,
+				enableMultiTrack: true,
+				mixAlignTrackLevels: true,
+			}),
+		).toBe(true);
+	});
+});
+
+// The rule the capture refuses on and the settings entry warns about, asked
+// in one place so the two can never disagree about which session is valid.
+describe('surplusSystemAudioTracks', () => {
+	/**
+	 * One track of the given kind, with everything else at its default.
+	 * @param trackNumber - Which track this is
+	 * @param kind - What it records from
+	 * @returns The track as an ordered session carries it
+	 */
+	function track(
+		trackNumber: number,
+		kind: TrackSourceKind,
+	): TrackAudioSource {
+		return {
+			trackNumber,
+			deviceId:
+				kind === 'system-audio' ? '' : `dev-${String(trackNumber)}`,
+			channelMode: 'source',
+			kind,
+		};
+	}
+
+	it('names nothing where one track asks for the system output', () => {
+		expect(
+			surplusSystemAudioTracks([
+				track(1, 'input-device'),
+				track(2, 'system-audio'),
+			]),
+		).toEqual([]);
+	});
+
+	it('names every track asking beyond the first', () => {
+		expect(
+			surplusSystemAudioTracks([
+				track(1, 'system-audio'),
+				track(2, 'input-device'),
+				track(3, 'system-audio'),
+				track(4, 'system-audio'),
+			]),
+		).toEqual([3, 4]);
+	});
+});
+
+describe('trackProcessingConstraints', () => {
+	const sessionWide = {
+		noiseSuppression: true,
+		echoCancellation: false,
+		autoGainControl: true,
+	};
+
+	it.each([
+		{
+			mode: 'voice' as const,
+			expected: {
+				noiseSuppression: true,
+				echoCancellation: true,
+				autoGainControl: true,
+			},
+		},
+		{
+			mode: 'raw' as const,
+			expected: {
+				noiseSuppression: false,
+				echoCancellation: false,
+				autoGainControl: false,
+			},
+		},
+		{ mode: 'global' as const, expected: sessionWide },
+		{ mode: undefined, expected: sessionWide },
+	])('resolves $mode to its own set of filters', ({ mode, expected }) => {
+		expect(trackProcessingConstraints(mode, sessionWide)).toEqual(expected);
+	});
+
+	// A named profile is handed to the caller rather than copied for it, the
+	// way getProcessingConstraints builds one per call. Editable, one track's
+	// capture would rewrite the profile every later track in the process is
+	// opened with, and nothing short of restarting Obsidian would put it back.
+	it.each([{ mode: 'voice' as const }, { mode: 'raw' as const }])(
+		'hands back a $mode profile no caller can edit',
+		({ mode }) => {
+			const profile = trackProcessingConstraints(mode, sessionWide);
+
+			expect(Object.isFrozen(profile)).toBe(true);
+		},
+	);
+});
+
+// A loopback input is an ordinary audioinput in everything the device API
+// reports, so its name is the only thing that sets it apart, and the name is
+// also the thing a user recording a call has to find in the list.
+describe('isLoopbackInputLabel', () => {
+	it.each([
+		{ label: 'Stereo Mix (Realtek(R) Audio)' },
+		{ label: 'CABLE Output (VB-Audio Virtual Cable)' },
+		{ label: 'VoiceMeeter Out B1 (VB-Audio VoiceMeeter VAIO)' },
+		{ label: 'BlackHole 2ch' },
+		{ label: 'Monitor of Built-in Audio Analog Stereo' },
+	])('recognises $label', ({ label }) => {
+		expect(isLoopbackInputLabel(label)).toBe(true);
+	});
+
+	it.each([
+		{ label: 'Microphone (Realtek(R) Audio)' },
+		{ label: 'Default - Headset Microphone' },
+		{ label: 'Studio Display Microphone' },
+	])('leaves $label alone', ({ label }) => {
+		expect(isLoopbackInputLabel(label)).toBe(false);
+	});
+
+	// Every device reports an empty label until microphone permission has
+	// been granted once, and the settings tab reads the list before that.
+	it('answers false for a device that has not been named yet', () => {
+		expect(isLoopbackInputLabel('')).toBe(false);
+	});
+});
+
 // Nothing in the plugin used to listen for a track ending, so a microphone
 // unplugged mid-session was noticed only when the finished file turned out to
 // hold silence. The subscription is the mirror image of stopAllStreams, and
@@ -875,6 +1353,33 @@ describe('missingCaptureIndexes', () => {
 		).resolves.toEqual([0, 2]);
 	});
 
+	// The sharpest edge of recording the system output. Such a capture is
+	// granted by the host rather than opened from the device list, and the
+	// stream may still report an id of its own. Matched against the inputs
+	// it is absent from by construction, so the first devicechange would
+	// retire a track that is recording perfectly well.
+	it('leaves a capture the device list cannot answer for alone', async () => {
+		listInputs('mic');
+
+		await expect(
+			missingCaptureIndexes(
+				[streamFrom('mic'), streamFrom('loopback-grant')],
+				new Set([1]),
+			),
+		).resolves.toEqual([]);
+	});
+
+	it('still names a device track beside an exempt one', async () => {
+		listInputs('kept');
+
+		await expect(
+			missingCaptureIndexes(
+				[streamFrom('gone'), streamFrom('loopback-grant')],
+				new Set([1]),
+			),
+		).resolves.toEqual([0]);
+	});
+
 	it('leaves a session whose inputs are all listed alone', async () => {
 		listInputs('one', 'two');
 
@@ -901,5 +1406,133 @@ describe('missingCaptureIndexes', () => {
 		await expect(missingCaptureIndexes([streamFrom('')])).resolves.toEqual(
 			[],
 		);
+	});
+});
+
+describe('recordingEncodingFor', () => {
+	// What the encoder is asked about has to be the file the session writes:
+	// a merged multi-track MP4 was checked as a stereo file at the codec's
+	// default rate, passed, and then failed while the mono 22.05 kHz mix it
+	// really was got encoded.
+	beforeEach(() => {
+		useDesktopPlatform();
+	});
+
+	/**
+	 * Settings with two tracks whose modes and placements are given.
+	 * @param tracks - Mode and pan per track
+	 * @param outputMode - Whether the tracks are mixed into one file
+	 * @returns The settings
+	 */
+	function twoTracks(
+		tracks: { channelMode: 'source' | 'mono-mix'; pan: number }[],
+		outputMode: OutputMode = 'single',
+	): AudioRecorderSettings {
+		return {
+			...DEFAULT_SETTINGS,
+			enableMultiTrack: true,
+			maxTracks: 2,
+			outputMode,
+			sampleRate: 22050,
+			trackAudioSources: new Map(
+				tracks.map((track, index) => [
+					index + 1,
+					{ deviceId: `device-${String(index + 1)}`, ...track },
+				]),
+			),
+		};
+	}
+
+	it('describes a single mono track as one channel at the requested rate', () => {
+		expect(
+			recordingEncodingFor({
+				...DEFAULT_SETTINGS,
+				sampleRate: 22050,
+				recordingChannels: 'mono-mix',
+			}),
+		).toEqual({
+			sampleRate: 22050,
+			numberOfChannels: 1,
+			mergesTracks: false,
+		});
+	});
+
+	it('assumes stereo for a single pass-through track', () => {
+		expect(
+			recordingEncodingFor({
+				...DEFAULT_SETTINGS,
+				recordingChannels: 'source',
+			}).numberOfChannels,
+		).toBe(2);
+	});
+
+	it('takes the widest track of a merged session', () => {
+		const encoding = recordingEncodingFor(
+			twoTracks([
+				{ channelMode: 'mono-mix', pan: 0 },
+				{ channelMode: 'source', pan: 0 },
+			]),
+		);
+
+		expect(encoding).toEqual({
+			sampleRate: 22050,
+			numberOfChannels: 2,
+			mergesTracks: true,
+		});
+	});
+
+	it('describes two centred mono tracks mixed together as mono', () => {
+		expect(
+			recordingEncodingFor(
+				twoTracks([
+					{ channelMode: 'mono-mix', pan: 0 },
+					{ channelMode: 'mono-mix', pan: 0 },
+				]),
+			).numberOfChannels,
+		).toBe(1);
+	});
+
+	it('goes stereo for a panned mono track, the way the mixer does', () => {
+		expect(
+			recordingEncodingFor(
+				twoTracks([
+					{ channelMode: 'mono-mix', pan: -1 },
+					{ channelMode: 'mono-mix', pan: 1 },
+				]),
+			).numberOfChannels,
+		).toBe(2);
+	});
+
+	it('does not merge tracks written to separate files', () => {
+		const encoding = recordingEncodingFor(
+			twoTracks(
+				[
+					{ channelMode: 'mono-mix', pan: -1 },
+					{ channelMode: 'mono-mix', pan: 1 },
+				],
+				'multiple',
+			),
+		);
+
+		expect(encoding.mergesTracks).toBe(false);
+		expect(encoding.numberOfChannels).toBe(1);
+	});
+
+	it('describes the tracks it is handed rather than the settings', () => {
+		// The manager captured its tracks before asking for permission; an
+		// edit made while that was pending must not describe another session.
+		const encoding = recordingEncodingFor(
+			twoTracks([
+				{ channelMode: 'source', pan: 0 },
+				{ channelMode: 'source', pan: 0 },
+			]),
+			[{ trackNumber: 1, deviceId: 'device-1', channelMode: 'mono-mix' }],
+		);
+
+		expect(encoding).toEqual({
+			sampleRate: 22050,
+			numberOfChannels: 1,
+			mergesTracks: false,
+		});
 	});
 });

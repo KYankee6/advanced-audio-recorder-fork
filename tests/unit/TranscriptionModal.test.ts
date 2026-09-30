@@ -18,6 +18,8 @@ import { createFile } from '../helpers/createApp';
 import { allEls, maybeEl } from '../helpers/dom';
 import {
 	hasSettingRow,
+	settingNames,
+	rowDescription,
 	rowInput,
 	rowSelect,
 	rowToggle,
@@ -27,6 +29,7 @@ import {
 import { setPlatform, useDesktopPlatform } from '../helpers/platform';
 import { tick } from '../helpers/async';
 import { internalsOf } from '../helpers/doubles';
+import { asMockVault } from '../helpers/obsidianMock';
 
 // The run itself has its own suites (runTranscription, the providers); what
 // this dialog owes is what it does with the outcome, so the run is recorded
@@ -424,6 +427,51 @@ describe('TranscriptionModal participant profile selection', () => {
 		expect(settings.selectedProfileIds.participants).toBe('');
 	});
 
+	it('names where the picked roster text comes from, and follows the pick', async () => {
+		const note = 'Teams/Weekly.md';
+		const settings = diarizingSettings({
+			profiles: [
+				{
+					...storedProfile(
+						'participants',
+						's1',
+						'Weekly sync',
+						'Alex',
+					),
+					sourcePath: note,
+				},
+				storedProfile('participants', 's2', 'Interviews', ''),
+			],
+			selectedProfileIds: {
+				...DEFAULT_SETTINGS.selectedProfileIds,
+				participants: 's1',
+			},
+		});
+		const app = new App();
+		asMockVault(app.vault).seed([{ path: note, content: '- Alex' }]);
+		const modal = new TranscriptionModal(
+			app,
+			createAudioFile(),
+			() => settings,
+			{},
+		);
+		modal.onOpen();
+		const description = (): string =>
+			rowDescription(settingRow(modal.contentEl, 'Participant profile'));
+
+		expect(description()).toContain(`Uses the text of ${note}.`);
+
+		const select = selectByName(modal, 'Participant profile');
+		if (!select) {
+			throw new Error('Participant profile select not rendered');
+		}
+		select.value = 's2';
+		select.dispatchEvent(new Event('change'));
+		await tick();
+
+		expect(description()).toContain('Uses the text typed in the settings.');
+	});
+
 	it('shows a removed profile as None rather than a dangling selection', () => {
 		const stored = diarizingSettings({
 			selectedProfileIds: {
@@ -510,6 +558,25 @@ describe('TranscriptionModal chapter profile selection', () => {
 		);
 		modal.onOpen();
 		expect(chapterProfileSelect(modal)).toBeNull();
+	});
+
+	it('describes the compact picker only by the picked guidance text', async () => {
+		const modal = openedOver(settingsWithChapterProfiles(true));
+		const description = (): string =>
+			rowDescription(settingRow(modal.contentEl, 'Chapter profile'));
+
+		// None applies no guidance, so the picker says nothing.
+		expect(description()).toBe('');
+
+		const select = chapterProfileSelect(modal);
+		if (!select) {
+			throw new Error('Chapter profile select not rendered');
+		}
+		select.value = 'c1';
+		select.dispatchEvent(new Event('change'));
+		await tick();
+
+		expect(description()).toBe('Uses the text typed in the settings.');
 	});
 
 	it('persists the picked chapter profile and updates the run snapshot', () => {
@@ -829,6 +896,118 @@ describe('TranscriptionModal per-run options', () => {
 		expect(runSettings.transcriptionWordTimestamps).toBe(true);
 	});
 
+	/** The collapsed block holding every option past the first rows. */
+	function advancedBlock(modal: TranscriptionModal): HTMLDetailsElement {
+		const block = maybeEl<HTMLDetailsElement>(
+			modal.contentEl,
+			'details.aar-transcribe-advanced',
+		);
+		if (!block) {
+			throw new Error('More options block not rendered');
+		}
+		return block;
+	}
+
+	// The dialog must fit without scrolling to Transcribe, so only the rows
+	// most runs touch sit outside the collapsed block.
+	it('shows language, participant profile and destination up front', () => {
+		const { modal } = openWithEverything();
+		const advanced = advancedBlock(modal);
+		const advancedNames = settingNames(advanced);
+
+		const upFront = settingNames(modal.contentEl).filter(
+			(name) => !advancedNames.includes(name),
+		);
+
+		expect(upFront).toEqual([
+			'Language',
+			'Participant profile',
+			'Destination',
+		]);
+		expect(advancedNames).toEqual(
+			expect.arrayContaining([
+				'Engine',
+				'Speaker diarization',
+				'Word-level timestamps',
+				'Dictionary',
+				'File format',
+				'Include speakers',
+				'LLM post-processing',
+				'Generate chapters',
+			]),
+		);
+		expect(advanced.open).toBe(false);
+	});
+
+	// The rows inside re-render only after their save resolves, so each case
+	// waits for that and checks the block was rebuilt; asserting on the old
+	// element would pass whatever the dialog remembered. Opening and closing
+	// go through the browser's own asynchronous toggle event.
+	it('keeps the More options block open across a re-render', async () => {
+		const { modal } = openWithEverything();
+		const advanced = advancedBlock(modal);
+		advanced.open = true;
+		await tick();
+
+		// Diarization re-renders the config, rebuilding the block.
+		rowToggle(settingRow(modal.contentEl, 'Speaker diarization')).click();
+		await tick();
+
+		expect(advancedBlock(modal)).not.toBe(advanced);
+		expect(advancedBlock(modal).open).toBe(true);
+	});
+
+	// Closing is a choice too: a block that reopened on every change would
+	// push Transcribe back below the fold after each click inside it.
+	it('keeps the More options block closed across a re-render', async () => {
+		const { modal } = openWithEverything();
+		const advanced = advancedBlock(modal);
+		advanced.open = true;
+		await tick();
+		advanced.open = false;
+		await tick();
+
+		// Changing the destination re-renders the config, rebuilding the block.
+		const destination = rowSelect(
+			settingRow(modal.contentEl, 'Destination'),
+		);
+		destination.value = 'file';
+		destination.dispatchEvent(new Event('change'));
+		await tick();
+
+		expect(advancedBlock(modal)).not.toBe(advanced);
+		expect(advancedBlock(modal).open).toBe(false);
+	});
+
+	// The block holds the Advanced settings switch, which reveals the
+	// two-pass mode; a label those rows start with reads as one more level
+	// of the same thing rather than as the rest of the dialog.
+	it('names the collapsed block apart from the rows it holds', () => {
+		const { modal } = openWithEverything();
+		const advanced = advancedBlock(modal);
+		const label = maybeEl(advanced, 'summary')?.textContent ?? '';
+
+		expect(label).not.toBe('');
+		for (const name of settingNames(advanced)) {
+			expect(name.startsWith(label)).toBe(false);
+		}
+	});
+
+	it('opens the More options block when the stored engine cannot run here', () => {
+		// The reason Transcribe is disabled is on the Engine row, which must
+		// not be hidden behind a closed disclosure.
+		setPlatform({ isMobile: true });
+		try {
+			const { modal } = openWithEverything({
+				transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER,
+			});
+
+			expect(advancedBlock(modal).open).toBe(true);
+		} finally {
+			useDesktopPlatform();
+		}
+	});
+
 	it('picks another engine for this run alone', () => {
 		const { modal, runSettings, settings } = openWithEverything();
 		const engine = rowSelect(settingRow(modal.contentEl, 'Engine'));
@@ -954,7 +1133,7 @@ describe('TranscriptionModal running the job', () => {
 		return {
 			transcript: { segments: [], speakers: [] },
 			markdown: '# Transcript',
-			cost: { engineId: 'deepgram', usd: 0.12 },
+			cost: { engineId: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM, usd: 0.12 },
 			...overrides,
 		} as RunResult;
 	}
@@ -1035,7 +1214,9 @@ describe('TranscriptionModal running the job', () => {
 		// The third figure is the duration the dialog probed, which is null
 		// until the probe answers; it only ever sizes a fallback estimate
 		expect(recordRun).toHaveBeenCalledWith(
-			expect.objectContaining({ engineId: 'deepgram' }),
+			expect.objectContaining({
+				engineId: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+			}),
 			expect.anything(),
 			null,
 		);
@@ -1111,7 +1292,10 @@ describe('TranscriptionModal running the job', () => {
 				reportCost = (
 					runOptions as unknown as { onCost: (cost: unknown) => void }
 				).onCost;
-				reportCost({ engineId: 'deepgram', usd: 0.5 });
+				reportCost({
+					engineId: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+					usd: 0.5,
+				});
 				throw new Error('vault is read-only');
 			},
 		);
@@ -1120,7 +1304,7 @@ describe('TranscriptionModal running the job', () => {
 		await internals.startRun();
 
 		expect(recordRun).toHaveBeenCalledWith(
-			{ engineId: 'deepgram', usd: 0.5 },
+			{ engineId: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM, usd: 0.5 },
 			expect.anything(),
 			null,
 		);

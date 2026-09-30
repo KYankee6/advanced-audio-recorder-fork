@@ -3,10 +3,24 @@
  * @module types
  */
 
+import type { PcmSampleFormat } from './audio/pcm';
+
 /**
- * Output mode for multi-track recordings.
+ * How a session's tracks become files.
+ *
+ * Stored in data.json, so a value is renamed only with a migration. The keys
+ * are declared in the order the dropdown offers them, which is the order
+ * `Object.values` hands them back in.
  */
-export type OutputMode = 'single' | 'multiple';
+export const OutputMode = {
+	/** Every track of the session summed into one combined file. */
+	Single: 'single',
+	/** One file written per track of the session. */
+	Multiple: 'multiple',
+} as const;
+
+/** One output mode (derived from {@link OutputMode}). */
+export type OutputMode = (typeof OutputMode)[keyof typeof OutputMode];
 
 /**
  * Recording status states.
@@ -142,8 +156,28 @@ export interface RecordingSessionConfig {
 	chunkRotationBytes: number | null;
 	/** Whether the session captures raw PCM for WAV output (desktop). */
 	isWavPcm: boolean;
+	/**
+	 * How one captured sample is stored on the raw PCM path, fixed at the
+	 * session's start like everything else here: the worklet writes it, the
+	 * segments hold it, and the WAV header declares it, so a settings edit
+	 * half way through a recording must not leave the file describing one
+	 * representation and holding another.
+	 */
+	pcmFormat: PcmSampleFormat;
 	/** Container format produced by the MediaRecorders. */
 	recorderFormat: string;
+	/**
+	 * The MIME type the MediaRecorders are constructed with: the one this
+	 * platform agreed to record, which is not always `audio/<recorderFormat>`.
+	 * An M4A file is an MP4 container, and the recorder only accepts it as
+	 * `audio/mp4`; rebuilding the type from the format name refused to start.
+	 *
+	 * It is therefore also the type of the bytes those recorders produce, so
+	 * every segment and every concatenated blob of them is tagged from here.
+	 * Rebuilding it per call site was two answers to one question, and the
+	 * segments of an M4A session came out labelled `audio/m4a`.
+	 */
+	recorderMimeType: string;
 	/** Output format of the final files. */
 	outputFormat: string;
 	/** Output mode: 'single' merges multi-track sessions at stop. */
@@ -181,6 +215,13 @@ export type RecordingTarget = {
 	pcmBufferedBytes: number;
 	pcmChannels: number;
 	pcmSampleRate: number;
+	/**
+	 * How one sample of this track's PCM is stored. Kept beside the channel
+	 * count and the rate because the three together are what the WAV header
+	 * written for this track has to state, and what a recovery reading its
+	 * segments back off disk has to be told.
+	 */
+	pcmFormat: PcmSampleFormat;
 	/** Number of auto-split parts already finalized for this track. */
 	partIndex: number;
 	/** Saved auto-split part file paths in order of creation. */
@@ -205,8 +246,22 @@ export type RecordingTarget = {
 };
 
 /**
- * What happens to the note link after a conversion or split produces a
- * new file: leave the original link, replace it, or insert the new
- * link after it.
+ * What happens to the note link after a conversion or split produces a new
+ * file.
+ *
+ * Stored in data.json, so a value is renamed only with a migration. The
+ * dropdown order is the one `CONVERSION_LINK_ACTION_LABELS` in settings/labels
+ * declares, which the keys here repeat.
  */
-export type ConversionLinkAction = 'none' | 'replace' | 'after';
+export const ConversionLinkAction = {
+	/** Leave the original link alone; only the file is written. */
+	None: 'none',
+	/** Point the original link at the new file. */
+	Replace: 'replace',
+	/** Keep the original link and insert the new one after it. */
+	After: 'after',
+} as const;
+
+/** One link action (derived from {@link ConversionLinkAction}). */
+export type ConversionLinkAction =
+	(typeof ConversionLinkAction)[keyof typeof ConversionLinkAction];

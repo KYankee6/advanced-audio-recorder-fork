@@ -223,6 +223,18 @@ export class Plugin {
 	/** Event handles passed to {@link registerEvent}, in order. */
 	readonly registeredEvents: EventRef[] = [];
 
+	/**
+	 * Records a teardown callback. The real Plugin runs these as it unloads;
+	 * a test that unloads the plugin runs them from here.
+	 * @param callback - What to run on unload
+	 */
+	register(callback: () => void): void {
+		this.registeredCleanups.push(callback);
+	}
+
+	/** Callbacks passed to {@link register}, in order. */
+	readonly registeredCleanups: Array<() => void> = [];
+
 	async loadData(): Promise<unknown> {
 		return {};
 	}
@@ -651,6 +663,13 @@ export class Workspace extends Events {
 
 	getLeavesOfType = jest.fn((_type: string): unknown[] => []);
 
+	/** The leaf getLeaf hands out, so a test can read what was opened in it. */
+	readonly leaf = {
+		openFile: jest.fn((_file: TFile) => Promise.resolve()),
+	};
+
+	getLeaf = jest.fn((_newLeaf?: unknown) => this.leaf);
+
 	iterateAllLeaves = jest.fn((_callback: (leaf: unknown) => void): void => {
 		// No leaves unless a test seeds them
 	});
@@ -992,6 +1011,34 @@ export class MarkdownRenderChild extends Component {
 }
 
 /**
+ * Mock MarkdownRenderer. Obsidian's Markdown parser is not modelled, and
+ * asserting on the HTML it would produce would be asserting on Obsidian rather
+ * than on the plugin. What a caller owns is the source it hands over, the
+ * element it renders into, and the component the rendered children are
+ * attached to, so the mock writes the source into the element as text and
+ * registers a child on the component. A dialog that forgets to unload that
+ * component therefore leaves an observably loaded child behind.
+ */
+export const MarkdownRenderer = {
+	render: jest.fn(
+		async (
+			_app: App,
+			markdown: string,
+			el: HTMLElement,
+			_sourcePath: string,
+			component: Component,
+		): Promise<void> => {
+			const rendered = addObsidianDomExtensions(
+				document.createElement('div'),
+			);
+			rendered.setText(markdown);
+			el.appendChild(rendered);
+			component.addChild(new MarkdownRenderChild(rendered));
+		},
+	),
+};
+
+/**
  * Mock Modal class.
  */
 /**
@@ -1008,16 +1055,31 @@ export class Modal {
 	app: App;
 	contentEl: HTMLElement;
 
+	/**
+	 * The dialog's own element, holding the title and the body the way
+	 * Obsidian nests them. A frame that pins a title or a footer classes this
+	 * element and puts the footer beside the body under it, so the mock has to
+	 * carry the same three elements rather than two loose ones.
+	 */
+	modalEl: HTMLElement = addObsidianDomExtensions(
+		document.createElement('div'),
+	);
+
+	titleEl: HTMLElement = addObsidianDomExtensions(
+		document.createElement('div'),
+	);
+
 	constructor(app: App) {
 		this.app = app;
 		this.contentEl = addObsidianDomExtensions(
 			document.createElement('div'),
 		);
+		this.modalEl.addClass('modal');
+		this.titleEl.addClass('modal-title');
+		this.contentEl.addClass('modal-content');
+		this.modalEl.appendChild(this.titleEl);
+		this.modalEl.appendChild(this.contentEl);
 	}
-
-	titleEl: HTMLElement = addObsidianDomExtensions(
-		document.createElement('div'),
-	);
 
 	// Prototype methods, not instance spies: a test that wants to watch these
 	// spies the instance (or the prototype, to catch a modal it never sees),
@@ -1345,6 +1407,13 @@ export class MarkdownView {
 	// The real MarkdownView carries the file through FileView; production code
 	// narrows a leaf to a MarkdownView and then reads view.file.
 	file: TFile | null = null;
+	// What the editor holds, which Obsidian saves to disk two seconds after
+	// the typing stops; a test sets it apart from the file to tell the two.
+	data = '';
+
+	getViewData(): string {
+		return this.data;
+	}
 }
 
 /**
@@ -1442,6 +1511,16 @@ export class DropdownComponent {
 		return this;
 	}
 
+	/**
+	 * Read from the element rather than the mirrored field, as Obsidian's own
+	 * getValue is: a selection made through the DOM never passes setValue, and
+	 * code asking what the dropdown is showing has to see it.
+	 * @returns The selected option's value
+	 */
+	getValue(): string {
+		return this.selectEl.value;
+	}
+
 	setDisabled(disabled: boolean): this {
 		this.disabled = disabled;
 		// Mirrored onto the element like real Obsidian, so DOM-level
@@ -1506,6 +1585,16 @@ export abstract class AbstractTextComponent<
 		this.value = value;
 		this.inputEl.value = value;
 		return this;
+	}
+
+	/**
+	 * Read from the element, as Obsidian's own getValue is: text typed into
+	 * the field is what the component holds, whether or not an input event
+	 * reached it.
+	 * @returns The field's current text
+	 */
+	getValue(): string {
+		return this.inputEl.value;
 	}
 
 	setDisabled(disabled: boolean): this {
@@ -1714,6 +1803,40 @@ export function normalizePath(path: string): string {
 export const setIcon = jest.fn((el: HTMLElement, iconId: string): void => {
 	el.setAttribute('data-icon', iconId);
 });
+
+/**
+ * Mock getFrontMatterInfo: locates the frontmatter block a note opens with the
+ * way Obsidian's does, so a note read by the plugin loses it in tests too.
+ */
+export function getFrontMatterInfo(content: string): {
+	exists: boolean;
+	frontmatter: string;
+	from: number;
+	to: number;
+	contentStart: number;
+} {
+	const match = /^---\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/.exec(
+		content,
+	);
+	if (!match) {
+		return {
+			exists: false,
+			frontmatter: '',
+			from: 0,
+			to: 0,
+			contentStart: 0,
+		};
+	}
+	const frontmatter = match[1] ?? '';
+	const from = content.indexOf('\n') + 1;
+	return {
+		exists: true,
+		frontmatter,
+		from,
+		to: from + frontmatter.length,
+		contentStart: match[0].length,
+	};
+}
 
 /**
  * Mock getLinkpath function: strips the subpath (heading/block

@@ -29,6 +29,8 @@ Use it when:
 
 If you only ever record from one device, leave multi-track off - single-device recording is the default and needs no setup. See [Recording](recording.md) for the basics.
 
+If all you want beside your microphone is **this computer's own output**, so a call arrives with its remote participants, there is a shorter way than this page: the **Include system audio** switch under [Audio input](settings-reference.md#audio-input) records exactly those two tracks and mixes them into one file, with nothing else to configure. Come here when its fixed answers are not the ones you want - a third track, one file per track, or a level correction on the remote side - since turning multi-track on hands every one of those answers back to you and the switch stands down.
+
 > **Desktop only.** Multi-track recording runs only in the Obsidian desktop app; the mobile app records a single track from its default microphone. See [Mobile support](mobile-support.md).
 
 ---
@@ -41,11 +43,14 @@ Multi-track recording is configured under **Settings > Advanced Audio Recorder >
 2. Turn on **Enable multi-track recording**. (Default: **Off**.) The track options below appear.
 3. Set **Maximum tracks** in the number field - the number of simultaneous tracks, from **1 to 8** (default **2**). Use only what you need; each extra track is another live recorder.
 4. Choose the **Output mode**: **Single file** (all tracks mixed into one) or **Multiple files** (one file per track). Default is **Single file**.
-5. For each track, assign a **Track N input** - pick the input device from the dropdown. There is one dropdown per track, numbered up to the **Maximum tracks** value. The device list auto-populates and refreshes as devices are connected or disconnected.
-6. Optionally set **Track N channels** - the channel layout for that track's capture, bound to the track's device: keep the device layout (default), **Mono (mix all channels)**, **Mono (left channel)**, or **Mono (right channel)**. Because the choice is per track, a microphone that arrives hard-panned through a dual-input audio interface can be reduced to mono while a genuine stereo source on another track (for example a system-loopback device) keeps both channels. The selector is disabled when the track has no device yet, its device reports a mono-only input, or the selected device has been disconnected. The saved choice is retained and becomes available again after reconnecting a capable device. See [Recording in mono](recording.md#recording-in-mono) for how each mode sounds.
+5. Choose a **Track N source**. **Input device** is the default and records a microphone or line input. **System audio (this computer)** records the machine's own output, so the other participants of a call reach the recording without any virtual device. Electron grants that only on Windows, and the row says so where it cannot. A system-audio track names no device, so its input, channel and processing rows disappear. One session can capture the system output once: set a second track to it and the multi-track entry carries a warning, and a recording started anyway is refused naming the surplus tracks.
+6. For each track left on **Input device**, assign a **Track N input** - pick the input device from the dropdown. There is one dropdown per track, numbered up to the **Maximum tracks** value. The device list auto-populates and refreshes as devices are connected or disconnected.
+7. Optionally set **Track N channels** - the channel layout for that track's capture, bound to the track's device: keep the device layout (default), **Mono (mix all channels)**, **Mono (left channel)**, or **Mono (right channel)**. Because the choice is per track, a microphone that arrives hard-panned through a dual-input audio interface can be reduced to mono while a genuine stereo source on another track (for example a system-loopback device) keeps both channels. The selector is disabled when the track has no device yet, its device reports a mono-only input, or the selected device has been disconnected. The saved choice is retained and becomes available again after reconnecting a capable device. See [Recording in mono](recording.md#recording-in-mono) for how each mode sounds.
+8. Optionally set **Track N processing** - the browser filtering that track is captured with, overriding the three session-wide toggles under **Audio processing & feedback**. `Same as global settings` is the default and leaves the behaviour these toggles have always had. `Voice` turns noise suppression, echo cancellation and automatic gain control all on, which is what a microphone in a room wants. `Raw` turns all three off, which is what a system-loopback input, a line input or an already-processed headset wants. The distinction matters most when one session holds both kinds: echo cancellation treats the far end of a call arriving on a loopback input as this machine's own speaker output and suppresses it, so a meeting recorded with the global default loses the remote participants. The selector is disabled when the track has no device yet, and absent altogether on a system-audio track, whose capture is granted by the host and passes through none of these filters.
 
-![Multi-track recording settings with the enable toggle on, the Maximum tracks number field, the Output mode dropdown, and several "Track N input" device dropdowns](images/settings-multi-track.png)
-_Figure: the Multi-track recording settings section with multiple per-track device dropdowns shown._
+![Multi-track recording settings with the enable toggle on, the Maximum tracks number field, the Output mode and Match track levels rows, and the Track 1 source and Track 1 input dropdowns](images/settings-multi-track.png)
+
+![Track 1 input set to a microphone with Track 1 processing on Voice, and Track 2 input set to a Stereo Mix loopback marked "(system audio)" with Track 2 processing on Raw](images/settings-multi-track-processing.png)
 
 Once configured, start recording exactly as you normally do - the **microphone ribbon icon** or the **Start/stop recording** command. All assigned tracks begin together. See [Recording](recording.md) for the recording workflow, status bar, and save behavior.
 
@@ -64,19 +69,18 @@ The **Output mode** dropdown decides what happens when you stop the session.
 
 ### Single file (mixed)
 
-Every track is combined into a single mixed file at your configured [format](formats.md) and bitrate. Mono inputs are duplicated into both channels; the output is mono only when every input is mono, and stereo otherwise. Tracks reduced to mono by their **Track N channels** setting count as mono inputs here - give every track a mono mode and the merged file is mono too. The mix runs **after** you stop recording, so a longer session takes a moment to assemble (the status bar shows the [save progress](recording.md#save-progress-in-the-status-bar)). One embed link is inserted into your note.
+Every track is combined into a single mixed file at your configured [format](formats.md) and bitrate. The merged file names no device, since it holds them all, and is written as `<file prefix>-multitrack-<timestamp>.<ext>`, for example `recording-multitrack-2026-09-18T09-12-44-031Z.webm`. Mono inputs are duplicated into both channels; the output is mono only when every input is mono, and stereo otherwise. Tracks reduced to mono by their **Track N channels** setting count as mono inputs here - give every track a mono mode and the merged file is mono too. The mix runs **after** you stop recording, so a longer session takes a moment to assemble (the status bar shows the [save progress](recording.md#save-progress-in-the-status-bar)). One embed link is inserted into your note.
 
 Because the tracks are mixed only once at stop, **merged output cannot be auto-split** - see [Interaction with automatic splitting](#interaction-with-automatic-splitting). For very long mixed sessions, mind the [memory notes](#memory-notes-for-merged-output) below.
 
-![Single-file output mode selected in the Output mode dropdown](images/settings-multi-track-single.png)
-_Figure: the Output mode dropdown set to Single file._
+![Output mode set to Single file, with the Match track levels toggle below it turned off](images/settings-multi-track-single.png)
 
 ### Placing a track in the mix
 
 A laptop microphone beside a proper interface is many decibels quieter, and a mix that just sums them buries one participant behind the other. Three controls decide how each track lands in the combined file. They appear only in **Single file** mode, because **Multiple files** never mixes and keeps every track exactly as it was captured.
 
-- **Track N level** raises or lowers that track before it is summed, from **-24 to +24 dB** (default **0**, the track as captured). Six decibels down is half the amplitude.
-- **Track N position** places the track between **-1** (fully left) and **1** (fully right), default **0** (centre). A track placed off centre makes the combined file **stereo** even when every input is mono, which is what lets two mono microphones sit one to each side.
+- **Track N level** raises or lowers that track before it is summed, from **-24 to +24 dB** in whole decibels (default **0**, the track as captured). Six decibels down is half the amplitude.
+- **Track N position** places the track between **-1** (fully left) and **1** (fully right), default **0** (centre), on a grid of **0.25**, so the nine positions run -1, -0.75 and so on up to 1. A value off the grid is refused with a message naming the step. A track placed off centre makes the combined file **stereo** even when every input is mono, which is what lets two mono microphones sit one to each side.
 - **Match track levels** brings every track to a common level before summing, so a quiet participant is not lost behind a loud one. It is **off by default**: it is a judgement about the recording rather than a property of it, and a session combined twice has to come out the same both times. A track that is only noise - a muted microphone, someone who never spoke - is left alone rather than amplified into audibility.
 
 All three are snapshotted when recording starts, alongside the devices and the channel layouts, so editing them mid-session takes effect on the **next** recording and a session interrupted by a crash is rebuilt with the placement it was recorded under.
@@ -138,7 +142,7 @@ Mixing tracks into a **Single file** has to bring audio together in memory, and 
 
 ## Interaction with automatic splitting
 
-**Merged multi-track output is not automatically split.** When **Single file** mode is active with more than one track and **Split recordings automatically** is also enabled, auto-split is skipped for that session: the plugin shows the notice **"Auto-split is skipped for merged multi-track recordings."** and saves **one merged file** instead of parts. The tracks are mixed only once at stop, which is incompatible with writing parts during recording.
+**Merged multi-track output is not automatically split.** When **Single file** mode is active with more than one track and **Split recordings automatically** is also enabled, auto-split is skipped for that session: the plugin shows the notice **"Auto-split is skipped: this session's tracks are mixed into one file."** and saves **one merged file** instead of parts. The tracks are mixed only once at stop, which is incompatible with writing parts during recording.
 
 Auto-split **does** work in these cases:
 
@@ -153,19 +157,22 @@ For everything about splitting - automatic and manual, part naming, WAV vs compr
 
 All multi-track controls live under **Settings > Advanced Audio Recorder > Multi-track recording**.
 
-| Setting                          | Description                                                                                                                                  | Default              |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| **Enable multi-track recording** | Record from multiple input devices at the same time. Reveals the options below.                                                              | Off                  |
-| **Maximum tracks**               | Number of simultaneous tracks (number field, 1-8).                                                                                           | 2                    |
-| **Output mode**                  | `Single file` mixes all tracks into one file. `Multiple files` saves one file per track.                                                     | Single file          |
-| **Track N input**                | Input device assigned to each track. One dropdown per track, up to **Maximum tracks**.                                                       | -                    |
-| **Track N channels**             | Channel layout for that track's capture: device layout, mono mix, or one picked channel. Disabled without a device or for mono-only devices. | Same as input device |
-| **Match track levels**           | Bring the tracks to a common level before combining them. Single file mode only.                                                             | Off                  |
-| **Track N level**                | Level applied to that track in the combined file, in decibels (-24 to +24). Single file mode only.                                           | 0                    |
-| **Track N position**             | Where that track sits in the combined file: -1 fully left, 0 centre, 1 fully right. Single file mode only.                                   | 0                    |
+| Setting                          | Description                                                                                                                                  | Default                 |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| **Enable multi-track recording** | Record from multiple input devices at the same time. Reveals the options below.                                                              | Off                     |
+| **Maximum tracks**               | Number of simultaneous tracks (number field, 1-8).                                                                                           | 2                       |
+| **Output mode**                  | `Single file` mixes all tracks into one file. `Multiple files` saves one file per track.                                                     | Single file             |
+| **Track N source**               | What the track records: an input device, or this computer's own output. System audio is granted on Windows only.                             | Input device            |
+| **Track N input**                | Input device assigned to each track. One dropdown per track, up to **Maximum tracks**.                                                       | -                       |
+| **Track N channels**             | Channel layout for that track's capture: device layout, mono mix, or one picked channel. Disabled without a device or for mono-only devices. | Same as input device    |
+| **Track N processing**           | Browser filtering for that track's capture: follow the global toggles, `Voice`, or `Raw`. Disabled without a device, hidden on system audio. | Same as global settings |
+| **Match track levels**           | Bring the tracks to a common level before combining them. Single file mode only.                                                             | Off                     |
+| **Track N level**                | Level applied to that track in the combined file, in decibels (-24 to +24). Single file mode only.                                           | 0                       |
+| **Track N position**             | Where that track sits in the combined file: -1 fully left, 0 centre, 1 fully right. Single file mode only.                                   | 0                       |
 
 Settings that also shape multi-track output:
 
+- **Include system audio**, under [Audio input](settings-reference.md#audio-input), is the two-track pairing named at the top of this page. It applies only while multi-track recording is off, and the switch is disabled while it is on.
 - **Recording format** and **Audio bitrate** apply to **every** track - see [Formats](formats.md) and the [Settings reference](settings-reference.md#output-format).
 - **File prefix**, **Save folder**, and the near-active-file options control where files land and how they are named - see [File operations](file-operations.md).
 - **Split recordings automatically** interacts with merged output as described above - see [Splitting](splitting.md).

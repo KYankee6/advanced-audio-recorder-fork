@@ -4,21 +4,23 @@
  * @module settings/labels
  */
 
-import type { ChannelMode } from '../audio/downmix';
+import { ChannelMode } from '../audio/downmix';
+import { PcmSampleFormat } from '../audio/pcm';
 import { LLM_VENDOR_IDS, LLM_VENDORS } from '../transcription/llm/vendors';
 import {
 	TRANSCRIPTION_ENGINE_IDS,
 	TRANSCRIPTION_ENGINES,
 } from '../transcription/providers/engines';
-import type {
+import {
 	TranscriptDestination,
 	TranscriptFileFormat,
 } from '../transcription/TranscriptTypes';
-import type { LlmTask } from '../transcription/llmPostProcess';
-import type {
+import { LlmTask } from '../transcription/llmPostProcess';
+import type { LlmProviderId, TranscriptionProviderId } from './settingsSchema';
+import {
 	ConversionLinkAction,
-	LlmProviderId,
-	TranscriptionProviderId,
+	TrackProcessingMode,
+	TrackSourceKind,
 } from './settingsSchema';
 
 /**
@@ -38,10 +40,10 @@ export const TRANSCRIPT_DESTINATION_LABELS: Record<
 	TranscriptDestination,
 	string
 > = {
-	note: 'Insert into note',
-	file: 'Save to file',
-	both: 'Note and file',
-	link: 'Save to file and link it in the note',
+	[TranscriptDestination.Note]: 'Insert into note',
+	[TranscriptDestination.File]: 'Save to file',
+	[TranscriptDestination.Both]: 'Note and file',
+	[TranscriptDestination.Link]: 'Save to file and link it in the note',
 };
 
 /** Display labels for each transcript file format (single source for UI). */
@@ -49,10 +51,10 @@ export const TRANSCRIPT_FILE_FORMAT_LABELS: Record<
 	TranscriptFileFormat,
 	string
 > = {
-	json: 'JSON (full data + speakers)',
-	srt: 'SubRip (.srt)',
-	vtt: 'WebVTT (.vtt)',
-	txt: 'Plain text (.txt)',
+	[TranscriptFileFormat.Json]: 'JSON (full data + speakers)',
+	[TranscriptFileFormat.Srt]: 'SubRip (.srt)',
+	[TranscriptFileFormat.Vtt]: 'WebVTT (.vtt)',
+	[TranscriptFileFormat.Txt]: 'Plain text (.txt)',
 };
 
 /**
@@ -64,17 +66,17 @@ export const CONVERSION_LINK_ACTION_LABELS: Record<
 	ConversionLinkAction,
 	string
 > = {
-	none: 'Do nothing',
-	replace: 'Replace source link',
-	after: 'Insert after source link',
+	[ConversionLinkAction.None]: 'Do nothing',
+	[ConversionLinkAction.Replace]: 'Replace source link',
+	[ConversionLinkAction.After]: 'Insert after source link',
 };
 
 /** Display labels for each LLM post-processing task (single source for UI). */
 export const LLM_TASK_LABELS: Record<LlmTask, string> = {
-	cleanup: 'Clean up',
-	summary: 'Summarize',
-	custom: 'Custom',
-	translate: 'Translate',
+	[LlmTask.Cleanup]: 'Clean up',
+	[LlmTask.Summary]: 'Summarize',
+	[LlmTask.Custom]: 'Custom',
+	[LlmTask.Translate]: 'Translate',
 };
 
 /**
@@ -169,8 +171,41 @@ export const CONVERSION_LINK_ACTION_OPTIONS = optionsFromLabels(
  * microphone stays at full level instead of being mixed with a silent channel.
  */
 export const CHANNEL_MODE_LABELS: Record<ChannelMode, string> = {
-	source: 'Same as input device',
-	'mono-mix': 'Mono (mix all channels)',
-	'mono-left': 'Mono (left channel)',
-	'mono-right': 'Mono (right channel)',
+	[ChannelMode.Source]: 'Same as input device',
+	[ChannelMode.MonoMix]: 'Mono (mix all channels)',
+	[ChannelMode.MonoLeft]: 'Mono (left channel)',
+	[ChannelMode.MonoRight]: 'Mono (right channel)',
+};
+
+/**
+ * Sample-representation labels, keyed by format. Named the way audio tools
+ * name them, because the choice is one a user arrives with from elsewhere:
+ * the two numbers are the width, and "float" is the part that says a sample
+ * past full scale survives.
+ */
+export const PCM_SAMPLE_FORMAT_LABELS: Record<PcmSampleFormat, string> = {
+	[PcmSampleFormat.Int16]: '16-bit integer',
+	[PcmSampleFormat.Int24]: '24-bit integer',
+	[PcmSampleFormat.Float32]: '32-bit float',
+};
+
+/**
+ * Input-processing labels, keyed by mode. Named for the source each profile
+ * suits rather than for the three filters it sets, because the choice a user
+ * makes is about what the track is plugged into.
+ */
+export const TRACK_PROCESSING_LABELS: Record<TrackProcessingMode, string> = {
+	[TrackProcessingMode.Global]: 'Same as global settings',
+	[TrackProcessingMode.Voice]: 'Voice (microphone in a room)',
+	[TrackProcessingMode.Raw]: 'Raw (system audio or line input)',
+};
+
+/**
+ * Source labels, keyed by kind. Named for what the track records rather than
+ * for the mechanism, because the mechanism differs per platform and the user
+ * is choosing what goes into the file.
+ */
+export const TRACK_SOURCE_KIND_LABELS: Record<TrackSourceKind, string> = {
+	[TrackSourceKind.InputDevice]: 'Input device',
+	[TrackSourceKind.SystemAudio]: 'System audio (this computer)',
 };

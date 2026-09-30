@@ -63,18 +63,48 @@ describe('engine settings', () => {
 			);
 		});
 
-		it('shares one account between the two engines reached through it', () => {
-			// The Whisper API and the OpenAI chat models are two catalogues over
-			// one account: a key entered on either page is the same key.
-			applyEngineSettings(settings, ENGINE_IDS.WHISPER_API, {
-				apiKey: 'sk-openai',
+		it.each([
+			{
+				name: 'the Whisper API and the OpenAI chat models',
+				speech: ENGINE_IDS.WHISPER_API,
+				chat: ENGINE_IDS.OPENAI_LLM,
+				key: 'sk-openai',
+			},
+			{
+				name: 'the Voxtral and Mistral catalogues',
+				speech: ENGINE_IDS.VOXTRAL,
+				chat: ENGINE_IDS.MISTRAL_LLM,
+				key: 'ml-test',
+			},
+		])('shares one account between $name', ({ speech, chat, key }) => {
+			// Two catalogues over one account: a key entered on either page
+			// is the same key, which is what lets the pair be entered once.
+			applyEngineSettings(settings, speech, { apiKey: key });
+
+			expect(readEngineSettings(settings, chat).apiKey).toBe(key);
+		});
+
+		it('bounds the answer of each engine that writes one', () => {
+			// The ceiling belongs to the engine that has to honour it, so an
+			// engine added over an existing account brings its own rather than
+			// sharing the one already there.
+			const writers = ENGINE_ORDER.filter(
+				(id) => ENGINES[id].maxTokens !== null,
+			);
+			writers.forEach((id, index) => {
+				applyEngineSettings(settings, id, { maxTokens: 3000 + index });
 			});
 
-			const openAiLlm = readEngineSettings(
-				settings,
-				ENGINE_IDS.OPENAI_LLM,
+			// Each engine reads back the value written to it, so no two share a
+			// field and a later write never overwrote an earlier one.
+			writers.forEach((id, index) => {
+				expect(readEngineSettings(settings, id).maxTokens).toBe(
+					3000 + index,
+				);
+			});
+			expect(settings.llmMistralMaxTokens).not.toBe(
+				settings.llmOpenAiMaxTokens,
 			);
-			expect(openAiLlm.apiKey).toBe('sk-openai');
 		});
 
 		it('puts a selection the catalogue does not list into it', () => {

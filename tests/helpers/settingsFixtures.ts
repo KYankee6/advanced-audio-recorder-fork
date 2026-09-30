@@ -8,8 +8,64 @@
  * @module tests/helpers/settingsFixtures
  */
 
-import { MODEL_SEED_GENERATION } from 'src/constants';
-import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
+import {
+	MODEL_SEED_GENERATION,
+	LLM_PROVIDER_IDS,
+	TRANSCRIPTION_PROVIDER_IDS,
+} from 'src/constants';
+import {
+	DEFAULT_SETTINGS,
+	type AudioRecorderSettings,
+	type AudioSource,
+} from 'src/settings/settingsSchema';
+
+/**
+ * Copies a settings value all the way down, Maps included. jsdom exposes no
+ * structuredClone, and a settings value holds only Maps, arrays, plain
+ * objects and primitives.
+ * @param value - The value to copy
+ * @returns An equal value that shares nothing with the original
+ */
+function deepCopy<T>(value: T): T {
+	if (value instanceof Map) {
+		return new Map(
+			[...value].map(([key, entry]) => [key, deepCopy(entry)]),
+		) as T;
+	}
+	if (Array.isArray(value)) {
+		return value.map((entry: unknown) => deepCopy(entry)) as T;
+	}
+	if (value !== null && typeof value === 'object') {
+		return Object.fromEntries(
+			Object.entries(value).map(([key, entry]) => [key, deepCopy(entry)]),
+		) as T;
+	}
+	return value;
+}
+
+/**
+ * The default settings as a copy a test may edit in place.
+ *
+ * `{ ...DEFAULT_SETTINGS }` shares every Map, list and nested object with the
+ * module constant, so a settings tab writing a track's device id into it
+ * rewrote the defaults for every case that ran after it in the file.
+ * @returns Settings equal to the defaults and sharing nothing with them
+ */
+export function defaultSettings(): AudioRecorderSettings {
+	return deepCopy(DEFAULT_SETTINGS);
+}
+
+/**
+ * One track recording this machine's own output, as the settings hold it.
+ *
+ * Such a track is configured by its kind alone and carries no device id, and
+ * the suites that cover it need two of them side by side often enough that
+ * writing the literal out each time was its own small duplication.
+ * @returns The stored source of a system-audio track
+ */
+export function systemAudioTrack(): AudioSource {
+	return { deviceId: '', channelMode: 'source', kind: 'system-audio' };
+}
 
 /**
  * Every setting set to something other than its default, so a merge that drops
@@ -32,7 +88,9 @@ export function fullyPopulatedSettings(): Omit<
 		audioDeviceId: 'test-device',
 		sampleRate: 22050,
 		recordingChannels: 'mono-left',
+		recordingBitDepth: 'float32',
 		bitrate: 64000,
+		includeSystemAudio: true,
 		enableMultiTrack: true,
 		maxTracks: 4,
 		mixAlignTrackLevels: false,
@@ -46,6 +104,8 @@ export function fullyPopulatedSettings(): Omit<
 					channelMode: 'source' as const,
 					gainDb: 0,
 					pan: 0,
+					processing: 'voice' as const,
+					kind: 'input-device' as const,
 				},
 			],
 			[
@@ -55,10 +115,14 @@ export function fullyPopulatedSettings(): Omit<
 					channelMode: 'mono-left' as const,
 					gainDb: 0,
 					pan: 0,
+					processing: 'raw' as const,
+					kind: 'system-audio' as const,
 				},
 			],
 		]),
 		debug: true,
+		showReleaseNotes: false,
+		lastReleaseNotesVersion: '2.3.1',
 		insertAtOriginalPosition: true,
 		deleteSourceAfterConversion: false,
 		conversionLinkAction: 'after',
@@ -73,7 +137,7 @@ export function fullyPopulatedSettings(): Omit<
 		transcriptionEnabled: true,
 		transcribeOnSave: true,
 		transcriptionShowCostEstimates: true,
-		transcriptionProvider: 'local-whisper',
+		transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER,
 		transcriptionLanguage: 'ru',
 		transcriptionDiarize: true,
 		transcriptionTranslateToEnglish: true,
@@ -84,6 +148,8 @@ export function fullyPopulatedSettings(): Omit<
 		transcriptionSpeakerRenameEnabled: false,
 		transcriptionAutoChaptersEnabled: true,
 		transcriptionAutoChaptersOnTranscribe: true,
+		quickNotesEnabled: true,
+		quickNoteTranscriptionProvider: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
 		transcriptionChunkMb: 10,
 		transcriptionTimeoutMinutes: 15,
 		localWhisperTimeoutMinutes: 90,
@@ -99,6 +165,12 @@ export function fullyPopulatedSettings(): Omit<
 		geminiApiKey: 'gm-test',
 		geminiModel: 'gemini-2.5-flash',
 		geminiModels: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+		mistralBaseUrl: 'https://api.mistral.ai/v1',
+		mistralApiKey: 'ml-test',
+		deepSeekBaseUrl: 'https://api.deepseek.com',
+		deepSeekApiKey: 'ds-test',
+		voxtralModel: 'voxtral-mini-latest',
+		voxtralModels: ['voxtral-mini-latest'],
 		localWhisperBinaryPath: '/usr/bin/whisper',
 		localWhisperModelPath: '/models/ggml.bin',
 		localWhisperExtraArgs: '-t 4',
@@ -134,6 +206,12 @@ export function fullyPopulatedSettings(): Omit<
 				name: 'Default',
 				body: 'summary base',
 			},
+			{
+				id: 'q1',
+				kind: 'quickNote',
+				name: 'Tidy',
+				body: 'Tidy the dictation.',
+			},
 		],
 		selectedProfileIds: {
 			participants: '',
@@ -143,19 +221,27 @@ export function fullyPopulatedSettings(): Omit<
 			llmSummary: 'l1',
 			llmTranslate: '',
 			llmCustom: '',
+			quickNote: 'q1',
 		},
-		llmProvider: 'anthropic',
-		chaptersLlmProvider: 'anthropic',
-		advancedLlmProvider: 'anthropic',
+		llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+		chaptersLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+		advancedLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+		quickNoteLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 		anthropicBaseUrl: 'https://api.anthropic.com/v1',
 		anthropicApiKey: 'ak-test',
 		llmOpenAiModel: 'gpt-4o',
 		llmOpenAiModels: ['gpt-4o', 'gpt-4o-mini'],
 		llmAnthropicModel: 'claude-opus-4-8',
 		llmAnthropicModels: ['claude-opus-4-8', 'claude-sonnet-4-6'],
+		llmMistralModel: 'mistral-medium-latest',
+		llmMistralModels: ['mistral-medium-latest', 'mistral-small-latest'],
+		llmDeepSeekModel: 'deepseek-v4-pro',
+		llmDeepSeekModels: ['deepseek-flash', 'deepseek-v4-pro'],
 		llmOpenAiMaxTokens: 2048,
 		llmAnthropicMaxTokens: 2048,
 		geminiMaxTokens: 2048,
+		llmMistralMaxTokens: 2048,
+		llmDeepSeekMaxTokens: 2048,
 		modelSeedGeneration: MODEL_SEED_GENERATION,
 		inputNoiseSuppression: false,
 		inputEchoCancellation: false,

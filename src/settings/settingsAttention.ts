@@ -32,15 +32,29 @@ import { isProviderAvailableOnPlatform } from '../transcription/providers/capabi
 import {
 	getOrderedTrackSources,
 	isMultiTrackSessionEnabled,
+	surplusSystemAudioTracks,
 } from '../recording/AudioStreamHandler';
-import type { AudioRecorderSettings, LlmProviderId } from './settingsSchema';
+import {
+	type AudioRecorderSettings,
+	type LlmProviderId,
+	type TranscriptionProviderId,
+	quickNotesAvailable,
+	quickNoteTranscriptionSettings,
+} from './settingsSchema';
+import { resolveQuickNotePrompt } from './profileResolution';
 
 /**
- * A page entry's status: the indicator, or nothing. The union is the
- * framework's own (`SettingDefinitionPage.status`), named here because the
- * predicates below are the only writers of it.
+ * The indicator a page entry can carry. The one member is the framework's own
+ * (`SettingDefinitionPage.status`), named here because the predicates below
+ * are the only writers of it; a page with nothing to report gets null.
  */
-export type PageStatus = 'warning' | null;
+export const PageStatus = {
+	/** The value on the page needs the user's attention. */
+	Warning: 'warning',
+} as const;
+
+/** A page entry's status: the indicator, or nothing. */
+export type PageStatus = (typeof PageStatus)[keyof typeof PageStatus] | null;
 
 /**
  * Why a run calling this engine would be refused, or null when none would be.
@@ -102,9 +116,16 @@ export function enginesInUse(
 	settings: AudioRecorderSettings,
 ): EngineDescriptor[] {
 	const called: EngineDescriptor[] = [];
-	if (settings.transcriptionEnabled) {
-		const speech = engineOfTranscription(settings.transcriptionProvider);
-		if (speech) {
+	const speechJobs: Array<[boolean, TranscriptionProviderId]> = [
+		[settings.transcriptionEnabled, settings.transcriptionProvider],
+		[
+			quickNotesAvailable(settings),
+			settings.quickNoteTranscriptionProvider,
+		],
+	];
+	for (const [enabled, providerId] of speechJobs) {
+		const speech = enabled ? engineOfTranscription(providerId) : undefined;
+		if (speech && !called.includes(speech)) {
 			called.push(speech);
 		}
 	}
@@ -121,6 +142,13 @@ export function enginesInUse(
 		[
 			settings.transcriptionAutoChaptersEnabled,
 			settings.chaptersLlmProvider,
+		],
+		// A quick note calls its engine only when a profile rewrites it;
+		// plain dictation is transcription alone.
+		[
+			quickNotesAvailable(settings) &&
+				resolveQuickNotePrompt(settings) !== '',
+			settings.quickNoteLlmProvider,
 		],
 	];
 	for (const [enabled, vendorId] of jobs) {
@@ -148,7 +176,7 @@ export function engineStatus(
 ): PageStatus {
 	return enginesInUse(settings).includes(engine) &&
 		engineNeedsSetup(settings, engine)
-		? 'warning'
+		? PageStatus.Warning
 		: null;
 }
 
@@ -163,14 +191,15 @@ export function enginesStatus(settings: AudioRecorderSettings): PageStatus {
 	return enginesInUse(settings).some((engine) =>
 		engineNeedsSetup(settings, engine),
 	)
-		? 'warning'
+		? PageStatus.Warning
 		: null;
 }
 
 /**
  * The status of the multi-track page: set where the capture is switched on and
  * no track has an input, which is a session that would open no microphone and
- * record nothing.
+ * record nothing, or where more than one track asks for the system output,
+ * which is a session the capture refuses outright.
  *
  * A track left unassigned below that is not reported. Capture asks
  * {@link getOrderedTrackSources} which tracks to open and it skips the empty
@@ -187,7 +216,13 @@ export function multiTrackStatus(settings: AudioRecorderSettings): PageStatus {
 	if (!isMultiTrackSessionEnabled(settings)) {
 		return null;
 	}
-	return getOrderedTrackSources(settings).length === 0 ? 'warning' : null;
+	const tracks = getOrderedTrackSources(settings);
+	// The second reason is asked through the same function the capture asks,
+	// so the entry cannot warn about a session that would record, or stay
+	// quiet in front of one that would be refused.
+	return tracks.length === 0 || surplusSystemAudioTracks(tracks).length > 0
+		? PageStatus.Warning
+		: null;
 }
 
 /**
@@ -212,6 +247,36 @@ export function transcriptionRefusal(
 	const engine = engineOfTranscription(settings.transcriptionProvider);
 	if (!engine) {
 		return 'The selected transcription engine is not one this plugin serves.';
+	}
+	return engineSetupReason(settings, engine);
+}
+
+/**
+ * Why a quick note started now would be refused, or null when none would be.
+ *
+ * Asked before the microphone opens rather than after the dictation, because
+ * a refusal found once the user has finished speaking throws away what they
+ * said. A quick note transcribes with an engine of its own, so every reason a
+ * transcription on that engine is refused is one here too, and a note that a
+ * profile rewrites also needs the engine that profile calls.
+ * @param settings - Live settings
+ * @returns The refusal, or null where a quick note could run
+ */
+export function quickNoteRefusal(
+	settings: AudioRecorderSettings,
+): string | null {
+	if (!settings.quickNotesEnabled) {
+		return 'Quick notes are switched off in settings.';
+	}
+	const transcription = transcriptionRefusal(
+		quickNoteTranscriptionSettings(settings),
+	);
+	if (transcription !== null || resolveQuickNotePrompt(settings) === '') {
+		return transcription;
+	}
+	const engine = engineOfVendor(settings.quickNoteLlmProvider);
+	if (!engine) {
+		return 'The quick note rewrite engine is not one this plugin serves.';
 	}
 	return engineSetupReason(settings, engine);
 }

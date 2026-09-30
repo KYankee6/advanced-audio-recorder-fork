@@ -21,11 +21,13 @@ import {
 	selectedProfile,
 	selectedProfileId,
 	setSelectedProfileId,
-	PROFILE_KIND_IDS,
+	ProfileKindId,
 	type Profile,
-	type ProfileKindId,
 } from 'src/settings/profiles';
-import { mergeSettings } from 'src/settings/settingsSerialization';
+import {
+	mergeSettings,
+	serializeSettings,
+} from 'src/settings/settingsSerialization';
 import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
 
 /** A profile of the kind under test, so the helpers are exercised on their own. */
@@ -263,89 +265,163 @@ describe('profileNameRejection', () => {
 	});
 });
 
-describe.each(PROFILE_KIND_IDS.map((kind) => [kind, kind] as const))(
-	'%s profiles',
-	(_name, kind) => {
-		let settings: AudioRecorderSettings;
+describe('a note-backed profile in data.json', () => {
+	/** Settings as the next load reads them back from what a save wrote. */
+	const reloaded = (settings: AudioRecorderSettings): AudioRecorderSettings =>
+		mergeSettings(
+			JSON.parse(
+				JSON.stringify(serializeSettings(settings)),
+			) as Partial<AudioRecorderSettings>,
+		);
 
-		beforeEach(() => {
-			settings = mergeSettings();
-			// The seeded profiles are what a fresh install ships; the contract
-			// below is about a catalogue the user builds, so it starts empty.
-			settings.profiles = [];
-			setSelectedProfileId(settings, kind, '');
+	it('keeps the note it is read from, and the text last read from it', () => {
+		const settings = mergeSettings({
+			profiles: [
+				{
+					id: 'note',
+					kind: 'dictionary',
+					name: 'Standup',
+					body: 'Kubernetes',
+					sourcePath: 'Glossaries/Standup.md',
+				},
+			],
 		});
 
-		it('adds a profile and selects it', () => {
-			const created = addSelected(settings, kind, 'Standup');
-			expect(created.name).toBe('Standup');
-			expect(created.kind).toBe(kind);
-			expect(profilesOfKind(settings.profiles, kind)).toHaveLength(1);
-			expect(selectedProfileId(settings, kind)).toBe(created.id);
-			expect(selectedProfile(settings, kind)).toEqual(created);
+		expect(findProfile(reloaded(settings).profiles, 'note')).toEqual({
+			id: 'note',
+			kind: 'dictionary',
+			name: 'Standup',
+			body: 'Kubernetes',
+			sourcePath: 'Glossaries/Standup.md',
+		});
+	});
+
+	it('reads a profile stored without a note exactly as before', () => {
+		const settings = mergeSettings({
+			profiles: [
+				{ id: 'typed', kind: 'dictionary', name: 'Legal', body: 'NDA' },
+			],
 		});
 
-		it('reselects the first remaining profile after a removal', () => {
-			const first = addSelected(settings, kind, 'First');
-			const second = addSelected(settings, kind, 'Second');
-			removeAndReselectProfile(settings, kind, second.id);
-			expect(profilesOfKind(settings.profiles, kind)).toHaveLength(1);
-			expect(selectedProfileId(settings, kind)).toBe(first.id);
+		const profile = findProfile(reloaded(settings).profiles, 'typed');
+
+		expect(profile).toEqual({
+			id: 'typed',
+			kind: 'dictionary',
+			name: 'Legal',
+			body: 'NDA',
+		});
+		expect(profile && 'sourcePath' in profile).toBe(false);
+	});
+
+	it('reads an empty or non-string path as no note at all', () => {
+		const settings = mergeSettings({
+			profiles: [
+				{
+					id: 'empty',
+					kind: 'dictionary',
+					name: 'Empty',
+					body: '',
+					sourcePath: '',
+				},
+				{
+					id: 'broken',
+					kind: 'dictionary',
+					name: 'Broken',
+					body: '',
+					sourcePath: 42 as unknown as string,
+				},
+			],
 		});
 
-		it('leaves the selection alone when the profile removed was not in use', () => {
-			// Tidying a catalogue is not a decision about which profile a run
-			// applies; moving the selection here would change what the next
-			// run does behind the user's back. The deleted profile is neither
-			// the one in use nor the first of the list, so a reselection would
-			// land somewhere visibly wrong rather than back where it started.
-			const first = addSelected(settings, kind, 'First');
-			const inUse = addSelected(settings, kind, 'In use');
-			const spare = addSelected(settings, kind, 'Spare');
-			setSelectedProfileId(settings, kind, inUse.id);
+		expect(
+			settings.profiles.map((profile) => 'sourcePath' in profile),
+		).toEqual([false, false]);
+	});
+});
 
-			removeAndReselectProfile(settings, kind, spare.id);
+describe.each(
+	Object.values(ProfileKindId).map((kind) => [kind, kind] as const),
+)('%s profiles', (_name, kind) => {
+	let settings: AudioRecorderSettings;
 
-			expect(selectedProfileId(settings, kind)).toBe(inUse.id);
-			expect(
-				profilesOfKind(settings.profiles, kind).map(
-					(profile) => profile.id,
-				),
-			).toEqual([first.id, inUse.id]);
-		});
+	beforeEach(() => {
+		settings = mergeSettings();
+		// The seeded profiles are what a fresh install ships; the contract
+		// below is about a catalogue the user builds, so it starts empty.
+		settings.profiles = [];
+		setSelectedProfileId(settings, kind, '');
+	});
 
-		it('falls back to no selection when the last profile is removed', () => {
-			const only = addSelected(settings, kind, 'Only');
-			removeAndReselectProfile(settings, kind, only.id);
-			expect(settings.profiles).toEqual([]);
-			expect(selectedProfileId(settings, kind)).toBe('');
-			expect(selectedProfile(settings, kind)).toBeUndefined();
-		});
+	it('adds a profile and selects it', () => {
+		const created = addSelected(settings, kind, 'Standup');
+		expect(created.name).toBe('Standup');
+		expect(created.kind).toBe(kind);
+		expect(profilesOfKind(settings.profiles, kind)).toHaveLength(1);
+		expect(selectedProfileId(settings, kind)).toBe(created.id);
+		expect(selectedProfile(settings, kind)).toEqual(created);
+	});
 
-		it('resolves no profile for a selection pointing at a removed one', () => {
-			const created = addSelected(settings, kind, 'Gone');
-			settings.profiles = removeProfile(settings.profiles, created.id);
-			// The id is still stored; the resolver must treat it as no
-			// selection rather than as an error.
-			expect(settings.selectedProfileIds[kind]).toBe(created.id);
-			expect(selectedProfile(settings, kind)).toBeUndefined();
-		});
+	it('reselects the first remaining profile after a removal', () => {
+		const first = addSelected(settings, kind, 'First');
+		const second = addSelected(settings, kind, 'Second');
+		removeAndReselectProfile(settings, kind, second.id);
+		expect(profilesOfKind(settings.profiles, kind)).toHaveLength(1);
+		expect(selectedProfileId(settings, kind)).toBe(first.id);
+	});
 
-		it('leaves every other kind alone while its own is edited', () => {
-			// One stored list serves them all, so an edit to one catalogue must
-			// be invisible to the others.
-			const others = PROFILE_KIND_IDS.filter((other) => other !== kind);
-			for (const other of others) {
-				addSelected(settings, other, `${other} profile`);
-			}
-			const created = addSelected(settings, kind, 'Mine');
-			removeAndReselectProfile(settings, kind, created.id);
-			for (const other of others) {
-				expect(profilesOfKind(settings.profiles, other)).toHaveLength(
-					1,
-				);
-				expect(selectedProfileId(settings, other)).not.toBe('');
-			}
-		});
-	},
-);
+	it('leaves the selection alone when the profile removed was not in use', () => {
+		// Tidying a catalogue is not a decision about which profile a run
+		// applies; moving the selection here would change what the next
+		// run does behind the user's back. The deleted profile is neither
+		// the one in use nor the first of the list, so a reselection would
+		// land somewhere visibly wrong rather than back where it started.
+		const first = addSelected(settings, kind, 'First');
+		const inUse = addSelected(settings, kind, 'In use');
+		const spare = addSelected(settings, kind, 'Spare');
+		setSelectedProfileId(settings, kind, inUse.id);
+
+		removeAndReselectProfile(settings, kind, spare.id);
+
+		expect(selectedProfileId(settings, kind)).toBe(inUse.id);
+		expect(
+			profilesOfKind(settings.profiles, kind).map(
+				(profile) => profile.id,
+			),
+		).toEqual([first.id, inUse.id]);
+	});
+
+	it('falls back to no selection when the last profile is removed', () => {
+		const only = addSelected(settings, kind, 'Only');
+		removeAndReselectProfile(settings, kind, only.id);
+		expect(settings.profiles).toEqual([]);
+		expect(selectedProfileId(settings, kind)).toBe('');
+		expect(selectedProfile(settings, kind)).toBeUndefined();
+	});
+
+	it('resolves no profile for a selection pointing at a removed one', () => {
+		const created = addSelected(settings, kind, 'Gone');
+		settings.profiles = removeProfile(settings.profiles, created.id);
+		// The id is still stored; the resolver must treat it as no
+		// selection rather than as an error.
+		expect(settings.selectedProfileIds[kind]).toBe(created.id);
+		expect(selectedProfile(settings, kind)).toBeUndefined();
+	});
+
+	it('leaves every other kind alone while its own is edited', () => {
+		// One stored list serves them all, so an edit to one catalogue must
+		// be invisible to the others.
+		const others = Object.values(ProfileKindId).filter(
+			(other) => other !== kind,
+		);
+		for (const other of others) {
+			addSelected(settings, other, `${other} profile`);
+		}
+		const created = addSelected(settings, kind, 'Mine');
+		removeAndReselectProfile(settings, kind, created.id);
+		for (const other of others) {
+			expect(profilesOfKind(settings.profiles, other)).toHaveLength(1);
+			expect(selectedProfileId(settings, other)).not.toBe('');
+		}
+	});
+});

@@ -8,7 +8,7 @@
 import { normalizeChannelMode } from '../audio/downmix';
 import { isRecord } from '../utils/objects';
 import { getDefaultDeviceId } from '../utils/DeviceUtils';
-import { getPlatformKind, type PlatformKind } from '../platform/platformKind';
+import { getPlatformKind, PlatformKind } from '../platform/platformKind';
 import { isDeviceSelectionSupported } from '../platform/capabilities';
 import { LLM_JOBS, LLM_VENDORS } from '../transcription/llm/vendors';
 import { TRANSCRIPTION_ENGINES } from '../transcription/providers/engines';
@@ -27,14 +27,21 @@ import {
 	DEEPGRAM_MODEL_SUGGESTIONS,
 	GEMINI_MODEL_SUGGESTIONS,
 	LLM_ANTHROPIC_MODEL_SUGGESTIONS,
+	LLM_DEEPSEEK_MODEL_SUGGESTIONS,
+	LLM_MISTRAL_MODEL_SUGGESTIONS,
 	LLM_OPENAI_MODEL_SUGGESTIONS,
 	MODEL_SEED_GENERATION,
 	PLUGIN_LOG_PREFIX,
+	VOXTRAL_MODEL_SUGGESTIONS,
 	WHISPER_API_MODEL_SUGGESTIONS,
 } from '../constants';
 import {
 	DEFAULT_SETTINGS,
 	createPlatformScopedDefaults,
+	TrackProcessingMode,
+	TrackSourceKind,
+	normalizeTrackProcessingMode,
+	normalizeTrackSourceKind,
 	type AudioRecorderSettings,
 	type PrimitiveSettingKey,
 	type AudioRecorderSettingsInput,
@@ -52,10 +59,9 @@ import {
 	createProfile,
 	noSelectedProfiles,
 	profilesOfKind,
+	ProfileKindId,
 	setSelectedProfileId,
-	PROFILE_KIND_IDS,
 	type Profile,
-	type ProfileKindId,
 } from './profiles';
 import {
 	formatParticipantBody,
@@ -107,21 +113,32 @@ function normalizeTrackAudioSources(
 				channelMode: normalizeChannelMode(undefined),
 				gainDb: 0,
 				pan: 0,
+				processing: TrackProcessingMode.Global,
+				kind: TrackSourceKind.InputDevice,
 			});
 			continue;
 		}
 		if (value && typeof value === 'object' && 'deviceId' in value) {
 			const { deviceId, channelMode } = value;
-			const placement = value as { gainDb?: unknown; pan?: unknown };
+			// Read off a widened view rather than destructured: this entry is
+			// also the pre-placement shape, which carries none of these keys.
+			const extras = value as {
+				gainDb?: unknown;
+				pan?: unknown;
+				processing?: unknown;
+				kind?: unknown;
+			};
 			sources.set(trackNumber, {
 				deviceId: typeof deviceId === 'string' ? deviceId : '',
 				channelMode: normalizeChannelMode(channelMode),
 				gainDb: clampNumber(
-					placement.gainDb,
+					extras.gainDb,
 					MIN_TRACK_GAIN_DB,
 					MAX_TRACK_GAIN_DB,
 				),
-				pan: clampNumber(placement.pan, -1, 1),
+				pan: clampNumber(extras.pan, -1, 1),
+				processing: normalizeTrackProcessingMode(extras.processing),
+				kind: normalizeTrackSourceKind(extras.kind),
 			});
 		}
 	}
@@ -141,6 +158,8 @@ export function serializeTrackAudioSources(
 			channelMode: source.channelMode,
 			gainDb: source.gainDb ?? 0,
 			pan: source.pan ?? 0,
+			processing: source.processing ?? TrackProcessingMode.Global,
+			kind: source.kind ?? TrackSourceKind.InputDevice,
 		};
 	}
 	return serialized;
@@ -206,10 +225,12 @@ export function normalizePerPlatformSettings(
 		trackAudioSources: raw.trackAudioSources,
 	};
 	return {
-		desktop: normalizePlatformScopedSettings(
-			stored?.desktop ?? legacyDesktop,
+		[PlatformKind.Desktop]: normalizePlatformScopedSettings(
+			stored?.[PlatformKind.Desktop] ?? legacyDesktop,
 		),
-		mobile: normalizePlatformScopedSettings(stored?.mobile),
+		[PlatformKind.Mobile]: normalizePlatformScopedSettings(
+			stored?.[PlatformKind.Mobile],
+		),
 	};
 }
 
@@ -245,8 +266,12 @@ export function serializeSettings(
 	return {
 		...rest,
 		perPlatform: {
-			desktop: serializePlatformScopedSettings(perPlatform.desktop),
-			mobile: serializePlatformScopedSettings(perPlatform.mobile),
+			[PlatformKind.Desktop]: serializePlatformScopedSettings(
+				perPlatform[PlatformKind.Desktop],
+			),
+			[PlatformKind.Mobile]: serializePlatformScopedSettings(
+				perPlatform[PlatformKind.Mobile],
+			),
 		},
 	};
 }
@@ -288,7 +313,7 @@ export function mergeSettings(
 	// stored chat URL onto the very field the reconciliation is about to point
 	// transcription back at. A field a migration resolves through a registry has
 	// to name something by the time the migration asks.
-	reconcileTranscriptionEngine(merged);
+	reconcileTranscriptionEngines(merged, userSettings);
 	migrateLegacyLlmSettings(merged, userSettings);
 	migrateModelCatalogues(merged, userSettings);
 	// The same rule that holds after an edit on an engine's page, applied to a
@@ -366,11 +391,27 @@ function reconcileLlmJobEngines(merged: AudioRecorderSettings): void {
 }
 
 /**
- * Points transcription at an engine that exists.
+ * Points transcription, and the transcription of quick notes, at engines that
+ * exist.
  * @param merged - The merged settings to reconcile in place
+ * @param raw - The stored config, read for whether quick notes named an engine
  */
-function reconcileTranscriptionEngine(merged: AudioRecorderSettings): void {
+function reconcileTranscriptionEngines(
+	merged: AudioRecorderSettings,
+	raw: AudioRecorderSettingsInput,
+): void {
 	reconcileRegistryId(merged, 'transcriptionProvider', TRANSCRIPTION_ENGINES);
+	// Quick notes used to be transcribed by the recordings' engine. A stored
+	// config holds a key for that one and may hold none for the shipped
+	// default, so dictation starts where it was.
+	if (raw.quickNoteTranscriptionProvider === undefined) {
+		merged.quickNoteTranscriptionProvider = merged.transcriptionProvider;
+	}
+	reconcileRegistryId(
+		merged,
+		'quickNoteTranscriptionProvider',
+		TRANSCRIPTION_ENGINES,
+	);
 }
 
 /**
@@ -397,7 +438,7 @@ function migrateAdvancedDictionaryGate(
 	if (legacy.transcriptionAdvancedSettingsEnabled !== undefined) {
 		return;
 	}
-	if (profilesOfKind(merged.profiles, 'dictionary').length > 0) {
+	if (profilesOfKind(merged.profiles, ProfileKindId.Dictionary).length > 0) {
 		merged.transcriptionAdvancedSettingsEnabled = true;
 	}
 }
@@ -437,7 +478,7 @@ const LEGACY_PROFILE_LISTS: readonly LegacyProfileList[] = [
 	{
 		key: 'transcriptionSpeakerProfiles',
 		selectionKey: 'transcriptionSpeakerProfileId',
-		kind: 'participants',
+		kind: ProfileKindId.Participants,
 		// The roster was stored parsed; a unified profile keeps the text the
 		// editor shows, so it is written back one name per line.
 		body: (entry) =>
@@ -450,13 +491,13 @@ const LEGACY_PROFILE_LISTS: readonly LegacyProfileList[] = [
 	{
 		key: 'transcriptionDictionaryProfiles',
 		selectionKey: 'transcriptionDictionaryProfileId',
-		kind: 'dictionary',
+		kind: ProfileKindId.Dictionary,
 		body: (entry) => legacyString(entry.terms),
 	},
 	{
 		key: 'transcriptionChapterPromptProfiles',
 		selectionKey: 'transcriptionChapterPromptProfileId',
-		kind: 'chapterPrompt',
+		kind: ProfileKindId.ChapterPrompt,
 		body: (entry) => legacyString(entry.prompt),
 	},
 ];
@@ -468,9 +509,9 @@ const LEGACY_PROMPT_FIELDS: readonly {
 	readonly key: string;
 	readonly kind: ProfileKindId;
 }[] = [
-	{ key: 'llmCleanupPrompt', kind: 'llmCleanup' },
-	{ key: 'llmSummaryPrompt', kind: 'llmSummary' },
-	{ key: 'llmCustomInstruction', kind: 'llmCustom' },
+	{ key: 'llmCleanupPrompt', kind: ProfileKindId.LlmCleanup },
+	{ key: 'llmSummaryPrompt', kind: ProfileKindId.LlmSummary },
+	{ key: 'llmCustomInstruction', kind: ProfileKindId.LlmCustom },
 ];
 
 /**
@@ -620,12 +661,16 @@ function migrateLegacyTranscriptionDictionary(
 	const legacyTerms = legacyString(raw.transcriptionDictionary);
 	if (
 		legacyTerms.trim() !== '' &&
-		profilesOfKind(merged.profiles, 'dictionary').length === 0
+		profilesOfKind(merged.profiles, ProfileKindId.Dictionary).length === 0
 	) {
 		// Keep the raw multi-line text; parsing happens at run time.
-		const profile = createProfile('dictionary', 'General', legacyTerms);
+		const profile = createProfile(
+			ProfileKindId.Dictionary,
+			'General',
+			legacyTerms,
+		);
 		merged.profiles = [...merged.profiles, profile];
-		setSelectedProfileId(merged, 'dictionary', profile.id);
+		setSelectedProfileId(merged, ProfileKindId.Dictionary, profile.id);
 	}
 	deleteLegacyField(merged, 'transcriptionDictionary');
 }
@@ -640,7 +685,7 @@ function migrateLegacyTranscriptionDictionary(
  */
 function normalizeProfiles(merged: AudioRecorderSettings): void {
 	const stored: unknown = merged.profiles;
-	const kinds = new Set<string>(PROFILE_KIND_IDS);
+	const kinds = new Set<string>(Object.values(ProfileKindId));
 	merged.profiles = (Array.isArray(stored) ? stored : []).flatMap(
 		(entry: unknown) => {
 			if (!isRecord(entry) || !kinds.has(legacyString(entry.kind))) {
@@ -651,12 +696,16 @@ function normalizeProfiles(merged: AudioRecorderSettings): void {
 			if (id === '' || name === '') {
 				return [];
 			}
+			// Rebuilt field by field, so a field this list does not name is
+			// lost on the next load. An empty path is no note at all.
+			const sourcePath = legacyString(entry.sourcePath);
 			return [
 				{
 					id,
 					kind: entry.kind as ProfileKindId,
 					name,
 					body: legacyString(entry.body),
+					...(sourcePath === '' ? {} : { sourcePath }),
 				},
 			];
 		},
@@ -669,7 +718,7 @@ function normalizeProfiles(merged: AudioRecorderSettings): void {
 		unknown
 	>;
 	const normalized = noSelectedProfiles();
-	for (const kind of PROFILE_KIND_IDS) {
+	for (const kind of Object.values(ProfileKindId)) {
 		normalized[kind] = legacyString(selections[kind]);
 	}
 	merged.selectedProfileIds = normalized;
@@ -842,6 +891,12 @@ function migrateLegacyLlmSettings(
 	if (raw.advancedLlmProvider === undefined) {
 		merged.advancedLlmProvider = merged.llmProvider;
 	}
+	// Quick notes arrived after the engine choice split per job, so a stored
+	// config starts them on the engine it already set up for post-processing
+	// rather than on one it may hold no key for.
+	if (raw.quickNoteLlmProvider === undefined) {
+		merged.quickNoteLlmProvider = merged.llmProvider;
+	}
 	// The answer ceiling was one field for whichever engine was selected; every
 	// engine that writes now holds its own, and each starts at that bound.
 	const legacyMaxTokens = raw.llmMaxTokens;
@@ -886,6 +941,9 @@ function migrateModelCatalogues(
 		['geminiModels', [...GEMINI_MODEL_SUGGESTIONS]],
 		['llmOpenAiModels', [...LLM_OPENAI_MODEL_SUGGESTIONS]],
 		['llmAnthropicModels', [...LLM_ANTHROPIC_MODEL_SUGGESTIONS]],
+		['voxtralModels', [...VOXTRAL_MODEL_SUGGESTIONS]],
+		['llmMistralModels', [...LLM_MISTRAL_MODEL_SUGGESTIONS]],
+		['llmDeepSeekModels', [...LLM_DEEPSEEK_MODEL_SUGGESTIONS]],
 	];
 	for (const [key, shipped] of seeds) {
 		const saved = merged[key];

@@ -17,9 +17,12 @@ import type { MarkerKind } from '../markers/markerModel';
 import type { RecordingMarkerHandle } from './recordingMarkers';
 import { RecordingMarkerCoordinator } from './RecordingMarkerCoordinator';
 import type { AudioRecorderSettings } from '../settings/settingsSchema';
+import { TrackSourceKind } from '../settings/settingsSchema';
+import { OutputMode } from '../types';
 import {
 	getAudioStreams,
 	getAudioSourceName,
+	recordingEncodingFor,
 	stopAllStreams,
 	validateSelectedDevices,
 } from './AudioStreamHandler';
@@ -38,9 +41,10 @@ import {
 import { DebugLogger } from '../utils/DebugLogger';
 import {
 	buildMimeType,
+	resolveEffectiveBitrate,
 	resolveEffectiveOutputFormat,
 } from '../audio/AudioCapabilityDetector';
-import { CHANNEL_MODE_SOURCE } from '../audio/downmix';
+import { ChannelMode } from '../audio/downmix';
 import { CaptureLossWatcher } from './CaptureLossWatcher';
 import { createPcmRecorders } from './RecorderFactory';
 import { describeRecordingError } from './recordingErrors';
@@ -66,6 +70,9 @@ import {
 	MediaRecorderCaptureTrack,
 	PcmCaptureTrack,
 } from './CaptureTrack';
+
+/** File-name part standing in for a device on a system-audio track. */
+const SYSTEM_AUDIO_SOURCE_NAME = 'SystemAudio';
 
 /**
  * Manages the audio recording lifecycle.
@@ -119,6 +126,9 @@ export class RecordingManager {
 	 * @param onStatusChange - Callback for status changes
 	 * @param markerStore - The plugin's single sidecar store, shared with the
 	 *   player and transcription so all writers serialize on one write chain
+	 * @param captureBusy - Why another capture holds the microphone right
+	 *   now, or null when none does. A session is refused while one does,
+	 *   since both would record the same speech.
 	 */
 	constructor(
 		private app: App,
@@ -139,6 +149,7 @@ export class RecordingManager {
 		// asks for a worker, already falls back to "no worker" - a second
 		// default here would be a second answer to the same question.
 		getWorkerClient?: () => EncodingWorkerClient | null,
+		private readonly captureBusy?: () => string | null,
 	) {
 		this.onStatusChange = onStatusChange;
 		this.debugLogger = new DebugLogger(settings);
@@ -311,18 +322,37 @@ export class RecordingManager {
 	 * @returns The reason it did not start, or null once it is recording
 	 */
 	async startRecording(): Promise<string | null> {
+		// Asked before the streams open, so the other capture never loses
+		// the device to a session it would then duplicate.
+		const busy = this.captureBusy?.() ?? null;
+		if (busy !== null) {
+			new Notice(busy);
+			return busy;
+		}
 		try {
+			// The streams come first so the layout the encoder is asked about
+			// is the one the tracks were captured with, not one a settings
+			// edit made while permission was pending could describe.
+			await validateSelectedDevices(this.settings);
+			const { streams, trackOrder } = await getAudioStreams(
+				this.settings,
+			);
+			this.streams = streams;
+			this.trackOrder = trackOrder;
+			const encoding = recordingEncodingFor(this.settings, trackOrder);
+
 			// Resolve the format this session actually records in: the
-			// stored preference when this device can record it, otherwise
-			// the platform's best recordable format. Probes real encoder
-			// support, so a format that would only fail at save time is
-			// never silently accepted.
+			// stored preference when this device can write it at this rate
+			// and layout, otherwise the platform's best format that can.
+			// Probes the real encoder, so a format that would only fail at
+			// save time is never silently accepted.
 			const effectiveFormat = await resolveEffectiveOutputFormat(
 				this.settings.recordingFormat,
+				encoding,
 			);
 			if (effectiveFormat.fellBack) {
 				new Notice(
-					`The format "${this.settings.recordingFormat.toUpperCase()}" cannot be recorded on this device. Recording in ${effectiveFormat.format.toUpperCase()} instead.`,
+					`${effectiveFormat.reason} Recording in ${effectiveFormat.format.toUpperCase()} instead.`,
 				);
 				this.debugLogger.log('Recording format fallback', {
 					requested: this.settings.recordingFormat,
@@ -335,9 +365,14 @@ export class RecordingManager {
 				outputFormat === FORMAT_WAV && isPcmWavCaptureSupported();
 
 			let recorderFormat = FORMAT_WEBM;
+			let recorderMimeType = buildMimeType(FORMAT_WEBM);
 			if (!isWavPcm) {
 				const resolved = resolveRecorderFormat(outputFormat);
 				recorderFormat = resolved.recorderFormat;
+				// The type the platform said yes to, kept for the recorder
+				// rather than only logged: audio/m4a is refused where
+				// audio/mp4, the same container, is accepted.
+				recorderMimeType = resolved.mimeType;
 				this.debugLogger.logMimeType(resolved.mimeType);
 				this.debugLogger.log('Recording format configuration', {
 					outputFormat,
@@ -350,12 +385,28 @@ export class RecordingManager {
 				});
 			}
 
-			await validateSelectedDevices(this.settings);
-			const { streams, trackOrder } = await getAudioStreams(
-				this.settings,
+			// The format probe answers about the codec at this rate and
+			// layout, never about the bitrate, and a rate the platform
+			// encoder refuses does not fail until the finished recording is
+			// being encoded - too late to keep the audio. Asking now costs
+			// one probe and turns a lost take into a notice.
+			const resolvedBitrate = await resolveEffectiveBitrate(
+				outputFormat,
+				this.settings.bitrate,
+				encoding,
 			);
-			this.streams = streams;
-			this.trackOrder = trackOrder;
+			if (resolvedBitrate.fellBack) {
+				new Notice(
+					`${resolvedBitrate.reason} Recording at ${String(
+						Math.round(resolvedBitrate.bitrate / 1000),
+					)} kbps instead.`,
+				);
+				this.debugLogger.log('Recording bitrate fallback', {
+					requested: this.settings.bitrate,
+					effective: resolvedBitrate.bitrate,
+					reason: resolvedBitrate.reason,
+				});
+			}
 
 			const plan = createCaptureSession({
 				settings: this.settings,
@@ -363,12 +414,18 @@ export class RecordingManager {
 				trackOrder,
 				outputFormat,
 				recorderFormat,
+				recorderMimeType,
 				isWavPcm,
+				bitrate: resolvedBitrate.bitrate,
 			});
 			this.session = plan.session;
 			if (plan.autoSplitSkipped) {
+				// Said in terms of the session rather than of the feature that
+				// configured it. Two configurations reach this line now, and
+				// naming the multi-track page told a user who had only turned
+				// the system-audio switch on about a page they never opened.
 				new Notice(
-					'Auto-split is skipped for merged multi-track recordings.',
+					"Auto-split is skipped: this session's tracks are mixed into one file.",
 				);
 			}
 			if (this.session.splitEnabled) {
@@ -414,6 +471,7 @@ export class RecordingManager {
 					isPcm: this.session.isWavPcm,
 					pcmChannels: target.pcmChannels,
 					pcmSampleRate: target.pcmSampleRate,
+					pcmFormat: target.pcmFormat,
 					segmentPaths: [],
 					partPaths: [],
 					...(this.session.trackMix[index] ?? {}),
@@ -437,9 +495,13 @@ export class RecordingManager {
 			// on with a dead input. Nothing that happened while the recorders
 			// were being built is missed: the watcher reads the state of the
 			// tracks as well as subscribing to their events.
-			this.captureLoss.start(this.streams, (index, remaining) => {
-				this.handleStreamEnded(index, remaining);
-			});
+			this.captureLoss.start(
+				this.streams,
+				(index, remaining) => {
+					this.handleStreamEnded(index, remaining);
+				},
+				this.systemAudioIndexes(),
+			);
 			return null;
 		} catch (error) {
 			this.releasePartialSession();
@@ -531,14 +593,24 @@ export class RecordingManager {
 			return {
 				trackNumber: trackInfo?.trackNumber ?? index + 1,
 				deviceId: trackInfo?.deviceId,
+				systemAudio: trackInfo?.kind === TrackSourceKind.SystemAudio,
 			};
 		});
 		const sourceNames = await Promise.all(
-			trackInfos.map(({ trackNumber, deviceId }) =>
-				this.settings.useSourceNamesForTracks && deviceId
+			trackInfos.map(({ trackNumber, deviceId, systemAudio }) => {
+				if (!this.settings.useSourceNamesForTracks) {
+					return Promise.resolve(`Track${String(trackNumber)}`);
+				}
+				// A system-audio track names no device, and asking the device
+				// list about it would both answer "UnknownDevice" and throw
+				// where there is no device API at all.
+				if (systemAudio) {
+					return Promise.resolve(SYSTEM_AUDIO_SOURCE_NAME);
+				}
+				return deviceId
 					? getAudioSourceName(deviceId)
-					: Promise.resolve(`Track${String(trackNumber)}`),
-			),
+					: Promise.resolve(`Track${String(trackNumber)}`);
+			}),
 		);
 		const nameCounts = new Map<string, number>();
 		for (const name of sourceNames) {
@@ -561,6 +633,7 @@ export class RecordingManager {
 			pcmBufferedBytes: 0,
 			pcmChannels: 1,
 			pcmSampleRate: this.settings.sampleRate,
+			pcmFormat: this.session.pcmFormat,
 			partIndex: 0,
 			partPaths: [],
 			partPcmBytes: 0,
@@ -592,18 +665,17 @@ export class RecordingManager {
 						void this.handlePcmChunk(index, data);
 					},
 					this.session.channelModes,
+					this.session.pcmFormat,
 				).map((recorder) => new PcmCaptureTrack(recorder))
 			: this.streams.map(
 					(stream, index) =>
 						new MediaRecorderCaptureTrack(
 							stream,
 							this.session.channelModes[index] ??
-								CHANNEL_MODE_SOURCE,
+								ChannelMode.Source,
 							this.settings.sampleRate,
 							{
-								mimeType: buildMimeType(
-									this.session.recorderFormat,
-								),
+								mimeType: this.session.recorderMimeType,
 								bitrate: this.session.bitrate,
 							},
 							{
@@ -651,6 +723,23 @@ export class RecordingManager {
 	}
 
 	/**
+	 * Stream indexes whose capture did not come from an enumerated input
+	 * device, for the loss watcher's device re-check.
+	 *
+	 * A single-track session holds no track order, and a session on the
+	 * default microphone holds one without a device id. Neither has a
+	 * system-audio track, so both answer with the empty set.
+	 * @returns The indexes the device list cannot answer for
+	 */
+	private systemAudioIndexes(): ReadonlySet<number> {
+		return new Set(
+			this.trackOrder.flatMap((source, index) =>
+				source.kind === TrackSourceKind.SystemAudio ? [index] : [],
+			),
+		);
+	}
+
+	/**
 	 * Answers one capture stream ending.
 	 *
 	 * A multi-track session keeps whatever is still capturing: pulling one
@@ -670,6 +759,23 @@ export class RecordingManager {
 	 */
 	private handleStreamEnded(index: number, remaining: number): void {
 		const name = this.chunkTargets[index]?.sourceName ?? 'the input device';
+		// What ended decides the sentence: a granted capture of this
+		// machine's output is revoked or switched off, and calling that a
+		// disconnected device sends the user looking at their cables.
+		const systemAudio =
+			this.trackOrder[index]?.kind === TrackSourceKind.SystemAudio;
+		const trackCause = systemAudio
+			? 'its system audio capture ended'
+			: 'its input device was disconnected';
+		// The device half names which device went, because a session holds
+		// several and the user has to know which one to go and look at. The
+		// system-audio half names none: a session captures this machine's
+		// output once, and the name standing in for the device it has not got
+		// is either the constant below or "TrackN", neither of which says
+		// anything the sentence has not already said.
+		const sessionCause = systemAudio
+			? "the capture of this computer's output ended"
+			: `the input device "${name}" was disconnected`;
 		if (remaining > 0) {
 			// A track recorded straight off its capture stream stops by
 			// itself, because a recorder whose stream has gone inactive is
@@ -682,7 +788,7 @@ export class RecordingManager {
 			// too, which is the same thing the direct path does.
 			this.captureTracks[index]?.detachFromDevice();
 			new Notice(
-				`Track "${name}" stopped: its input device was disconnected. ` +
+				`Track "${name}" stopped: ${trackCause}. ` +
 					'The other tracks are still recording.',
 			);
 			return;
@@ -695,7 +801,7 @@ export class RecordingManager {
 		}
 		this.setStatus(RecordingStatus.Interrupted);
 		new Notice(
-			`Recording stopped: the input device "${name}" was disconnected. ` +
+			`Recording stopped: ${sessionCause}. ` +
 				'Saving what was recorded so far.',
 		);
 		void this.stopRecording();
@@ -942,6 +1048,7 @@ export class RecordingManager {
 					this.session.partMinutes,
 					target.pcmSampleRate,
 					target.pcmChannels,
+					target.pcmFormat,
 				);
 				if (target.partPcmBytes >= partLimitBytes) {
 					await this.rotation.finalizePcmPart(target, partLimitBytes);
@@ -1001,7 +1108,7 @@ export class RecordingManager {
 	): readonly RecordingTarget[] {
 		const merged =
 			this.session.isWavPcm &&
-			this.session.outputMode === 'single' &&
+			this.session.outputMode === OutputMode.Single &&
 			this.chunkTargets.length > 1;
 		return merged ? this.chunkTargets : [target];
 	}
@@ -1036,6 +1143,7 @@ export class RecordingManager {
 						this.chunkTargets.indexOf(chunkTarget)
 					]?.pan ?? 0,
 			})),
+			this.session.pcmFormat,
 		).pcmByteLength;
 	}
 

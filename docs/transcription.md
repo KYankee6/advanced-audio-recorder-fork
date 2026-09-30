@@ -8,6 +8,7 @@
     - [Whisper API (OpenAI-compatible)](#whisper-api-openai-compatible)
     - [Deepgram](#deepgram)
     - [Google Gemini](#google-gemini)
+    - [Mistral Voxtral](#mistral-voxtral)
     - [Local whisper.cpp (desktop)](#local-whispercpp-desktop)
 - [Model picker and language](#model-picker-and-language)
 - [Speakers and diarization](#speakers-and-diarization)
@@ -32,16 +33,19 @@
 
 Open **Settings > Advanced Audio Recorder > Transcription** and turn on **Enable transcription**. The rest of the section appears only while it is on. From top to bottom you then configure:
 
-1. **Transcribe after recording** - auto-transcribe each saved recording (off by default).
-2. **Transcription engine** - the row naming the service that transcribes, with the **Engines** entry under it opening the page where that service is configured: base URL, API key, and model.
-3. **Language** - `auto` to detect, or an ISO code.
-4. **Speaker diarization** - request speaker labels (only some engines).
-5. **Translate speech to English** - write the recording down in English whatever was spoken, using the engine's own translating operation (only some engines).
-6. **Word-level timestamps** - per-word timing in JSON output, selectable on Whisper API and decided by the engine on the other three.
-7. **Request timeout** - the per-request network deadline (cloud engines only), replaced by **Local run timeout** on local whisper.cpp.
-8. **Transcript output** - destination, file format, and in-note formatting.
-9. **Auto chapters** - optional LLM-generated chapters for the enhanced player (see [Auto chapters](#auto-chapters)).
-10. **LLM post-processing** - optional, documented separately in [LLM post-processing](llm-post-processing.md).
+1. **Transcription engine** - the row naming the service that transcribes, with the **Engines** entry under it opening the page where that service is configured: base URL, API key, and model.
+2. **Transcribe after recording** - auto-transcribe each saved recording (off by default).
+3. **Show cost estimates** - the estimated API cost before a run and the running session total (on by default).
+4. **Language** - `auto` to detect, or an ISO code.
+5. **Speaker diarization** - request speaker labels (only some engines).
+6. **Translate speech to English** - write the recording down in English whatever was spoken, using the engine's own translating operation (only some engines).
+7. **Participant profile** - shown while diarization is on, with the **Participant profiles** catalogue under it.
+8. **Word-level timestamps** - per-word timing in JSON output, selectable on Whisper API and decided by the engine on the other four.
+9. **Request timeout** - the per-request network deadline (cloud engines only), replaced by **Local run timeout** on local whisper.cpp.
+10. **Transcript output** - destination, file format, and in-note formatting.
+11. **Auto chapters** - optional LLM-generated chapters for the enhanced player (see [Auto chapters](#auto-chapters)).
+12. **LLM post-processing** - optional, documented separately in [LLM post-processing](llm-post-processing.md).
+13. **Advanced** - the dictionary profiles and the experimental two-pass mode, behind the **Advanced settings** master switch.
 
 ---
 
@@ -63,13 +67,14 @@ The first two open the **Transcribe audio** dialog, where you can override the e
 
 ## Engines
 
-Choose the **Transcription engine** from the dropdown. Four engines are available:
+Choose the **Transcription engine** from the dropdown. Five engines are available:
 
 | Engine                              | Type                        | Size limit per request | Diarization | Network  |
 | ----------------------------------- | --------------------------- | ---------------------- | ----------- | -------- |
 | **Whisper API (OpenAI-compatible)** | Cloud (OpenAI, Groq, …)     | 25 MB (hard)           | No          | Required |
 | **Deepgram**                        | Cloud (pre-recorded API)    | 2 GB                   | Yes         | Required |
 | **Google Gemini**                   | Cloud (multimodal)          | 2 GB                   | Yes         | Required |
+| **Mistral Voxtral**                 | Cloud (batch transcription) | 1 GB                   | Yes         | Required |
 | **Local whisper.cpp (desktop)**     | Local binary, fully offline | None (local)           | No          | None     |
 
 Audio preparation (decoding and chunking, when a provider needs it) happens **in memory**. Whenever a provider accepts the original container and the file fits the limit, the file is sent untouched, which keeps memory low and avoids re-encoding. Nothing is written to disk during preparation, except that the local whisper.cpp engine hands each request to the binary as a temporary WAV and deletes it afterward.
@@ -80,12 +85,12 @@ OpenAI's speech-to-text API, and any OpenAI-compatible host (for example **Groq*
 
 Settings to fill:
 
-| Setting                  | Description                                                                                                      | Default                     |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------- | --------------------------- |
-| **Upload chunk size**    | Megabytes per WAV chunk when a recording is too large to upload whole. Range 1-24 MB.                            | 24                          |
-| **Whisper API base URL** | OpenAI-compatible endpoint base, e.g. `https://api.openai.com/v1` or a Groq URL.                                 | `https://api.openai.com/v1` |
-| **Whisper API key**      | Your API key. Stored in plugin data on this device.                                                              | -                           |
-| **Whisper model**        | Model id in use; the entry opens the saved ids, where it is picked. Must support `verbose_json` with timestamps. | `whisper-1`                 |
+| Setting               | Description                                                                                                                     | Default                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| **Upload chunk size** | Megabytes per WAV chunk when a recording is too large to upload whole. Range 1-24 MB.                                           | 24                          |
+| **Base URL**          | OpenAI-compatible endpoint base, e.g. `https://api.openai.com/v1` or a Groq URL. Shared with the OpenAI engine.                 | `https://api.openai.com/v1` |
+| **OpenAI API key**    | Your API key, read by this engine and by the OpenAI one. Stored in plugin data on this device.                                  | -                           |
+| **Model**             | Model id in use, picked from the ids the **Model catalogue** entry below it holds. Must support `verbose_json` with timestamps. | `whisper-1`                 |
 
 Behavior and limits:
 
@@ -95,10 +100,9 @@ Behavior and limits:
 - **Speech translation.** The endpoint carries a second operation that writes the recording down in **English** whatever was spoken. Turn on **Translate speech to English** to use it. Chunking and the dictionary bias behave exactly as they do on the transcription operation, but the translation one takes a narrower set of fields, so two things are dropped from the request rather than sent and refused. The **Language** hint goes, because it would describe the audio rather than the answer. **Word-level timestamps** go with it, because the operation has no timing granularity to ask for and answers with segments only, so a translated transcript carries per-segment timings and never per-word ones. This is the only engine that offers speech translation at all. To translate into any other language, or on any other engine, use the [translation task](llm-post-processing.md) of LLM post-processing instead, which runs on the finished transcript.
 - **Model requirements.** Only models that return `verbose_json` with segment timestamps work. `whisper-1` is OpenAI's; `whisper-large-v3` and `whisper-large-v3-turbo` are served by Groq and other compatible hosts. (OpenAI's `gpt-4o-transcribe` models do **not** support `verbose_json` and are intentionally excluded.)
 
-Getting a key: [OpenAI Whisper API key](use-cases/openai-whisper-api-key.md) · [Groq Whisper setup](use-cases/groq-whisper-setup.md). The catalogue link next to the model picker points at the [OpenAI speech-to-text guide](https://platform.openai.com/docs/guides/speech-to-text).
+Getting a key: [OpenAI Whisper API key](use-cases/openai-whisper-api-key.md) · [Groq Whisper setup](use-cases/groq-whisper-setup.md). The **Whisper API models** link in the **Model** row's description points at the [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text).
 
-![Whisper API engine settings: upload chunk size number field, base URL, API key, and model picker](images/settings-transcription-whisper.png)
-_Figure: the Whisper API engine fields, with the upload chunk-size number field and the model picker._
+![The Whisper API engine page under Engines, with the Base URL, OpenAI API key, Model and Upload chunk size rows](images/settings-engine-whisper-api.png)
 
 ### Deepgram
 
@@ -106,24 +110,23 @@ Deepgram's official **pre-recorded** transcription API, with strong diarization.
 
 Settings to fill:
 
-| Setting               | Description                                                                                           | Default                       |
-| --------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------- |
-| **Deepgram base URL** | Deepgram API base.                                                                                    | `https://api.deepgram.com/v1` |
-| **Deepgram API key**  | Your Deepgram key. Stored in plugin data on this device.                                              | -                             |
-| **Deepgram model**    | Model id in use; the entry opens the saved ids, where it is picked (e.g. `nova-3`, `nova-2-meeting`). | `nova-3`                      |
+| Setting              | Description                                                                                                          | Default                       |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| **Base URL**         | Deepgram API base.                                                                                                   | `https://api.deepgram.com/v1` |
+| **Deepgram API key** | Your Deepgram key. Stored in plugin data on this device.                                                             | -                             |
+| **Model**            | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `nova-3`, `nova-2-meeting`). | `nova-3`                      |
 
 Behavior and limits:
 
 - **Up to 2 GB sent whole.** Because the entire recording goes in one request, **diarization keeps consistent speaker numbering across the whole file**.
 - **Diarization supported.** Turn on **Speaker diarization** to request speaker labels.
 - **Billing.** A free Deepgram account includes a generous starter credit; beyond that, usage is pay-as-you-go.
-- The picker is seeded with the Nova, Enhanced, and Base families; add your own ids if needed.
+- The catalogue is seeded with the Nova, Enhanced, and Base families together with the Whisper models Deepgram hosts, and you can add your own ids to it.
 - **Custom dictionary support depends on the model.** Nova-3 biases with keyterm prompting and Nova-2 and older with keyword boosting, while the hosted Whisper models cannot bias; see [Biasing recognition toward your own terms](#biasing-recognition-toward-your-own-terms).
 
-Getting a key: [Deepgram API key](use-cases/deepgram-api-key.md). The catalogue link points at the [Deepgram model list](https://developers.deepgram.com/docs/model).
+Getting a key: [Deepgram API key](use-cases/deepgram-api-key.md). The **Deepgram model list** link in the **Model** row's description points at the [Deepgram model list](https://developers.deepgram.com/docs/model).
 
-![Deepgram engine settings: base URL, API key, and the Deepgram model picker](images/settings-transcription-deepgram.png)
-_Figure: the Deepgram engine fields with the model picker seeded with the Nova family._
+![The Deepgram engine page under Engines, with the Base URL, Deepgram API key and Model rows](images/settings-engine-deepgram.png)
 
 ### Google Gemini
 
@@ -131,11 +134,11 @@ Google's multimodal `generateContent` API, using the File API to upload the reco
 
 Settings to fill:
 
-| Setting             | Description                                                                                                     | Default                                     |
-| ------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| **Gemini base URL** | Gemini API base (no version segment).                                                                           | `https://generativelanguage.googleapis.com` |
-| **Gemini API key**  | Your Gemini key. Stored in plugin data on this device.                                                          | -                                           |
-| **Gemini model**    | Model id in use; the entry opens the saved ids, where it is picked (e.g. `gemini-3.5-flash`, `gemini-2.5-pro`). | `gemini-3.5-flash`                          |
+| Setting                   | Description                                                                                                                    | Default                                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
+| **Base URL**              | Gemini API base (no version segment).                                                                                          | `https://generativelanguage.googleapis.com` |
+| **Google Gemini API key** | Your Gemini key. Stored in plugin data on this device.                                                                         | -                                           |
+| **Model**                 | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `gemini-3.5-flash`, `gemini-2.5-pro`). | `gemini-3.5-flash`                          |
 
 Behavior and limits:
 
@@ -144,10 +147,34 @@ Behavior and limits:
 - **Long recordings are split.** A recording **longer than 15 minutes** is split into parts of equal length, each transcribed and stitched back onto the timeline; a recording of exactly 15 minutes still goes in one request. Splitting **resets Gemini's per-request speaker numbering**, so a diarized split shows a warning that speaker labels may differ between parts; the message suggests using Deepgram or splitting the recording for consistent speakers.
 - **Diarization supported.** Turn on **Speaker diarization** to request speaker labels.
 
-Getting a key: [Gemini API key](use-cases/gemini-api-key.md). The catalogue link points at the [Gemini model list](https://ai.google.dev/gemini-api/docs/models).
+Getting a key: [Gemini API key](use-cases/gemini-api-key.md). The **Gemini model list** link in the **Model** row's description points at the [Gemini model list](https://ai.google.dev/gemini-api/docs/models).
 
-![Google Gemini engine settings: base URL, API key, and the Gemini model picker](images/settings-transcription-gemini.png)
-_Figure: the Google Gemini engine fields with the Flash and Pro models in the picker._
+![The Google Gemini engine page under Engines, with the Base URL, Google Gemini API key, Model and Max output tokens rows](images/settings-llm-gemini-provider.png)
+
+### Mistral Voxtral
+
+Mistral's batch transcription endpoint, running the Voxtral Mini Transcribe models. One Mistral account serves both this engine and the [Mistral chat models](llm-post-processing.md) used for post-processing, so the endpoint and the key are entered once.
+
+Settings to fill:
+
+| Setting             | Description                                                                                                     | Default                     |
+| ------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| **Base URL**        | Mistral API base, shared with the Mistral chat engine.                                                          | `https://api.mistral.ai/v1` |
+| **Mistral API key** | Your Mistral key. Stored in plugin data on this device.                                                         | -                           |
+| **Model**           | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `voxtral-mini-latest`). | `voxtral-mini-latest`       |
+
+Behavior and limits:
+
+- **Up to three hours in one request**, so a whole meeting is transcribed in one piece and speaker numbering stays consistent from start to finish. Files are sent whole up to **1 GB**. A recording past the three-hour mark is refused before anything is uploaded, with a message pointing at the [splitter](splitting.md), whenever the plugin can measure its length: that is every recording it decodes, which includes the `webm` it records by default. An already-accepted container longer than three hours is measured only by the endpoint, which refuses it in Mistral's own words.
+- **Container conversion.** MP3, WAV, M4A, FLAC, and OGG are uploaded untouched. Any other container, including the `webm` this plugin records by default, is decoded to **16 kHz mono WAV** first, which costs time and memory on a long recording. Choosing MP3 or M4A as the [recording format](recording.md) avoids the decode entirely.
+- **Diarization supported.** Turn on **Speaker diarization** to request speaker labels, and whatever the endpoint names them they can be renamed like any other engine's.
+- **The engine detects the language itself.** Mistral refuses a language hint alongside the timestamp granularity that makes the response carry timed segments at all, so the granularity is sent and the hint is not. **Language** stays editable while this engine is selected, because auto chapters fall back to that same field when a transcript carries no detected language, and the note under the row says the transcription request ignores it.
+- **Segment-level timing only.** Mistral lists word-level timestamps among this model's features and the endpoint does accept `word`, but it has no way to return words and sentences together. Asking for both levels is refused outright, and asking for words alone returns the same list of segments with one word in each, which would leave the transcript a column of single words with no sentences, no usable timecode links and nothing for chapters to work from. **Word-level timestamps** is therefore shown disabled here and the JSON file output holds segment times.
+- **Biasing through a term list.** The dictionary is sent as `context_bias`, at most **100 terms** per request. A multi-word entry is joined with underscores the way Mistral's own examples write them, so `affordable health care` is sent as `affordable_health_care`. Terms past the hundredth are reported in a notice rather than dropped silently.
+- **A generous request deadline.** The whole recording travels in one request, and the endpoint needs far longer to transcribe three hours of it than the upload itself takes, so the deadline never falls below 20 minutes. **Request timeout** still caps it, so raise that setting above its 10-minute default before transcribing a recording of more than about an hour.
+- **No speech translation.** The endpoint has no translating operation, so **Translate speech to English** is disabled for this engine. Use the [translation task](llm-post-processing.md) of LLM post-processing on the finished transcript instead.
+
+Getting a key: [Mistral API key](use-cases/mistral-api-key.md). The **Voxtral model list** link in the **Model** row's description points at the [Mistral offline transcription guide](https://docs.mistral.ai/studio/audio/speech_to_text/offline_transcription).
 
 ### Local whisper.cpp (desktop)
 
@@ -171,21 +198,21 @@ Behavior and limits:
 Setup walkthrough: [Local whisper.cpp](use-cases/local-whisper-cpp.md). The download link in the model-path description points at the [whisper.cpp models on Hugging Face](https://huggingface.co/ggerganov/whisper.cpp).
 
 ![Local whisper.cpp engine settings: binary path, model path, and extra arguments fields](images/local-whisper-settings-engine.png)
-_Figure: the local whisper.cpp engine fields for an offline transcription setup._
 
 ---
 
 ## Model picker and language
 
-The cloud engines share one **model picker** control, with the saved model ids listed below it. Between them you can:
+Every cloud engine's page carries the same pair of rows: a **Model** dropdown holding the id in use, and a **Model catalogue** entry below it whose value reads how many ids are saved, for example `7 saved`. Between them you can:
 
-- **Pick from the list** - choose a model id from the dropdown of saved suggestions.
-- **Add a model** - the add button on the list asks for the id your endpoint serves, adds it, and selects it.
-- **Delete one** - the button on a list row removes that id; deleting the one **In use** moves the selection to the first remaining id.
-- **Filter the list** - type in the field above it once the list is long enough to scroll.
+- **Pick from the list** - choose a model id from the **Model** dropdown, which offers the saved ids and nothing else.
+- **Add a model** - the add button on the **Model catalogue** page asks for the id your endpoint serves and adds it.
+- **Delete one** - the button on a catalogue row removes that id.
+- **Put one to work** - tapping a catalogue row selects that id, and the row in use says **In use** under its name.
+- **Filter the list** - type in the **Filter models** field above the catalogue once the list is long enough to scroll.
+- **Catalogue link** - the **Model** row's description ends in a link to that engine's official model list. Every engine carries one, Voxtral, Anthropic and Mistral included.
 
-On Obsidian 1.13 and later the saved ids live on a page of their own, reached from the model row, which shows the id in use; a vendor catalogue can run to thirty ids and inline they would bury the settings after them. On older versions the list is shown inline, since that Obsidian has no sub-pages.
-- **Catalogue link** - a help link beside the field opens that engine's official model list (OpenAI, Deepgram, or Gemini).
+On Obsidian 1.13 and later the catalogue lives on a page of its own, because a vendor catalogue can run to thirty ids and inline they would bury the settings after them. On older versions the list is shown inline, since that Obsidian has no sub-pages.
 
 The list is seeded on first run with common models for each engine and is fully user-editable. Local whisper.cpp does not use this picker - it takes a model **file path** instead (see above).
 
@@ -200,7 +227,7 @@ The **Language** setting controls the spoken language sent to the engine:
 
 The transcript data model carries a **speaker** label per segment. To populate it, enable **Speaker diarization** - the provider then detects the number of speakers automatically and labels segments (for example `Speaker 1`, `Speaker 2`).
 
-- **Diarization is available only with Deepgram and Google Gemini.** For Whisper API and local whisper.cpp the **Speaker diarization** toggle is **disabled and greyed out**, since those engines never return speaker labels.
+- **Diarization is available with Deepgram, Google Gemini, and Mistral Voxtral.** For Whisper API and local whisper.cpp the **Speaker diarization** toggle is **disabled and greyed out**, since those engines never return speaker labels.
 - The effective state is what matters: a stored "on" reads as off the moment you switch to an engine that cannot diarize, so the toggle never claims a result it cannot deliver.
 
 When diarization is **not in effect** (an engine that cannot diarize, or the toggle turned off), speaker labels are **stripped from the transcript entirely**. Neither the in-note Markdown nor the sidecar file - **including JSON** - shows them. The strip happens once on the canonical transcript, so every output path stays consistent.
@@ -211,8 +238,7 @@ Because there are no labels to act on without diarization, these output controls
 - **Merge speaker turns**
 - **Speaker format**
 
-![Speaker diarization toggle enabled for Deepgram, with the speaker output controls active below](images/settings-transcription-diarization.png)
-_Figure: with Deepgram and diarization on, the speaker-related output controls become editable._
+![The Transcription block with Deepgram selected and Speaker diarization turned on, above the Translate speech to English, Participant profile and Word-level timestamps rows](images/settings-transcription-diarization.png)
 
 ### Naming speakers
 
@@ -220,33 +246,84 @@ Generic `Speaker 1` / `Speaker 2` labels are rarely what you want in a meeting n
 
 The names you assign are **remembered in the recording's sidecar file** (`<recording>.markers.json`, shared with the player markers - see [Markers and chapters](audio-player.md#markers-and-chapters)). Every transcription - diarized or not - records the outputs it wrote there (with the exact paths, the render templates and heading in effect, and the run's provenance: detected language, engine model, and timestamp), and a diarized run records its speaker roster on top: each speaker's label, the name assigned to it, **where that speaker first talks**, and the **participant names** the run carried. That record is what makes the feature durable:
 
-- **Re-transcribing the same recording re-applies your names automatically.** Once `Speaker 1` is named `Alex`, every output of the next diarized transcription - the in-note Markdown and the transcript files - says `Alex` again without any action from you. Names are matched by the engine's label, and a heads-up: **engines number speakers per run**, so when the detected speaker set changes between runs (someone joined, or the engine split differently) a notice asks you to check the assigned names. New labels appear unnamed; names of matched labels are kept. A stored name that happens to equal another speaker's label in the new run is **not** applied (it would render two speakers identically and merge them beyond repair) - a notice asks you to re-check the names instead. For the same reason the dialog refuses to give one speaker another speaker's label as a name.
+- **Re-transcribing the same recording re-applies your names automatically.** Once `Speaker 1` is named `Alex`, every output of the next diarized transcription - the in-note Markdown and the transcript files - says `Alex` again without any action from you. Names are matched by the engine's label, and a heads-up: **engines number speakers per run**, so when the detected speaker set changes between runs (someone joined, or the engine split differently) a notice asks you to check the assigned names. New labels appear unnamed; names of matched labels are kept. A stored name that happens to equal another speaker's label in the new run is **not** applied (nothing could then tell the two apart) - a notice asks you to re-check the names instead. For the same reason the dialog refuses to give one speaker another speaker's label as a name. A merge you made on purpose is different: two labels stored under one name are both renamed to it again, so a person the engine keeps splitting stays one speaker run after run.
 - **The dialog shows the stored roster as three columns**: the engine label, a name field prefilled with your stored name, and a **play button that plays where that speaker first speaks**. Clearing a name field reverts that speaker to its original label. A recording without a stored roster - never diarized, or transcribed before speaker names were stored - has nothing to rename yet: transcribe it with speaker diarization (once, for older recordings) and the roster appears.
+- **Two speakers can be given the same name, which merges them.** Diarization is not perfect: one person is often split across two labels, and one label sometimes drifts between two people. Typing the same name into several rows - `Speaker 3` and `Speaker 5` both `Alex` - makes them one speaker in every output, which is the only way to repair a transcript the engine split wrongly. Because it is the one step that cannot be walked back, the dialog asks first, naming the labels it is about to merge; confirming applies it, and the merge is then stored, so re-applying it or re-transcribing the recording never asks again. What cannot be undone is the text itself: once both speakers render as `Alex`, nothing in a note or a transcript file says which of them a line belonged to. Giving them separate names again therefore renames nothing that was already merged - the outcome notice says which name was left as it is - and only a **new transcription** brings separate labels back. Naming one speaker after **another speaker's engine label** (`Speaker 3` as a name for `Speaker 5`) stays refused, because it says nothing about which of the two you meant: to make them one speaker, give both rows the same real name.
 - **Listen to a speaker instead of remembering them.** The dialog sits on top of the note, so the transcript that would tell you who `Speaker 2` is has just been covered up. Press a row's ▶ button and that speaker's opening turn plays; the button turns into ■ while it does, and back to ▶ when you press it again, when the excerpt ends, or when you start another speaker's - only one plays at a time. The column carries nothing else: no seeking, no volume, no markers. The excerpt is the speaker's **first uninterrupted turn**, stretched to at least 4 seconds when that turn is a one-word "Yeah" and cut off after 15 seconds when it is an opening monologue. The row also states the timecode ("First speaks at 3:41") so you can find the moment in the transcript afterwards. Playback is independent of any player embedded in the note behind the dialog - it neither hijacks it nor shows up in the status-bar transport - and it stops when the dialog closes. Rosters written before this existed carry no timings, so their buttons are disabled with a tooltip saying to transcribe again with diarization.
 - **Renames are applied to the outputs each transcription actually wrote**, using the render templates that were in effect at write time (including per-run overrides from the Transcribe audio dialog). Changing **Speaker format** or the other templates in settings later does not break renaming transcripts written with the old ones. **Renaming or moving a written note or transcript file inside Obsidian updates the recorded path automatically**, so the rename keeps reaching it; a recorded output deleted since (or moved outside Obsidian) no longer resolves and is skipped - the outcome notice says so, and the next transcription re-records the current outputs.
 - **Each apply is self-healing.** Every replacement also targets the original engine label, so an output that missed an earlier rewrite (a failed write, a file restored from backup) is corrected by the next apply instead of staying out of sync forever. Because the names are already stored by the time you notice, that healing apply is one you press with the fields left exactly as they are: **Apply** stays available when nothing in the roster would change, rewrites the outputs, and records nothing, so the undo history keeps only the steps that actually renamed something. The outputs are rewritten first and the roster and history are committed only afterwards, so the sidecar never claims names the outputs were not even attempted with.
 - Renaming touches **only this recording's transcript**. In a note, every transcript line carries a timecode link to its own audio, so a second recording's transcript in the same note is left untouched, and only the lines that belong to this recording are rewritten. Two names can be swapped in one apply, and replacements never chain through each other.
 - **LLM post-processing does not exempt a note from renaming.** A **Clean up** or **Custom** pass is asked to keep speaker labels and timestamps on their original lines, so the note it produces almost always still carries the rendered transcript, and every recorded note is therefore rewritten like any other. What the run enabled decides nothing; only what the note turns out to contain does. A pass that genuinely restructured the body leaves no rendered label to match, and the outcome notice then says how many notes were left as they are; each untouched note is read back before it is described, so one that already reads the names you are applying is reported as already using them rather than accused of having lost them. When such a pass also stripped the timecode links, the note can no longer be tied to this recording, so the notice points you at **Rename in notes without timecodes** - turn that on and press **Apply** again with the same names to rewrite every matching label in it. A **Summary** pass prepends its summary above an intact transcript body and renames normally, and the transcript files next to the recording are updated in every one of these cases.
-- **Undo:** every applied mapping is recorded in the sidecar (the last ten). When the history has entries, the dialog offers **Undo last rename**, which restores the previous names across all outputs through the same apply path and removes the undone entry - so pressing it again steps one rename further back each time, and the button disappears once the history is exhausted.
+- **Undo:** every applied mapping is recorded in the sidecar (the last ten). When the history has entries, the dialog offers **Undo last rename**, which restores the previous names across all outputs through the same apply path and removes the undone entry - so pressing it again steps one rename further back each time, and the button disappears once the history is exhausted. A **merge** is the one rename it cannot walk back: the roster returns to the names it held before, and the outputs keep the merged name, because both speakers render as the same text by then. The outcome notice names that text, and separate labels come back only with a new transcription.
 - **An unreadable sidecar is protected, not overwritten.** If the `.markers.json` file exists but cannot be read (damaged JSON, sync conflict), the dialog says so instead of pretending the recording has no roster, and all writes to that sidecar are paused so the possibly intact data on disk survives. Restore or remove the file and reopen the dialog; the plugin re-reads it on every access.
 - **The recording carries its own participant roster**, so name suggestions do not depend on remembering which profile a meeting belonged to. The **Participant profile** picker defaults to **This recording**, whose names live in the same sidecar file as everything else, and the fields suggest from them as you type. Picking a profile instead **widens** the suggestions with its names rather than replacing them - the recording's own names always come first. Where that roster comes from:
     - **Transcription seeds it.** Pick a **Participant profile** in the Transcribe dialog and that profile's names are written into the recording's sidecar alongside the speaker roster, together with the profile's id - so reopening the rename dialog re-selects that profile automatically. A profile deleted since simply falls back to **This recording**.
-    - **Every rename grows it.** A name you apply that was in neither the recording's roster nor the picked profile is added to **both**, in the same write that stores the roster. So a name typed once is suggested by this recording forever after, and by the profile for the next recording that picks it.
+    - **Every rename grows it.** A name you apply that was in neither the recording's roster nor the picked profile is added to **both**, in the same write that stores the roster. So a name typed once is suggested by this recording forever after, and by the profile for the next recording that picks it. When the picked profile is read from a note, the name is appended to that note on a line of its own that continues the list its last line belongs to (the same bullet, the next number of a numbered list, an empty checkbox after a task, the same callout), so the note keeps its headings and layout. If that note has gone missing, a notice says the name was not added to it.
     - **Nothing is ever removed.** Transcribing again with a different profile adds that profile's names; it never drops the ones already there, so a recording accumulates everyone who has been named in it.
-    - You can still create a profile and add names to it right in the dialog. Two speakers cannot be given the same name, because merging speakers is not supported yet.
+    - You can still create a profile and add names to it right in the dialog.
 - When a transcript has no timecode links to identify the recording (for example with timestamp links turned off), the dialog cannot pin its lines to this audio. It warns you, and only after you opt in does it rewrite every matching label in those notes.
+
+![The Merge speakers confirmation, naming the two labels about to share one name and saying that merged lines cannot be told apart again, above its Merge and Cancel buttons](images/dialog-merge-speakers.png)
+
+![The Participant profile row of the Rename speakers dialog, naming the text last read from a roster note that could not be read](images/dialog-rename-speakers-roster.png)
+
+### Splitting a line between speakers
+
+Diarization also errs the other way: when two people talk over each other, or the engine simply guesses wrong, one transcript line holds words from both of them - and the timestamps of such a turn are usually off with it. **Split selection into another speaker** repairs that line in place.
+
+1. In the note, select the words inside one transcript line that belong to someone else. The selection has to stay on that one line, and the line has to start with its timecode link, which is how the plugin knows which recording it belongs to.
+2. Right-click the selection and choose **Split selection into another speaker**. It is offered whenever transcription is enabled, and is also a palette command (and so hotkey-assignable) that acts on the selection in the active editor.
+3. In the dialog:
+    - **Spoken by** - who the selected words belong to: any speaker the transcript already shows, a participant of the recording nobody is named after yet, or **New speaker (Speaker N)**, the first label no speaker uses.
+    - **Time span** - where the selection starts and ends, as `1:23` or `1:23.5`. The fields start from the word timings when the recording's JSON transcript has them, and otherwise from the line's span shared out by text length. Below them a bar covers the line from its start to its end, with a handle at each end of the selection: drag a handle and the fields follow, type into a field and its handle moves. Press the play button to hear the span; a playhead runs along the bar while it plays, and letting go of a handle during playback plays the span again from its new start, so a boundary can be placed by ear. The bar is left out only for a note's last line whose recording cannot be measured, since that line's end is unknown.
+    - **Rest of the line spoken by** - shown only when the selection sits in the middle of the line, so the line splits into three. The text after the selection keeps the line's own speaker unless you pick another one. Selecting from somewhere in the line to its end splits it in two, and selecting from its start moves the opening words to the other speaker.
+4. Press **Split**.
+
+![The Split selection into another speaker dialog for a selection in the middle of Tom's line: the quoted selection, Spoken by set to Maria, the Time span fields 12:48 and 12:56 prefilled from the word timings beside a play button, the bar of the line from 12:41 to 12:59 with its two handles on 12:48 and 12:56, and Rest of the line spoken by set to Tom, above the Split and Cancel buttons](images/dialog-split-transcript-line.png)
+
+What changes:
+
+- **The note.** The line is replaced by one line per part, written with the same templates the transcript was written with (read from the recording's sidecar) and with a timecode link at each part's start. The edit goes through the editor, so **Ctrl/Cmd+Z** undoes it like any other.
+- **The transcript files.** When the transcription saved a **JSON** transcript, its segments behind the line are split at the entered times, each part keeping the word timings spoken in it, and every transcript file the run wrote (JSON, SRT, WebVTT, TXT) is rewritten from it. Without a JSON transcript - or when it holds no segments whose text matches the line, for example after hand edits, or two identical lines of one speaker in the same second - only the note changes; the dialog says so beforehand and the notice afterwards counts the files kept as they were. Subtitles and plain text drop the timings a split needs, so they are never cut on their own, and translations are never touched. These writes are not undone by the editor's undo.
+- **The speaker roster.** A new speaker, or a participant nobody was named after, is added to the recording's roster under the next free `Speaker N` label with the selection as its first turn, so **Rename speakers** lists it, plays it, and renames its lines like any diarized speaker.
+
+The dialog refuses times that leave the text before the selection no time (the selection has to start after the line does) or the text after it none (it has to end before the line does), and it refuses to write when the line changed while the dialog was open. A sidecar that cannot be read is protected the same way as in **Rename speakers**: nothing is split until it is restored or removed.
+
+### Merging lines into one
+
+The reverse repair: diarization sometimes cuts one person's turn into several lines - it hears a pause as a change of speaker, or hands a few words in the middle to someone else - and the note reads more fragmented than the conversation was. **Merge selected lines into one** joins consecutive transcript lines into a single line of one speaker.
+
+1. In the note, select the lines, from anywhere in the first to anywhere in the last. They have to follow each other: only the blank lines the transcript separates its lines with may lie between them, not a heading, a remark of yours, or a line of another recording. Lines the selection only touches at their very end or start (as when whole lines are selected) are left out.
+2. Right-click the selection and choose **Merge selected lines into one**. It is offered whenever transcription is enabled and the selection reaches over more than one line (a selection inside one line offers the split instead), and is also a palette command (and so hotkey-assignable) that acts on the selection in the active editor.
+3. In the dialog:
+    - **Lines** and **Merged text** - how many lines are merged, the speakers they show, and the text they become.
+    - **Spoken by** - who the merged line belongs to. It starts as the speaker of the first line. Any speaker the transcript shows, a participant of the recording nobody is named after yet, or **New speaker (Speaker N)** can be picked, exactly as in the split. A transcript that was never diarized offers **No speaker**.
+    - **Time span** - the whole passage, from the start of the first line to the end of the last one. Press the play button to hear all of it, to check that it really is one speaker. Press it again to stop, and again to play it once more. A note's last lines whose recording cannot be measured have no known end, and offer no button.
+4. Press **Merge**. Merging two lines is done at once. Merging three or more folds several turns, often of several speakers, into one, so a confirmation first names how many lines become one and whose line it becomes.
+
+![The Merge selected lines into one dialog for three lines shown as Tom, Maria and Tom: the merged text quoted in full, Spoken by set to Tom as the first line's speaker, and the Time span from 12:41 to 12:56 beside a play button, above the Merge and Cancel buttons](images/dialog-merge-transcript-lines.png)
+
+![The Merge 3 lines confirmation, saying that the three transcript lines become one line spoken by Tom at the first line's time, that the other lines' speakers and times are dropped, and that only the note can be undone with the editor, above its Merge and Cancel buttons](images/dialog-merge-transcript-lines-confirm.png)
+
+What changes follows the split: **the note** gets one line in place of the selected ones (blank lines between them included), written with the recording's templates and a timecode link at the first line's time, and **Ctrl/Cmd+Z** undoes it. **The transcript files** are rewritten from the JSON transcript, whose segments behind the lines become one segment spanning them and keeping all their word timings - but only when the JSON holds each line's segments and they follow each other without a gap. When it holds a turn between two of the lines that the note no longer shows (a line deleted by hand), or there is no JSON transcript, only the note changes. The dialog says so beforehand, and the notice counts the files kept as they were. **The roster** gets a new speaker or a participant under the next free `Speaker N` label, with the merged passage as its first turn. The dialog refuses to write when any of the lines changed while it was open, and over a sidecar that cannot be read.
 
 ---
 
 ## Biasing recognition toward your own terms
 
-Names, abbreviations, and domain jargon are the words an engine mishears most often. **Dictionary profiles** live under the **Advanced settings** master switch (**Settings > Advanced Audio Recorder > Transcription > Advanced settings**), which is off by default; turn it on to reveal the dictionary and the two-pass mode, and with it off a recording transcribes in one plain pass with no biasing. The profiles are named glossaries, one term per line, so you can keep separate lists for different meeting types (standup, legal, medical) instead of one merged glossary that dilutes the bias. Manage them in the settings tab: **Dictionary profiles** opens a page (on Obsidian 1.13 and later; inline on older versions) whose entry shows the profile in use. That page is a list of the saved profiles with a filter above them, each entry saying how many terms it holds and whether a run uses it, plus **Add profile** for another one. Opening an entry gives that profile a page of its own with its terms across the full width, a **Use by default** switch deciding whether the Transcribe dialog offers it, and **Rename profile** and **Delete profile**. Names are unique, because a profile's page is addressed by its name. A term may contain spaces, so a full name or a multi-word product stays intact, while blank lines and case-insensitive duplicates are ignored. In the per-run **Transcribe audio** dialog you choose which profile to apply for that run, or **None**; the last choice is remembered and becomes the default for the next dialog and for transcribe-on-save.
+Names, abbreviations, and domain jargon are the words an engine mishears most often. **Dictionary profiles** live under the **Advanced settings** master switch (**Settings > Advanced Audio Recorder > Transcription > Advanced settings**), which is off by default; turn it on to reveal the dictionary and the two-pass mode, and with it off a recording transcribes in one plain pass with no biasing. The profiles are named glossaries, one term per line, so you can keep separate lists for different meeting types (standup, legal, medical) instead of one merged glossary that dilutes the bias. Manage them in the settings tab: **Dictionary profiles** opens a page (on Obsidian 1.13 and later; inline on older versions) whose entry shows the profile in use. That page is a list of the saved profiles with a filter above them, each entry saying how many terms it holds and whether a run uses it, plus **Add profile** for another one. Opening an entry gives that profile a page of its own with its terms across the full width, a **Dictionary profile** switch that makes it the profile in use, and **Rename profile** and **Delete profile**. That switch decides which profile a run applies by default, and the Transcribe dialog lists every saved profile whichever one is in use. Names are unique, because a profile's page is addressed by its name. A term may contain spaces, so a full name or a multi-word product stays intact, while blank lines and case-insensitive duplicates are ignored. In the per-run **Transcribe audio** dialog you choose which profile to apply for that run, or **None**; the last choice is remembered and becomes the default for the next dialog and for transcribe-on-save.
 
-![The Dictionary profiles settings section listing the saved glossaries with their term counts](images/settings-dictionary-profiles.png)
-_Figure: the Dictionary profiles section under Settings > Advanced Audio Recorder > Transcription, listing the saved glossaries._
+**A profile can be read from a note.** A glossary of a hundred terms is easier to keep as an ordinary note: it is edited in the normal editor, synced and versioned with the vault, linked to the project it belongs to, and editable from a phone without opening the plugin settings. Below that switch, every profile page has a **Source** row that chooses where the profile's text comes from. **Typed text** keeps the terms field, and **Note** replaces it with a **Note** row that suggests the vault's notes; an **Open note** action joins it once a note is picked. The description under **Source** names the text the profile applies, `Uses the text typed in the settings.` or `Uses the text of Glossaries/Standup.md.`, and while **Note** is chosen with no note picked yet it opens with `No note picked yet.`, because the typed text still applies. Nothing is stored for that choice until a note is picked, so closing the settings first returns the page to **Typed text**. Picking a note for a profile that holds typed text asks first, because the note's text takes its place: an empty note is offered the typed text, which is added to it, and any other note is confirmed before the typed text is lost. A note that cannot be read is not picked, and a notice says so. The line is drawn with the page, so a note renamed or deleted while the settings stay open is reflected the next time the page is opened. Once a note is picked, the profile's text becomes the note's text below its frontmatter. A transcription and a chapter generation read the note again as they start, and the **Rename speakers** dialog reads it as it opens, from the note's editor when it is open, so an edit made a moment before applies, and an edit saved during a run applies to the next one. List markup is read the way a list is meant: a glossary written as bullets, a numbered list, or checkboxes, inside a callout or not, yields the terms without the markers, and a link yields the name it shows (its alias, or else the name of the linked note). Bold, italic, highlighted text, and inline code yield the text inside them, a Markdown link yields its label, and struck-through text and embeds yield nothing. Headings, horizontal rules, tables, code blocks, `%%` comments, and the title line of a callout are skipped. Each line is one term, so a definition written after a term on its line is sent with it. Both rules hold for terms typed into the settings as well. Renaming or moving the note, or the folder holding it, inside Obsidian keeps the profile pointed at it. When the note disappears (deleted, moved outside Obsidian, or not yet delivered by sync), the profile keeps the text last read from it, **Source** says `Uses the text last read from Glossaries/Standup.md, which is missing.`, and a run that applies it names the note in a notice and goes ahead with that text. A note that is in the vault and cannot be read, for example while another program holds it locked, is handled the same way: a run, and the **Rename speakers** dialog under its profile picker, say that the note could not be read and use the text last read from it. Every catalogue entry names where its text comes from beside what it holds and whether a run uses it, for example `In use, note, 12 terms`, `Typed text, 3 terms`, or `Note missing, 12 terms`. The picker of the profile in use repeats the line from **Source** under its description, and the profile pickers of the **Transcribe audio**, **Generate chapters**, and **Rename speakers** dialogs show the same line for the profile picked there. Choosing **Typed text** again detaches the profile and leaves the note's current text in its terms field, ready to edit (or the text last read from it, with a notice, when the note cannot be read), while emptying the **Note** field keeps the page on a note until another one is picked. Participant rosters, chapter guidance, and post-processing prompts can be read from notes the same way, and a prompt is sent exactly as the note holds it, Markdown included.
 
-![The Transcribe audio dialog with a Dictionary dropdown for choosing a named profile or None](images/transcribe-dialog-dictionary.png)
-_Figure: the per-run Transcribe audio dialog, where the Dictionary control selects which profile biases that run, or None._
+![A dictionary profile page with Source set to Typed text and the terms typed into the settings](images/settings-dictionary-profiles.png)
+
+![The same page with Source set to Note, the Note row holding the path of the note, and an Open note action below it](images/settings-profile-source-note.png)
+
+![The Source row naming the text last read from a note that is missing, with No note at this path under the Note row](images/settings-profile-source-note-missing.png)
+
+![The Dictionary profile row with a line naming the text the profile in use applies](images/settings-profile-picker-note.png)
+
+![The Transcribe audio dialog rows for the participant and dictionary profiles, each naming the text it applies](images/transcribe-dialog-dictionary.png)
 
 Each engine consumes the list the way its own API supports:
 
@@ -274,7 +351,7 @@ Deepgram's biasing depends on the selected **Deepgram model**, which is worth re
 
 **Advanced two-pass transcription (experimental)** is a sub-toggle of the **Advanced settings** master switch (**Settings > Advanced Audio Recorder > Transcription > Advanced settings**), sitting just below the dictionary profiles it reuses. It applies the method from *Whisper: Courtside Edition* (arXiv:2602.18966) inside the plugin: instead of one recognition pass, the recording is transcribed twice. Between the passes a team of LLM agents mines the first (draft) transcript for the meeting's domain context - the topic, proper names, domain jargon, and especially English technical terms and acronyms spoken inside another language - and assembles it into a compact hint that the second pass receives as a decoding bias. The second pass re-decodes the same audio leaning toward the right names and spellings while still checking against the acoustics; unlike an LLM edit of the text, it actually re-listens to the recording.
 
-The mode targets the words a single pass gets wrong most stubbornly in, for example, Russian technical meetings: Russian proper names (rare, inflected, easily invented), professional jargon, and English terms and acronyms that a single pass transliterates ("кубернетис", "си ай си ди") or spells out. The agents put the canonical spellings (`Kubernetes`, `CI/CD`) into the second pass's hint, and the second pass's language is always pinned to the language detected on the first pass, so an English-heavy hint can never flip a Russian recording into English.
+The mode targets the words a single pass gets wrong most stubbornly in, for example, Russian technical meetings: Russian proper names (rare, inflected, easily invented), professional jargon, and English terms and acronyms that a single pass transliterates ("кубернетис", "си ай си ди") or spells out. The agents put the canonical spellings (`Kubernetes`, `CI/CD`) into the second pass's hint, and the second pass asks for the language the first pass detected, so an English-heavy hint does not flip a Russian recording into English. Asking is not always enough: Mistral Voxtral reads no language hint at all, and any engine may detect afresh, so the language the second pass actually came back in is compared against the first pass's and a pass that drifted is discarded in favor of the baseline.
 
 **It is off by default and costs real money and time when on:** every file runs two engine passes (roughly 2x the engine cost and duration) plus four to six sequential LLM calls on the engine its own **Context agents engine** row names, which sits beside the two-pass toggle so this mode can run on a different service from post-processing, and because a keyword-biased engine such as Deepgram reads only a keyterm list it runs two fewer of them, skipping the topic and sentence agents it does not need. On a cheap LLM model the money is small, but the sequential calls add latency. Turn it on for the recordings where names and terminology matter, and leave the normal single pass for everything else. The regular LLM post-processing still runs afterwards, on top of whichever pass won. Because that choice is usually made per recording, the **Transcribe audio** dialog carries its own **Advanced two-pass transcription** toggle that overrides this saved setting for a single run: enable the pricier pass for one important meeting, or skip it for a routine file, without changing the default. The toggle defaults from your saved setting, and the length safeguard stays in the settings tab.
 
@@ -284,9 +361,9 @@ The advanced mode is the two-pass form of the same dictionary biasing, not a sep
 
 One sub-setting appears while the mode is on:
 
-- **Second-pass length safeguard** - the biased pass is kept only when its text is at least this fraction (default 0.8) of the first pass's. Over-correction - a biased decode dropping content - is the method's main failure mode, and a suspiciously short second pass is discarded in favor of the baseline.
+- **Second-pass length safeguard** - the biased pass is kept only when its text is at least this fraction (default 0.8) of the first pass's. Over-correction - a biased decode dropping content - is the method's main failure mode, and a suspiciously short second pass is discarded in favor of the baseline. The language check needs no setting of its own and always applies.
 
-The whole mode is best-effort by construction: a failed agent, a failed second pass, or a too-short result all keep the first pass's transcript, so it can never lose a completed (and paid) transcription. Diarization, speaker grouping, and `#t=` timecode links work on top of whichever transcript is kept.
+The whole mode is best-effort by construction: a failed agent, a failed second pass, a too-short result, and a pass that came back in another language all keep the first pass's transcript, so it can never lose a completed (and paid) transcription. Diarization, speaker grouping, and `#t=` timecode links work on top of whichever transcript is kept.
 
 ---
 
@@ -312,7 +389,7 @@ When you ask for in-note output but the note is not open in an editable view (re
 | **WebVTT (.vtt)**               | `.vtt`             | WebVTT cues with `HH:MM:SS.mmm` timing; speaker as a line prefix.            |
 | **Plain text (.txt)**           | `.txt`             | Readable lines, each prefixed with `[timecode]` and the speaker.             |
 
-The sidecar is written **next to the audio file**, sharing its base name (JSON uses a `.transcript.json` suffix so it is not mistaken for other JSON). If a file with that name already exists, a numeric suffix is appended to avoid overwriting it. **Word-level timestamps** only appear in the **JSON** output, and which engine gives them is not the toggle's to decide: **Whisper API** requests per-word timings when it is on, **Deepgram** returns them on every run whatever it says, and **Google Gemini** and **local whisper.cpp** return segment-level timing only. The toggle is therefore live on Whisper API alone; on the other three it is shown disabled, sitting in the position that engine will actually produce and with that engine's own behaviour named under it, so a run never promises a words array it will not produce. Your choice is kept while another engine is selected and takes effect again on Whisper API.
+The sidecar is written **next to the audio file**, sharing its base name (JSON uses a `.transcript.json` suffix so it is not mistaken for other JSON). If a file with that name already exists, a numeric suffix is appended to avoid overwriting it. **Word-level timestamps** only appear in the **JSON** output, and which engine gives them is not the toggle's to decide: **Whisper API** requests per-word timings when it is on, **Deepgram** returns them on every run whatever it says, and **Google Gemini**, **Mistral Voxtral**, and **local whisper.cpp** return segment-level timing only. The toggle is therefore live on Whisper API alone, and on the other four it is shown disabled, sitting in the position that engine will actually produce and with that engine's own behaviour named under it, so a run never promises a words array it will not produce. Your choice is kept while another engine is selected and takes effect again on Whisper API.
 
 With the default templates and timestamp links on, a diarized transcript renders like this:
 
@@ -351,25 +428,30 @@ How the templates compose: each line takes its **timestamp** (wrapped by **Times
 
 ## The Transcribe dialog (per-run overrides)
 
-When you run **Transcribe audio** from the context menu or the command palette, the dialog lets you override the global defaults **for that run only** - your saved settings are never changed. The dialog shows the source file name and these editable options:
+When you run **Transcribe audio** from the context menu or the command palette, the dialog lets you override the global defaults **for that run only** - your saved settings are never changed. The dialog shows the source file name, three rows up front, and the estimated cost above the **Transcribe** button:
+
+- **Language** - `auto` or an ISO code.
+- **Participant profile** - shown only when the run will actually produce speaker labels. Picks the roster of names stored with this recording, so **Rename speakers** suggests the right people afterwards. The last pick is remembered and also applies to transcribe-on-save; profiles are created in the rename dialog. See [Naming speakers](#naming-speakers). It follows **Speaker diarization** under **More options**.
+- **Destination** - Insert into note / Save to file / Note and file / Save to file and link it in the note.
+
+Every other option sits in a collapsed **More options** block below them; click it to expand. It stays open while you change options, and opens by itself when the saved engine cannot run on this device, so the reason **Transcribe** is disabled is in view:
 
 - **Engine** - switch engine for this run.
-- **Language** - `auto` or an ISO code.
 - **Speaker diarization** - request speaker labels (enabled only when the chosen engine can diarize).
-- **Participant profile** - shown only when the run will actually produce speaker labels. Picks the roster of names stored with this recording, so **Rename speakers** suggests the right people afterwards. The last pick is remembered and also applies to transcribe-on-save; profiles are created in the rename dialog. See [Naming speakers](#naming-speakers).
 - **Word-level timestamps** - per-word timing (JSON output only). Live on Whisper API; on the other engines it shows what that engine will do and cannot be changed.
 - **Advanced settings** - a master switch (off by default) that reveals the term-biasing controls for this run; with it off the recording transcribes in one plain pass with no biasing. When on it shows a **Dictionary** picker (choose a named profile to bias this run, or None) and an **Advanced two-pass transcription** toggle (the experimental context-biased two-pass mode, roughly 2x the engine cost plus LLM calls, reusing the Dictionary terms above and leaving its length safeguard in the settings tab).
-- **Destination** - Insert into note / Save to file / Note and file / Save to file and link it in the note.
 - **File format** - shown when the destination is not note-only.
 - **Include timestamps** and **Include speakers** - shown only when the destination renders Markdown into the note (Insert into note / Note and file); **Include speakers** is diarization-gated.
-- **LLM post-processing** - toggle it on, and pick the **LLM task** (Clean up / Summarize / Custom) for this run.
+- **LLM post-processing** - toggle it on, and pick the **LLM task** (Clean up / Summarize / Translate / Custom) for this run.
+- **Generate chapters** - shown when auto chapters are enabled; asks the LLM for titled chapters after transcribing. Turned on, it adds a **Chapter profile** picker for the guidance this run uses.
 
 The detailed in-note templates (note heading, timestamp/speaker/line format) stay in the **settings tab**, and so does everything about a service itself, since a credential cannot be entered safely in a transient dialog: each engine's endpoint, key, model catalogue, and token ceiling belong on its page under **Engines**. Whatever you set in those template and provider fields is applied as configured.
 
 Options toggled mid-run do **not** change an in-flight job: the run snapshots its options when you press **Transcribe**, so edits only affect the next attempt after a failure.
 
-![The Transcribe audio dialog with per-run Engine, Language, diarization, Destination, and File format controls](images/transcription-dialog.png)
-_Figure: the Transcribe audio dialog with the per-run overrides above the progress area._
+![The Transcribe audio dialog with the Language, Participant profile and Destination rows up front and the collapsed More options block below them, above the cost line and the Transcribe, Minimize and Close buttons](images/transcription-dialog.png)
+
+![The same dialog with the More options block open, listing Engine, Speaker diarization, disabled Word-level timestamps, Advanced settings, Dictionary, Advanced two-pass transcription, File format, Include timestamps, Include speakers, LLM post-processing, LLM task and Generate chapters](images/transcription-dialog-advanced.png)
 
 ---
 
@@ -428,17 +510,25 @@ The action is offered on every recording, because whether anything is missing ca
 
 Cloud transcription is a paid API call, and nobody likes a surprise bill. With **Show cost estimates** on (the default, under **Settings > Advanced Audio Recorder > Transcription**), the **Transcribe audio** dialog makes the spending visible:
 
-- **Before the run**, the dialog shows an **Estimated cost** breakdown priced from the recording's duration. That duration is read from the container headers, which costs almost nothing; a file whose headers carry no duration, as a recording written live often does, is decoded instead, so the estimate appears either way. It lists one line per billed step of the run, assembled automatically from the features you have enabled: the transcription pass itself, a second transcription pass when the **Advanced two-pass** mode is on (so the transcription roughly doubles), the LLM **context agents** that run between those passes, the [LLM post-processing](llm-post-processing.md) pass, and the **auto chapters** generation, each shown only when it will actually run. The priced lines are summed into an estimated total, so the number reflects the whole run rather than one stage, and toggling a feature changes it. Deepgram and the Whisper API are priced per audio minute; Gemini is priced from its audio-token rate (about 32 tokens per second of audio); the LLM steps are priced from the transcript's token size and the selected model. Switching the engine, model, or an enabled feature in the dialog re-prices the estimate immediately.
+- **Before the run**, the dialog shows an **Estimated cost** breakdown priced from the recording's duration. That duration is read from the container headers, which costs almost nothing. A file whose headers carry no duration, as a recording written live often does, is decoded instead, so the estimate appears either way. It lists one line per billed step of the run, assembled automatically from the features you have enabled: the transcription pass itself, a second transcription pass when the **Advanced two-pass** mode is on (so the transcription roughly doubles), the LLM **context agents** that run between those passes, the [LLM post-processing](llm-post-processing.md) pass, and the **auto chapters** generation, each shown only when it will actually run. The priced lines are summed into a total labelled as this run's estimate, so the number reflects the whole run rather than one stage. Deepgram, the Whisper API, and Voxtral are priced per audio minute, and Gemini is priced from its audio-token rate (about 32 tokens per second of audio). The LLM steps are priced from the transcript's token size and the selected model, and the post-processing line is sized by the LLM task, because a summary answers with a fraction of the transcript where a cleanup rewrites all of it. Changing any control in the dialog that alters what the run will do re-prices the estimate immediately, whether that is the engine, an enabled feature, or the LLM task. The model itself is picked in the settings tab, since the dialog does not offer it.
 - **During a long multi-part run**, a live "Cost so far" line accumulates what the completed transcription parts actually billed.
-- **After the run**, a notice reports the transcription cost together with the running session total, and the dialog shows **"Spent this session"** - a per-session counter of everything transcribed since Obsidian started, kept per engine. The line names what the total is made of: runs that could not be priced at all, and steps whose figure is an estimate rather than a count the vendor reported.
+- **After the run**, a notice reports the transcription cost together with the running session total, and the dialog shows a **Session spending** block under its own heading. **"Spent this session"** is a per-session counter of everything priced since Obsidian started, kept per engine, and the block states that the run estimated above is not counted in it yet. The line names what the total is made of: runs that could not be priced at all, and steps whose figure is an estimate rather than a count the vendor reported.
 
-Below the breakdown, a **Check current pricing** line links straight to the pricing page of each provider the run uses, so the built-in rates are one click from the authoritative numbers. The transcription cost is computed from what the provider **actually reported billing for** - Deepgram's and OpenAI's billed audio duration, Gemini's token counts split by modality (audio input and the text prompt are billed at different rates) - and falls back to the duration-based estimate when a provider reports nothing. Estimates use **built-in, approximate pay-as-you-go rates** for the common models (`whisper-1`, Groq's `whisper-large-v3`(-turbo) and `distil-whisper`, Deepgram `nova`/`enhanced`/`base`, Gemini 2.x, and the OpenAI, Anthropic, and Gemini post-processing models); providers change prices, so always verify against the linked pricing page. A model the plugin has no rate for shows "no built-in rate" instead of a wrong number, and such runs are counted separately in the session total rather than silently added as zero. The **local whisper.cpp engine is free** and shows no cost. The LLM steps (context agents, post-processing, auto chapters) are counted in the session total too, and they are priced the same way the transcription is: OpenAI, Anthropic, and Gemini all return the token counts they billed in the same response the text comes from, so a completed step is recorded at **what it cost** rather than at what it was expected to cost. Reasoning tokens, which the models that produce them report separately, are billed at the output rate. The pre-run estimate is the fallback, used for a model with no built-in rate and for a vendor that reported no counts, and the session line says how many steps were priced that way, so an estimate is never presented as a measurement.
+Below the breakdown, a **Check current pricing** line links straight to the pricing page of each provider the run uses, so the built-in rates are one click from the authoritative numbers. The transcription cost is computed from what the provider **actually reported billing for** - Deepgram's and OpenAI's billed audio duration, Gemini's token counts split by modality (audio input and the text prompt are billed at different rates) - and falls back to the duration-based estimate when a provider reports nothing. Estimates use **built-in, approximate pay-as-you-go rates** for the common models (`whisper-1`, Groq's `whisper-large-v3`(-turbo) and `distil-whisper`, Deepgram `nova`/`enhanced`/`base` and its hosted Whisper models, Gemini 2.x and 3.x, the Voxtral models, and the OpenAI, Anthropic, Gemini, and Mistral post-processing models); providers change prices, so always verify against the linked pricing page. A model the plugin has no rate for shows "no built-in rate" instead of a wrong number, and such runs are counted separately in the session total rather than silently added as zero. The **local whisper.cpp engine is free** and shows no cost. The LLM steps (context agents, post-processing, auto chapters) are counted in the session total too, and they are priced the same way the transcription is: OpenAI, Anthropic, and Gemini all return the token counts they billed in the same response the text comes from, so a completed step is recorded at **what it cost** rather than at what it was expected to cost. Reasoning tokens, which the models that produce them report separately, are billed at the output rate. The pre-run estimate is the fallback, used for a model with no built-in rate and for a vendor that reported no counts, and the session line says how many steps were priced that way, so an estimate is never presented as a measurement.
 
 ---
 
 ## LLM post-processing
 
-After transcription, you can optionally pass the transcript through an LLM to **clean up** punctuation and formatting (preserving wording, timestamps, and speakers), **summarize** it into key points and action items, or apply a **custom instruction**. The provider defaults to OpenAI (`gpt-5.6-sol`), with Anthropic (`claude-opus-4-8`) and Google Gemini (`gemini-3.5-flash`) also available; the OpenAI and Gemini keys are shared with the matching transcription engines.
+After transcription, you can optionally pass the transcript through an LLM to **clean up** punctuation and formatting (preserving wording, timestamps, and speakers), **summarize** it into key points and action items, **translate** it into another language, or apply a **custom instruction**. Five providers are available, each with its own default model, and OpenAI is the one selected out of the box:
+
+- OpenAI runs `gpt-5.6-sol` by default.
+- Anthropic runs `claude-opus-4-8` by default.
+- Google Gemini runs `gemini-3.5-flash` by default.
+- Mistral runs `mistral-medium-latest` by default.
+- DeepSeek runs `deepseek-flash` by default.
+
+The OpenAI, Gemini, and Mistral keys are shared with the matching transcription engines, while Anthropic and DeepSeek keep keys of their own.
 
 LLM post-processing is **best-effort**: a failure (bad key, network, timeout) falls back to the raw transcript rather than discarding completed work.
 
@@ -455,7 +545,7 @@ Two ways to run it:
 - **On demand** - the **Generate chapters from transcript** action in the recording's context menu, the editor menu of its embed, and the command palette. It opens a dialog where you pick the chapter guidance profile and the chapters engine and model for this run, and see an up-front estimate of the LLM cost before generating. It requires an existing transcript: the outputs recorded in the recording's sidecar are consulted first (transcript files in JSON, SRT, VTT, or plain text, then recorded notes scoped by their timecode links). A note that went through an LLM **Clean up** or **Custom** pass is read like any other, because that pass is asked to keep the timestamps on their original lines and its note therefore still parses; one that was truly restructured simply yields no timecoded lines and loses to whichever note has more of them. When the recorded outputs yield nothing - none recorded, or every one since deleted, unreadable, or left without a single timecoded line - the plugin falls back to scanning for transcript files next to the audio and referencing notes, so a transcript that exists on disk is still found. Without one, the dialog explains there is nothing to chapter and asks you to transcribe first.
 - **After each transcription** - turn on **Generate after transcription** (also offered as a per-run toggle in the Transcribe dialog, where a compact **Chapter profile** picker appears next to it). Chapters are then generated in the background from the fresh transcript once each run finishes, without delaying the transcript output.
 
-How the recording is divided is steered by a selected **chapter guidance profile**. The plugin ships a **Default** profile with general splitting guidance, and you can edit it, add profiles for specific cases (a meeting split by agenda item, a lecture by topic, an interview by question), and pick the one that fits the recording before generating. The selected profile's text is appended to the fixed chapter prompt, so it shapes the division and the titles without being able to change the strict response format the plugin validates. Selecting **None** leaves the base prompt alone.
+How the recording is divided is steered by a selected **chapter guidance profile**. The plugin ships a **Default** profile with general splitting guidance, and you can edit it, add profiles for specific cases (a meeting split by agenda item, a lecture by topic, an interview by question), and pick the one that fits the recording before generating. The selected profile's text is appended to the fixed chapter prompt, so it shapes the division and the titles without being able to change the strict response format the plugin validates. Selecting **None** leaves the base prompt alone. A guidance profile can also be read from a note through its **Source** row, as described under [Biasing recognition toward your own terms](#biasing-recognition-toward-your-own-terms), and its text is then appended exactly as the note holds it.
 
 The LLM's response is validated before anything is written, and the validation is a real check on the times rather than blind trust in the model. Chapter times must fall inside the recording's transcript, and the model is told the recording's length so it spreads chapters across the whole timeline instead of bunching them at the start. Chapters that land closer together than a minimum spacing (about twenty seconds on a normal recording, relaxed for a short clip) are dropped, so a model that returns a run of one- or two-second chapters cannot produce them. Empty or malformed entries are dropped, and an unusable response leaves the markers untouched. Re-running replaces only the previously **generated** chapters - bookmarks and chapters you created manually are never modified, and a generated chapter landing on top of a manual one is skipped.
 
@@ -483,10 +573,12 @@ All transcription settings live under **Settings > Advanced Audio Recorder > Tra
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------ |
 | **Enable transcription**            | Master toggle that reveals the rest of the section.                                                     | Off                            |
 | **Transcribe after recording**      | Auto-transcribe each saved recording (first file only).                                                 | Off                            |
-| **Transcription engine**            | Whisper API / Deepgram / Google Gemini / Local whisper.cpp.                                             | Whisper API                    |
-| **Language**                        | `auto` to detect, or an ISO code (`en`, `ru`, `es`).                                                    | `auto`                         |
-| **Speaker diarization**             | Request speaker labels (Deepgram and Gemini only).                                                      | Off                            |
-| **Word-level timestamps**           | Per-word timing in JSON file output. Selectable on Whisper API; the other engines decide it themselves. | Off                            |
+| **Show cost estimates**             | Show an approximate API cost before a run and a running session total (cloud engines only).             | On                             |
+| **Transcription engine**            | Whisper API / Deepgram / Google Gemini / Mistral Voxtral / Local whisper.cpp.                           | Whisper API                    |
+| **Language**                        | `auto` to detect, or an ISO code (`en`, `ru`, `es`). Ignored by Voxtral, which detects it itself.       | `auto`                         |
+| **Speaker diarization**             | Request speaker labels (Deepgram, Gemini, and Voxtral only).                                            | Off                            |
+| **Translate speech to English**     | Write the recording down in English whatever was spoken (Whisper API only).                             | Off                            |
+| **Word-level timestamps**           | Per-word timing in JSON file output. Selectable on Whisper API, the one engine that reads the request.  | Off                            |
 | **Request timeout**                 | Minutes before one request is aborted and reported (cloud engines only). Range 1-60.                    | 10                             |
 | **Local run timeout**               | Minutes before the local whisper.cpp process is stopped (that engine only). Range 1-720.                | 120                            |
 | **Advanced settings**               | Master switch revealing the dictionary and the two-pass mode; off keeps one plain pass with no biasing. | Off                            |
@@ -520,7 +612,7 @@ Per-engine fields (base URL, key, model picker, upload chunk size) are documente
 
 - **"Transcribe audio" is missing from the menu** - enable **Enable transcription** in settings first.
 - **The Transcribe audio palette command does nothing** - it runs only when the active file is an audio file and transcription is enabled. Open the audio file (or its note) and try again.
-- **Speaker labels never appear** - only Deepgram and Gemini diarize; the toggle is disabled for Whisper API and local whisper.cpp. With a diarizing engine, make sure **Speaker diarization** and **Include speakers** are on. Without diarization in effect, labels are stripped everywhere, including the JSON file.
+- **Speaker labels never appear** - only Deepgram, Gemini, and Mistral Voxtral diarize, so the toggle is disabled for Whisper API and local whisper.cpp. With a diarizing engine, make sure **Speaker diarization** and **Include speakers** are on. Without diarization in effect, labels are stripped everywhere, including the JSON file.
 - **Speaker numbers change partway through a Gemini transcript** - a recording longer than 15 minutes is split into parts and Gemini renumbers speakers per part. Use **Deepgram** (sends the whole file) or split the recording for consistent speakers. A recording of exactly 15 minutes is not split and shows no such warning.
 - **"Could not insert the transcript into the note"** - the note was not open in editing mode. The transcript is saved as a sidecar file as a fallback; the notice shows its path. Open the note in editing mode to insert there.
 - **A request times out** - raise **Request timeout** (up to 60 minutes) for slow connections or very large uploads, or split the file first.

@@ -9,7 +9,7 @@
  * @module actions/PluginAction
  */
 
-import type { App, TFile, TFolder } from 'obsidian';
+import type { App, Editor, TFile, TFolder } from 'obsidian';
 import type { AudioRecorderSettings } from '../settings/settingsSchema';
 import type { TranscriptionModalOptions } from '../ui/TranscriptionModal';
 import type { EncodingWorkerClient } from '../audio/EncodingWorkerClient';
@@ -110,6 +110,15 @@ export interface RecordingSessionPort {
 	canDropMarker(): boolean;
 }
 
+/**
+ * The slice of quick notes the session actions drive, declared as a port for
+ * the same reason as {@link RecordingSessionPort}.
+ */
+export interface QuickNotePort {
+	/** Starts a dictation, or stops the running one and inserts its text. */
+	toggle(): Promise<void>;
+}
+
 /** Everything a recording-session action needs. */
 export interface SessionServices {
 	readonly app: App;
@@ -118,6 +127,8 @@ export interface SessionServices {
 	readonly saveSettings: () => Promise<void>;
 	/** The live recording session the action drives. */
 	readonly recording: RecordingSessionPort;
+	/** Quick notes, which dictate into the note at the cursor. */
+	readonly quickNote: QuickNotePort;
 	/**
 	 * Freezes a marker draft of the given kind at the live position and
 	 * opens the naming modal. Without a kind the modal asks for one.
@@ -138,6 +149,49 @@ export interface FileAction extends PluginCommand<FileContext> {
 	 */
 	readonly showInEditorMenu: boolean;
 }
+
+/**
+ * A selection over rendered transcript lines: the editor it was made in, the
+ * note and the recording the first line belongs to (through its timecode
+ * link), and exactly what was selected, so an action can act on those lines
+ * and verify they are still the same when it does. Most selections lie inside
+ * one line (`line` equals `lastLine`); one reaching over several lines spans
+ * `line` to `lastLine`, both holding selected text.
+ */
+export interface TranscriptSelectionContext {
+	/** Injected services shared by every action. */
+	readonly services: ActionServices;
+	/** The editor holding the selection. */
+	readonly editor: Editor;
+	/** The note the line is in. */
+	readonly note: TFile;
+	/** The recording the line's timecode link resolves to. */
+	readonly audio: TFile;
+	/** Zero-based number of the first selected line. */
+	readonly line: number;
+	/** Zero-based number of the last selected line. */
+	readonly lastLine: number;
+	/** The first line's text when the selection was resolved. */
+	readonly lineText: string;
+	/**
+	 * The text of every line from `line` to `lastLine` when the selection was
+	 * resolved, blank lines between them included.
+	 */
+	readonly lineTexts: readonly string[];
+	/** Selection start column, on the first line. */
+	readonly from: number;
+	/** Selection end column, on the last line. */
+	readonly to: number;
+	/** Whole seconds the first line's timecode link points at. */
+	readonly seconds: number;
+}
+
+/**
+ * An action on a selection over transcript lines. Rendered into the editor
+ * menu, and registered as a palette command that resolves the active editor's
+ * selection, so it is hotkey-assignable like every other action.
+ */
+export type TranscriptAction = PluginCommand<TranscriptSelectionContext>;
 
 /**
  * An action on the recording session. Registered as a palette command
@@ -169,3 +223,15 @@ export interface SearchServices {
  * note, which is exactly why it is not a file action.
  */
 export type SearchAction = PluginCommand<SearchServices>;
+
+/** What an action about the plugin itself needs. */
+export interface HelpServices {
+	/** Shows every release the bundle carries notes for. */
+	readonly showReleaseNotes: () => void;
+}
+
+/**
+ * An action that explains the plugin rather than acting on audio. Its context
+ * always resolves, since it is bound to nothing in the vault at all.
+ */
+export type HelpAction = PluginCommand<HelpServices>;

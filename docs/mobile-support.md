@@ -12,21 +12,20 @@ Advanced Audio Recorder runs in the **Obsidian mobile app** (iOS and Android) as
 - [Related pages](#related-pages)
 
 ![Two enhanced audio players on a phone, each showing a waveform, playback controls, and a chapter list](images/mobile-audio-player.png)
-_Figure: two recordings on Android, each rendered in the enhanced waveform player with its own chapters._
 
 ## What works on mobile
 
 Most of the plugin works the same on a phone or tablet as on the desktop:
 
 - **Recording.** Capture a single track from the device's microphone, with pause and resume, live status feedback, and markers dropped while you record. See [Recording](recording.md#recording-on-mobile).
-- **The enhanced audio player.** Every embedded recording plays back in the enhanced waveform player - the waveform seek bar, playback-speed presets, skip, volume, mute, loop, the time display, timecode links, and per-file **markers and chapters** all work. The screenshot above is two of these players side by side on Android. See [Audio player](audio-player.md).
+- **The enhanced audio player.** Every embedded recording plays back in the enhanced waveform player - the waveform seek bar, playback-speed presets, skip, volume, mute, loop, the time display, timecode links, and per-file **markers and chapters** all work. The waveform itself is drawn for files up to **256 MB**, a quarter of the desktop ceiling, and a larger recording falls back to the plain seekable bar. The screenshot above is two of these players side by side on Android. See [Audio player](audio-player.md).
 - **Markers and chapters.** Add, rename, and jump to bookmarks and chapters, stored in the same sidecar file next to each recording, so they travel with the vault across devices. See [Markers and chapters](audio-player.md#markers-and-chapters).
 - **Format conversion.** Transcode a file to another format and bitrate from the right-click menu, up to the **256 MB** source ceiling every whole-file read on mobile is held to. A larger file is refused with a message naming the operation, which is what the phone can do about it, since exceeding the budget is the operating system killing the app rather than an error the plugin could catch. Preparing an oversized recording for transcription is refused the same way. See [Convert audio format](file-operations.md#convert-audio-format).
 - **Manual splitting.** Split an existing recording into fixed-duration parts, within a size the device can hold in memory. See [Splitting](splitting.md).
 - **Automatic splitting.** A live recording is saved as fixed-duration part files, which on a phone is also what bounds the loss when the operating system closes the app. See [Splitting](splitting.md#automatic-splitting-during-recording).
 - **Crash recovery.** A session the operating system interrupted is offered back on the next launch, with the part files it already wrote. See [Crash recovery on mobile](#crash-recovery-on-mobile).
 - **On-demand audio cleanup.** Run the high-pass filter, noise gate, and loudness leveling on an existing file, with tighter size and length limits than the desktop so the app stays within its memory budget. See [Audio cleanup](audio-cleanup.md).
-- **Cloud transcription.** Transcribe recordings with the Whisper API, Deepgram, or Google Gemini, with optional LLM post-processing. See [Transcription on mobile](#transcription-on-mobile) below.
+- **Cloud transcription.** Transcribe recordings with the Whisper API, Deepgram, Google Gemini, or Mistral Voxtral, with optional LLM post-processing. See [Transcription on mobile](#transcription-on-mobile) below.
 - **File actions.** Audio file info, delete, and delete-and-link all work from the context menu. See [File operations](file-operations.md).
 
 ## Platform-specific limitations
@@ -36,7 +35,9 @@ The following features are **desktop-only** and do not run in the mobile app. Th
 - **Input device selection.** Phones expose one microphone to the app, so there is no device list to choose from. Recording always uses the system default microphone, and any stored device id is ignored. See [Switching the input device](recording.md#switching-the-input-device).
 - **Sample rate selection.** Mobile operating systems fix their own capture sample rate, so the **Sample rate** setting does not apply.
 - **Recording channels (mono downmix and channel pick).** The channel-layout options are tied to real multi-channel input devices, which only the desktop platform exposes, so **Recording channels** is unavailable on mobile. See [Recording in mono](recording.md#recording-in-mono).
+- **Bit depth.** WAV is recorded through a compressed intermediate rather than as raw PCM on the phone, so the width of a sample belongs to that encoder and the **Bit depth** row cannot be honoured. It stays visible with its stored value, because a vault synced from a desktop machine carries the choice. See [Bit depth](formats.md#bit-depth).
 - **Multi-track recording.** Capturing several input devices at once needs the multi-device access the mobile app does not provide. A multi-track configuration synced from the desktop silently records a normal single-track session on the phone. See [Multi-track recording](multi-track-recording.md).
+- **Include system audio.** Recording this computer's own output beside the microphone opens two captures at once, which is the same access multi-track recording needs, so the switch is off on the phone and a vault carrying it on records the usual single track there. See [Recording this computer's own output](recording.md#recording-this-computers-own-output).
 - **The command line.** The terminal commands the plugin answers exist only where the app has a command line, which is the desktop build from Obsidian 1.12.2 on. Nothing about a mobile session depends on them. See [From the command line](recording.md#from-the-command-line).
 - **Local whisper.cpp transcription.** The local engine shells out to a native binary, which the mobile app cannot do. Use a cloud engine instead - see [Transcription on mobile](#transcription-on-mobile).
 
@@ -68,6 +69,7 @@ Transcription works on mobile with the **cloud engines**:
 - **Whisper API** (OpenAI-compatible, including Groq)
 - **Deepgram** (with speaker diarization)
 - **Google Gemini** (with speaker diarization)
+- **Mistral Voxtral** (with speaker diarization)
 
 Optional [LLM post-processing](llm-post-processing.md) - clean up, summarize, or run a custom instruction over the transcript - also works, because it too calls a cloud provider.
 
@@ -93,5 +95,5 @@ Device-bound settings (the input device and channel layouts) are stored **per pl
 - [Recording on mobile](recording.md#recording-on-mobile) - the recording section's mobile notes in full.
 - [Record a voice memo or lecture on your phone](use-cases/record-on-mobile.md) - an end-to-end mobile walkthrough.
 - [Audio player](audio-player.md) - the enhanced waveform player, markers, chapters, and timecode links.
-- [Transcription](transcription.md) - the four engines, diarization, and output formats.
+- [Transcription](transcription.md) - the five engines, diarization, and output formats.
 - [Getting started](getting-started.md) - install the plugin and make your first recording.

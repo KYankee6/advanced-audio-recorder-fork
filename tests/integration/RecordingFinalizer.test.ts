@@ -176,6 +176,31 @@ describe('RecordingFinalizer', () => {
 			expect(jest.mocked(convertBlobToWavBuffer)).toHaveBeenCalled();
 		});
 
+		it('tags the concatenated segments with the container the recorder wrote', async () => {
+			// An M4A file is an MP4 container, and the recorder only accepts
+			// it as audio/mp4, so the session carries that type. Rebuilding it
+			// from the format name here was a second answer to the question
+			// the session already settles, and it labelled those bytes
+			// audio/m4a.
+			buildFinalizer(
+				createSession({
+					outputFormat: 'mp3',
+					recorderFormat: 'm4a',
+					recorderMimeType: 'audio/mp4',
+				}),
+			);
+
+			await finalizer.finalizeSegmentsToFile(['seg1.tmp'], 'final.mp3');
+
+			expect(jest.mocked(convertBlobToFormatBuffer)).toHaveBeenCalledWith(
+				expect.objectContaining({ type: 'audio/mp4' }),
+				'mp3',
+				expect.any(Number),
+				expect.any(Function),
+				expect.anything(),
+			);
+		});
+
 		it('res-encode offline-only formats with remux allowed and mapped progress', async () => {
 			buildFinalizer(createSession({ outputFormat: 'mp3' }));
 
@@ -237,7 +262,13 @@ describe('RecordingFinalizer', () => {
 			// segment list and the track's PCM layout
 			expect(
 				jest.mocked(assembleWavFromPcmSegmentFiles),
-			).toHaveBeenCalledWith(['pcm1.tmp', 'pcm2.tmp'], 2, 48000, mockApp);
+			).toHaveBeenCalledWith(
+				['pcm1.tmp', 'pcm2.tmp'],
+				2,
+				48000,
+				mockApp,
+				'int16',
+			);
 			// What the assembler returned is what gets written, unchanged.
 			const written = at(
 				at(jest.mocked(mockApp.vault.createBinary).mock.calls, 0),

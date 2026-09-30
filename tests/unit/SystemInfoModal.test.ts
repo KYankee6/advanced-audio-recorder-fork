@@ -32,10 +32,12 @@ function makeData(overrides: Partial<DiagnosticsData> = {}): DiagnosticsData {
 			recordingFormat: 'webm',
 			bitrate: 128000,
 			sampleRate: 44100,
+			recordingBitDepth: 'int16',
 			saveFolder: '',
 			saveNearActiveFile: false,
 			activeFileSubfolder: '',
 			filePrefix: 'recording',
+			includeSystemAudio: false,
 			enableMultiTrack: false,
 			maxTracks: 2,
 			outputMode: 'single',
@@ -62,11 +64,13 @@ function makeData(overrides: Partial<DiagnosticsData> = {}): DiagnosticsData {
 					kind: 'audioinput',
 				},
 			],
+			loopbackInputs: [],
 		},
 		audioCapabilities: {
 			supportedFormats: ['webm'],
 			supportedSampleRates: [44100],
 			supportedBitrates: [128000],
+			reachableBitrates: { webm: [128000] },
 			codecSupport: [
 				{
 					mimeType: 'audio/webm',
@@ -82,6 +86,7 @@ function makeData(overrides: Partial<DiagnosticsData> = {}): DiagnosticsData {
 			],
 			mediaRecorderAvailable: true,
 			getUserMediaAvailable: true,
+			systemAudioLoopbackAvailable: false,
 		},
 		...overrides,
 	};

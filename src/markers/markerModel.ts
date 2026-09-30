@@ -43,28 +43,40 @@ const CHAPTER_LEAD_IN_SECONDS = 2;
  * reader's theme, and a chosen colour has to stay legible on both. Each name
  * maps to one of Obsidian's own accent variables in the stylesheet, so a marker
  * looks like part of the app rather than like a swatch pasted onto it.
+ *
+ * Stored with a marker, so a value is renamed only with a migration. The keys
+ * are declared in the order the colour menu offers them, which is the order
+ * `Object.values` hands them back in.
  */
-export const MARKER_COLORS = [
-	'red',
-	'orange',
-	'yellow',
-	'green',
-	'blue',
-	'purple',
-] as const;
+export const MarkerColor = {
+	Red: 'red',
+	Orange: 'orange',
+	Yellow: 'yellow',
+	Green: 'green',
+	Blue: 'blue',
+	Purple: 'purple',
+} as const;
 
-/** One of {@link MARKER_COLORS}. */
-export type MarkerColor = (typeof MARKER_COLORS)[number];
+/** One marker colour (derived from {@link MarkerColor}). */
+export type MarkerColor = (typeof MarkerColor)[keyof typeof MarkerColor];
 
 /**
  * Whether a value is one of the offered colours.
  * @param value - Value to test
  */
 export function isMarkerColor(value: unknown): value is MarkerColor {
-	return (
-		typeof value === 'string' &&
-		(MARKER_COLORS as readonly string[]).includes(value)
-	);
+	return Object.values(MarkerColor).some((color) => color === value);
+}
+
+/**
+ * The note a marker keeps for what was typed or read: none for a blank one.
+ * An empty field in the sidecar would keep an otherwise empty file from being
+ * deleted, and a note of only spaces shows as an empty line under its row.
+ * @param note - The note as typed, or as read from disk
+ * @returns The note to keep, or undefined when there is none
+ */
+export function storedNote(note: string): string | undefined {
+	return note.trim() === '' ? undefined : note;
 }
 
 /**
@@ -281,17 +293,21 @@ export function parseMarkers(value: unknown): PlayerMarker[] {
 		) {
 			continue;
 		}
-		const note = record.note;
+		const note =
+			typeof record.note === 'string'
+				? storedNote(record.note)
+				: undefined;
 		const color = record.color;
 		result.push({
 			id,
 			time: Math.max(0, time),
 			label: typeof label === 'string' ? label : '',
 			kind,
-			// A field the file does not carry stays absent rather than
-			// becoming an empty string, which is what keeps a marker written
-			// by an older version identical after a read and a write.
-			...(typeof note === 'string' && note !== '' ? { note } : {}),
+			// A field the file does not carry, or carries blank, stays absent
+			// rather than becoming an empty string, which is what keeps a
+			// marker written by an older version identical after a read and a
+			// write.
+			...(note !== undefined ? { note } : {}),
 			...(isMarkerColor(color) ? { color } : {}),
 		});
 	}

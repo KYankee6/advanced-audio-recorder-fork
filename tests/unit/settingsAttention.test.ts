@@ -12,6 +12,7 @@ import {
 	enginesInUse,
 	enginesStatus,
 	multiTrackStatus,
+	quickNoteRefusal,
 	transcriptionRefusal,
 } from 'src/settings/settingsAttention';
 import {
@@ -22,12 +23,14 @@ import {
 import {
 	LOCAL_WHISPER_SETUP_MESSAGE,
 	TRANSCRIPTION_PROVIDER_IDS,
+	LLM_PROVIDER_IDS,
 } from 'src/constants';
 import {
 	DEFAULT_SETTINGS,
 	type AudioRecorderSettings,
 } from 'src/settings/settingsSchema';
 import { setPlatform } from '../helpers/platform';
+import { systemAudioTrack } from '../helpers/settingsFixtures';
 
 /**
  * Settings for one case, over the shipped defaults.
@@ -237,14 +240,14 @@ describe('enginesInUse', () => {
 			makeSettings({
 				transcriptionEnabled: true,
 				llmPostProcessEnabled: false,
-				llmProvider: 'anthropic',
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 			}),
 		);
 		const on = enginesInUse(
 			makeSettings({
 				transcriptionEnabled: true,
 				llmPostProcessEnabled: true,
-				llmProvider: 'anthropic',
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 			}),
 		);
 
@@ -257,9 +260,9 @@ describe('enginesInUse', () => {
 			makeSettings({
 				transcriptionEnabled: true,
 				llmPostProcessEnabled: true,
-				llmProvider: 'anthropic',
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 				transcriptionAutoChaptersEnabled: true,
-				chaptersLlmProvider: 'anthropic',
+				chaptersLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 			}),
 		);
 
@@ -276,10 +279,149 @@ describe('enginesInUse', () => {
 				makeSettings({
 					transcriptionEnabled: false,
 					transcriptionAutoChaptersEnabled: true,
-					chaptersLlmProvider: 'gemini',
+					chaptersLlmProvider: LLM_PROVIDER_IDS.GEMINI,
 				}),
 			),
 		).toEqual([ENGINES[ENGINE_IDS.GEMINI]]);
+	});
+});
+
+/**
+ * Settings with quick notes on over a transcribing vault, and a quick note
+ * profile selected when an instruction is given.
+ * @param instruction - The profile's body, or undefined for None
+ * @param overrides - Fields this case cares about
+ */
+function quickNoteSettings(
+	instruction: string | undefined,
+	overrides: Partial<AudioRecorderSettings> = {},
+): AudioRecorderSettings {
+	return makeSettings({
+		transcriptionEnabled: true,
+		quickNotesEnabled: true,
+		whisperApiKey: 'sk-test',
+		quickNoteLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+		...(instruction === undefined
+			? {}
+			: {
+					profiles: [
+						{
+							id: 'q1',
+							kind: 'quickNote',
+							name: 'List',
+							body: instruction,
+						},
+					],
+					selectedProfileIds: {
+						...DEFAULT_SETTINGS.selectedProfileIds,
+						quickNote: 'q1',
+					},
+				}),
+		...overrides,
+	});
+}
+
+describe('quick notes and the engines they call', () => {
+	it('calls the quick note engine only while a profile rewrites the dictation', () => {
+		// Plain dictation is transcription alone, so an LLM engine it never
+		// calls must not be reported as needing a key.
+		expect(enginesInUse(quickNoteSettings(undefined))).not.toContain(
+			ENGINES[ENGINE_IDS.ANTHROPIC],
+		);
+		expect(enginesInUse(quickNoteSettings('Make a list.'))).toContain(
+			ENGINES[ENGINE_IDS.ANTHROPIC],
+		);
+	});
+
+	it('calls nothing for quick notes while they are switched off', () => {
+		expect(
+			enginesInUse(
+				quickNoteSettings('Make a list.', { quickNotesEnabled: false }),
+			),
+		).not.toContain(ENGINES[ENGINE_IDS.ANTHROPIC]);
+	});
+
+	it('refuses a quick note while the feature is off', () => {
+		expect(
+			quickNoteRefusal(
+				quickNoteSettings(undefined, { quickNotesEnabled: false }),
+			),
+		).toBe('Quick notes are switched off in settings.');
+	});
+
+	it('refuses a quick note for every reason a transcription is refused', () => {
+		const settings = quickNoteSettings(undefined, { whisperApiKey: '' });
+
+		expect(quickNoteRefusal(settings)).toBe(transcriptionRefusal(settings));
+		expect(quickNoteRefusal(settings)).not.toBeNull();
+	});
+
+	it('refuses a rewritten quick note whose engine has no key, and allows plain dictation', () => {
+		expect(quickNoteRefusal(quickNoteSettings('Make a list.'))).toBe(
+			engineSetupReason(
+				quickNoteSettings('Make a list.'),
+				ENGINES[ENGINE_IDS.ANTHROPIC],
+			),
+		);
+		expect(quickNoteRefusal(quickNoteSettings(undefined))).toBeNull();
+		expect(
+			quickNoteRefusal(
+				quickNoteSettings('Make a list.', { anthropicApiKey: 'ak' }),
+			),
+		).toBeNull();
+	});
+});
+
+describe('quick notes transcribed by an engine of their own', () => {
+	it('calls the quick note transcription engine while quick notes are on', () => {
+		// A key missing on the engine that hears dictations is as much a
+		// fault as one missing on the engine that hears recordings.
+		const settings = quickNoteSettings(undefined, {
+			quickNoteTranscriptionProvider: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+		});
+
+		expect(enginesInUse(settings)).toEqual([
+			ENGINES[ENGINE_IDS.WHISPER_API],
+			ENGINES[ENGINE_IDS.DEEPGRAM],
+		]);
+		expect(
+			enginesInUse({ ...settings, quickNotesEnabled: false }),
+		).not.toContain(ENGINES[ENGINE_IDS.DEEPGRAM]);
+	});
+
+	it('refuses a quick note on the setup of its own engine, not the recordings engine', () => {
+		const settings = quickNoteSettings(undefined, {
+			quickNoteTranscriptionProvider: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+			deepgramApiKey: '',
+		});
+
+		expect(transcriptionRefusal(settings)).toBeNull();
+		expect(quickNoteRefusal(settings)).toBe(
+			engineSetupReason(settings, ENGINES[ENGINE_IDS.DEEPGRAM]),
+		);
+		expect(quickNoteRefusal(settings)).not.toBeNull();
+		expect(
+			quickNoteRefusal({
+				...settings,
+				whisperApiKey: '',
+				deepgramApiKey: 'dg-test',
+			}),
+		).toBeNull();
+	});
+});
+
+describe('quick notes on an engine the plugin does not serve', () => {
+	it('refuses with the reason rather than starting a dictation it cannot rewrite', () => {
+		// data.json is not type-checked; a stored id no vendor claims must
+		// stop the dictation before the microphone opens.
+		expect(
+			quickNoteRefusal(
+				quickNoteSettings('Make a list.', {
+					quickNoteLlmProvider:
+						'gone' as AudioRecorderSettings['quickNoteLlmProvider'],
+				}),
+			),
+		).toBe('The quick note rewrite engine is not one this plugin serves.');
 	});
 });
 
@@ -330,7 +472,7 @@ describe('enginesStatus', () => {
 					transcriptionEnabled: true,
 					whisperApiKey: 'sk-1',
 					llmPostProcessEnabled: true,
-					llmProvider: 'anthropic',
+					llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 					anthropicApiKey: '',
 				}),
 			),
@@ -390,6 +532,46 @@ describe('multiTrackStatus', () => {
 				}),
 			),
 		).toBe('warning');
+	});
+
+	// One session captures the machine's own output once: the handler that
+	// answers the grant lives on the Electron session, which holds one at a
+	// time. Capture refuses such a session outright, so the entry has to say
+	// so while there is still a settings row in front of the user.
+	it('warns where two tracks both record the system output', () => {
+		expect(
+			multiTrackStatus(
+				makeSettings({
+					enableMultiTrack: true,
+					maxTracks: 2,
+					trackAudioSources: new Map([
+						[1, systemAudioTrack()],
+						[2, systemAudioTrack()],
+					]),
+				}),
+			),
+		).toBe('warning');
+	});
+
+	it('stays quiet where one track records the system output', () => {
+		expect(
+			multiTrackStatus(
+				makeSettings({
+					enableMultiTrack: true,
+					maxTracks: 2,
+					trackAudioSources: new Map([
+						[
+							1,
+							{
+								deviceId: 'mic-1',
+								channelMode: 'source' as const,
+							},
+						],
+						[2, systemAudioTrack()],
+					]),
+				}),
+			),
+		).toBeNull();
 	});
 
 	// Capture opens the tracks that have an input and skips the rest, so a

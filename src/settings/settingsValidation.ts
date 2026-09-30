@@ -13,6 +13,7 @@ import {
 	SPLIT_PART_SUFFIX_RULE_TEXT,
 } from '../constants';
 import type { AudioRecorderSettings } from './settingsSchema';
+import { TrackSourceKind } from './settingsSchema';
 
 /**
  * Validates audio recorder settings before use.
@@ -85,6 +86,12 @@ export function validateSettings(settings: AudioRecorderSettings): void {
 			);
 		}
 		for (const [trackNum, source] of settings.trackAudioSources.entries()) {
+			// A system-audio track is configured by being one. It carries no
+			// device id by construction, so an empty one is its finished
+			// state rather than a choice the user has yet to make.
+			if (source.kind === TrackSourceKind.SystemAudio) {
+				continue;
+			}
 			if (!source.deviceId || source.deviceId.trim() === '') {
 				throw new SettingsValidationError(
 					`trackAudioSources[${trackNum}]`,

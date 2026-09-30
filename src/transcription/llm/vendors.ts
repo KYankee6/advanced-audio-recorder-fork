@@ -21,6 +21,7 @@
 import { LLM_PROVIDER_IDS } from '../../constants';
 import {
 	ENGINE_IDS,
+	EngineLabel,
 	engineAccess,
 	missingModelMessage,
 	type EngineId,
@@ -36,6 +37,7 @@ import {
 	OpenAiCompatibleLlmProvider,
 	type LlmConfig,
 	type LlmProvider,
+	type LlmVendorIdentity,
 } from './LlmProvider';
 import { GEMINI_TEXT_TOKEN_RATES } from '../providers/geminiRates';
 
@@ -81,7 +83,7 @@ export interface LlmVendorSettingsAccess {
 export interface LlmVendorDescriptor {
 	readonly id: LlmProviderId;
 	/** Display label, used in dropdowns and cost-estimate lines. */
-	readonly label: string;
+	readonly label: EngineLabel;
 	/** Public pricing page, linked from the cost estimate. */
 	readonly pricingUrl: string;
 	/** Error shown when a run is attempted with no key configured. */
@@ -133,6 +135,29 @@ const ANTHROPIC_RATES: readonly [string, LlmRate][] = [
 ];
 
 /**
+ * Approximate Mistral chat rates, USD per million tokens. The tiers are priced
+ * independently of each other at this vendor, so Large is cheaper than Medium
+ * rather than the other way round.
+ */
+const MISTRAL_RATES: readonly [string, LlmRate][] = [
+	['mistral-medium', { input: 1.5, output: 7.5 }],
+	['mistral-small', { input: 0.15, output: 0.6 }],
+	['mistral-large', { input: 0.5, output: 1.5 }],
+];
+
+/**
+ * Approximate DeepSeek chat rates, USD per million tokens, at the peak-hour
+ * cache-miss price. The vendor bills by time of day as well (01:00-04:00 and
+ * 06:00-10:00 UTC on weekdays at this rate, half of it otherwise) and far less
+ * on a cache hit; the rate model has no clock, so the peak price is stored as
+ * the upper bound and an off-peak run costs about half the estimate.
+ */
+const DEEPSEEK_RATES: readonly [string, LlmRate][] = [
+	['deepseek-flash', { input: 0.3, output: 1.2 }],
+	['deepseek-v4-pro', { input: 1.32, output: 3.96 }],
+];
+
+/**
  * The half of a vendor that belongs to the service rather than to this job: how
  * it is named, how it is reached, and the catalogue its models come from. Read
  * from the provider registry, so a service that also transcribes declares them
@@ -165,14 +190,39 @@ function fromRegistry(
 }
 
 /**
+ * How a vendor names itself to the client that calls it, taken from the halves
+ * the registry already declared so a vendor cannot be labelled one way in the
+ * dropdown and accounted another way in the cost model.
+ * @param vendor - The registry half of a vendor descriptor
+ * @returns Its identity
+ */
+function vendorIdentity(
+	vendor: Omit<LlmVendorDescriptor, 'rates' | 'create'>,
+): LlmVendorIdentity {
+	return { id: vendor.id, label: vendor.label };
+}
+
+/**
+ * The vendors that share the OpenAI-compatible client, resolved once so each
+ * can hand that client the identity it answers as.
+ */
+const OPENAI_VENDOR = fromRegistry(ENGINE_IDS.OPENAI_LLM);
+const MISTRAL_VENDOR = fromRegistry(ENGINE_IDS.MISTRAL_LLM);
+const DEEPSEEK_VENDOR = fromRegistry(ENGINE_IDS.DEEPSEEK);
+
+/**
  * Every LLM vendor, keyed by its settings id. Insertion order is the order the
  * provider dropdown offers them.
  */
 export const LLM_VENDORS: Record<LlmProviderId, LlmVendorDescriptor> = {
 	[LLM_PROVIDER_IDS.OPENAI_COMPATIBLE]: {
-		...fromRegistry(ENGINE_IDS.OPENAI_LLM),
+		...OPENAI_VENDOR,
 		rates: OPENAI_RATES,
-		create: (config) => new OpenAiCompatibleLlmProvider(config),
+		create: (config) =>
+			new OpenAiCompatibleLlmProvider(
+				config,
+				vendorIdentity(OPENAI_VENDOR),
+			),
 	},
 	[LLM_PROVIDER_IDS.ANTHROPIC]: {
 		...fromRegistry(ENGINE_IDS.ANTHROPIC),
@@ -183,6 +233,31 @@ export const LLM_VENDORS: Record<LlmProviderId, LlmVendorDescriptor> = {
 		...fromRegistry(ENGINE_IDS.GEMINI),
 		rates: GEMINI_TEXT_TOKEN_RATES,
 		create: (config) => new GeminiLlmProvider(config),
+	},
+	[LLM_PROVIDER_IDS.MISTRAL]: {
+		...MISTRAL_VENDOR,
+		rates: MISTRAL_RATES,
+		// The chat endpoint is OpenAI-compatible, so the same client speaks it;
+		// only the identity it answers as differs, and on that identity hang the
+		// rate table the call is priced with and the account the session counter
+		// charges it to.
+		create: (config) =>
+			new OpenAiCompatibleLlmProvider(
+				config,
+				vendorIdentity(MISTRAL_VENDOR),
+			),
+	},
+	[LLM_PROVIDER_IDS.DEEPSEEK]: {
+		...DEEPSEEK_VENDOR,
+		rates: DEEPSEEK_RATES,
+		// OpenAI-compatible chat endpoint, the same case as Mistral. The vendor
+		// also serves an Anthropic-compatible one, which is not used: one client
+		// per wire format is enough.
+		create: (config) =>
+			new OpenAiCompatibleLlmProvider(
+				config,
+				vendorIdentity(DEEPSEEK_VENDOR),
+			),
 	},
 };
 
@@ -200,8 +275,23 @@ export function llmVendor(id: LlmProviderId): LlmVendorDescriptor {
 /**
  * The jobs that drive an LLM. Each one picks its own engine, so a run can
  * summarize with one service and title its chapters with another.
+ *
+ * Used as a cost-model step id and as a key of {@link LLM_JOBS}; not stored on
+ * its own, because each job's engine lives under its own settings key.
  */
-export type LlmJobId = 'postProcess' | 'contextAgents' | 'autoChapters';
+export const LlmJobId = {
+	/** Cleanup, summary, custom instruction and translation of a transcript. */
+	PostProcess: 'postProcess',
+	/** The context agents of the two-pass advanced run. */
+	ContextAgents: 'contextAgents',
+	/** Automatic chapter titling. */
+	AutoChapters: 'autoChapters',
+	/** Rewriting a dictated quick note before it is inserted. */
+	QuickNote: 'quickNote',
+} as const;
+
+/** One LLM job (derived from {@link LlmJobId}). */
+export type LlmJobId = (typeof LlmJobId)[keyof typeof LlmJobId];
 
 /** Where one job's engine choice is stored. */
 export interface LlmJob {
@@ -229,17 +319,21 @@ export interface LlmJob {
  * place and run in another.
  */
 export const LLM_JOBS: Record<LlmJobId, LlmJob> = {
-	postProcess: {
+	[LlmJobId.PostProcess]: {
 		key: 'llmProvider',
 		vendor: (settings) => settings.llmProvider,
 	},
-	contextAgents: {
+	[LlmJobId.ContextAgents]: {
 		key: 'advancedLlmProvider',
 		vendor: (settings) => settings.advancedLlmProvider,
 	},
-	autoChapters: {
+	[LlmJobId.AutoChapters]: {
 		key: 'chaptersLlmProvider',
 		vendor: (settings) => settings.chaptersLlmProvider,
+	},
+	[LlmJobId.QuickNote]: {
+		key: 'quickNoteLlmProvider',
+		vendor: (settings) => settings.quickNoteLlmProvider,
 	},
 };
 

@@ -3,7 +3,7 @@
  * @module settings/settingsSchema
  */
 
-import type { ConversionLinkAction, OutputMode } from '../types';
+import { ConversionLinkAction, OutputMode } from '../types';
 import {
 	FORMAT_WEBM,
 	DEFAULT_SAMPLE_RATE,
@@ -20,6 +20,10 @@ import {
 	DEFAULT_GEMINI_BASE_URL,
 	DEFAULT_GEMINI_MODEL,
 	GEMINI_MODEL_SUGGESTIONS,
+	DEFAULT_MISTRAL_BASE_URL,
+	DEFAULT_DEEPSEEK_BASE_URL,
+	DEFAULT_VOXTRAL_MODEL,
+	VOXTRAL_MODEL_SUGGESTIONS,
 	DEFAULT_LOCAL_WHISPER_TIMEOUT_MINUTES,
 	DEFAULT_TRANSCRIPTION_TIMEOUT_MINUTES,
 	TRANSCRIPTION_PROVIDER_IDS,
@@ -31,6 +35,10 @@ import {
 	DEFAULT_LLM_MAX_TOKENS,
 	LLM_OPENAI_MODEL_SUGGESTIONS,
 	LLM_ANTHROPIC_MODEL_SUGGESTIONS,
+	DEFAULT_LLM_MISTRAL_MODEL,
+	LLM_MISTRAL_MODEL_SUGGESTIONS,
+	DEFAULT_LLM_DEEPSEEK_MODEL,
+	LLM_DEEPSEEK_MODEL_SUGGESTIONS,
 	DEFAULT_LLM_CLEANUP_PROMPT,
 	DEFAULT_LLM_SUMMARY_PROMPT,
 	DEFAULT_LLM_CUSTOM_INSTRUCTION,
@@ -46,26 +54,102 @@ import {
 	DEFAULT_ADVANCED_SECOND_PASS_MIN_RATIO,
 	PLAYER_SKIP_SECONDS,
 } from '../constants';
-import type {
+import {
 	TranscriptDestination,
 	TranscriptFileFormat,
 } from '../transcription/TranscriptTypes';
-import type { LlmTask } from '../transcription/llmPostProcess';
-import { noSelectedProfiles } from './profiles';
+import { LlmTask } from '../transcription/llmPostProcess';
+import { noSelectedProfiles, ProfileKindId } from './profiles';
 import type { Profile, SelectedProfileIds } from './profiles';
-import { CHANNEL_MODE_SOURCE } from '../audio/downmix';
-import type { ChannelMode } from '../audio/downmix';
-import type { PlatformKind } from '../platform/platformKind';
+import { ChannelMode } from '../audio/downmix';
+import { PcmSampleFormat } from '../audio/pcm';
+import { PlatformKind } from '../platform/platformKind';
 
 export type { OutputMode } from '../types';
 
+/** What to do with the converted file link in notes. */
+export { ConversionLinkAction } from '../types';
+
 /**
- * What to do with the converted file link in notes.
- * - 'none': just save the file, don't touch notes
- * - 'replace': replace source file link with the new file link
- * - 'after': insert new file link after the source file link
+ * How one track's capture is filtered by the browser.
+ *
+ * Stored in data.json, so a value is renamed only with a migration. The keys
+ * are declared in the order the dropdown offers them, which is the order
+ * `Object.values` hands them back in.
  */
-export type { ConversionLinkAction } from '../types';
+export const TrackProcessingMode = {
+	/**
+	 * Follows the three session-wide toggles, which is what every track did
+	 * before this existed.
+	 */
+	Global: 'global',
+	/** All three filters on, the profile a microphone in a room wants. */
+	Voice: 'voice',
+	/**
+	 * All three filters off, the profile a loopback input, a line input or an
+	 * already-processed headset wants: echo cancellation on a loopback input
+	 * suppresses the far end of a call, because to the filter it looks like
+	 * this machine's own speaker output coming back.
+	 */
+	Raw: 'raw',
+} as const;
+
+/** One processing profile (derived from {@link TrackProcessingMode}). */
+export type TrackProcessingMode =
+	(typeof TrackProcessingMode)[keyof typeof TrackProcessingMode];
+
+/**
+ * Coerces an untrusted value (a settings file loaded from disk, a hand edit)
+ * to a processing mode, falling back to the one that changes nothing.
+ * @param value - Candidate value
+ */
+export function normalizeTrackProcessingMode(
+	value: unknown,
+): TrackProcessingMode {
+	// Matched rather than asserted, so the narrowing comes from the list
+	// itself and no cast can outlive a mode being renamed.
+	return (
+		Object.values(TrackProcessingMode).find((mode) => mode === value) ??
+		TrackProcessingMode.Global
+	);
+}
+
+/**
+ * Where one track's audio comes from.
+ *
+ * Stored in data.json, so a value is renamed only with a migration. The keys
+ * are declared in the order the dropdown offers them, which is the order
+ * `Object.values` hands them back in.
+ */
+export const TrackSourceKind = {
+	/**
+	 * An enumerated microphone or line input, which is what every track was
+	 * before this existed.
+	 */
+	InputDevice: 'input-device',
+	/**
+	 * This machine's own output, granted by the host rather than opened from
+	 * the device list, so such a track carries no device id and is never
+	 * checked against one.
+	 */
+	SystemAudio: 'system-audio',
+} as const;
+
+/** One source kind (derived from {@link TrackSourceKind}). */
+export type TrackSourceKind =
+	(typeof TrackSourceKind)[keyof typeof TrackSourceKind];
+
+/**
+ * Coerces an untrusted value to a source kind, falling back to the input
+ * device every stored track was before the choice existed.
+ * @param value - Candidate value
+ */
+export function normalizeTrackSourceKind(value: unknown): TrackSourceKind {
+	return (
+		Object.values(TrackSourceKind).find((kind) => kind === value) ??
+		TrackSourceKind.InputDevice
+	);
+}
 
 /**
  * Track audio sources mapping (track number -> device ID).
@@ -96,6 +180,20 @@ export interface AudioSource {
 	 * track.
 	 */
 	pan?: number;
+	/**
+	 * Browser input processing for this track's capture. Bound to the track
+	 * for the reason its channel layout is: a loopback input needs none of
+	 * it and the microphone beside it needs all of it, and one session
+	 * carries both. Absent in every settings file written before the choice
+	 * existed, which reads as `global` and so as the previous behaviour.
+	 */
+	processing?: TrackProcessingMode;
+	/**
+	 * What this track captures from. Absent in every settings file written
+	 * before the system output could be recorded, which reads as the
+	 * enumerated input device every track was then.
+	 */
+	kind?: TrackSourceKind;
 }
 
 /**
@@ -117,6 +215,8 @@ export type TrackAudioSourcesRecord = Record<
 			channelMode?: unknown;
 			gainDb?: unknown;
 			pan?: unknown;
+			processing?: unknown;
+			kind?: unknown;
 	  }
 >;
 
@@ -171,7 +271,7 @@ export interface SerializedPlatformScopedSettings {
 export function createPlatformScopedDefaults(): PlatformScopedSettings {
 	return {
 		audioDeviceId: '',
-		recordingChannels: CHANNEL_MODE_SOURCE,
+		recordingChannels: ChannelMode.Source,
 		trackAudioSources: new Map(),
 	};
 }
@@ -182,8 +282,8 @@ export function createPlatformScopedDefaults(): PlatformScopedSettings {
  */
 function createPerPlatformDefaults(): PlatformScopedSettingsMap {
 	return {
-		desktop: createPlatformScopedDefaults(),
-		mobile: createPlatformScopedDefaults(),
+		[PlatformKind.Desktop]: createPlatformScopedDefaults(),
+		[PlatformKind.Mobile]: createPlatformScopedDefaults(),
 	};
 }
 
@@ -223,8 +323,37 @@ export interface AudioRecorderSettings {
 	 * Holds the *active* platform's value; persisted under `perPlatform`.
 	 */
 	recordingChannels: ChannelMode;
+	/**
+	 * How one sample is stored in a WAV recorded as raw PCM.
+	 *
+	 * Sixteen bits is enough for speech at a level set carefully in advance,
+	 * which is the one thing a meeting does not allow: twenty-four bits leave
+	 * room under a quiet speaker, and thirty-two floating point keep a sample
+	 * that went past full scale instead of flattening it, so an overloaded
+	 * take is recovered by normalizing the file. It reaches only the raw PCM
+	 * capture path; a WAV produced by a conversion, and every compressed
+	 * format, carry the width their encoder writes.
+	 */
+	recordingBitDepth: PcmSampleFormat;
 	/** Audio bitrate in bps */
 	bitrate: number;
+	/**
+	 * Record this computer's own output beside the microphone, without
+	 * configuring a track for it.
+	 *
+	 * A session started this way captures two tracks - the single-track
+	 * microphone as it always was, and the system output granted by the host -
+	 * and mixes them into one file. It is the whole configuration of that
+	 * second track: the pairing chooses what the advanced page would have been
+	 * used to choose, so a call can be recorded with its remote participants by
+	 * turning one switch on.
+	 *
+	 * Ignored while {@link enableMultiTrack} is on, because a per-track
+	 * configuration already says what every track records and one session can
+	 * capture the system output only once. That is the way round to reach for
+	 * when the pairing's answers are not the wanted ones.
+	 */
+	includeSystemAudio: boolean;
 	/** Enable multi-track recording */
 	enableMultiTrack: boolean;
 	/** Maximum number of tracks */
@@ -255,6 +384,19 @@ export interface AudioRecorderSettings {
 	perPlatform: PlatformScopedSettingsMap;
 	/** Enable debug logging */
 	debug: boolean;
+	/** Show what changed the first time a new version of the plugin runs */
+	showReleaseNotes: boolean;
+	/**
+	 * The version whose release notes have already been announced.
+	 *
+	 * Empty means nothing has been announced yet, which is what both a fresh
+	 * install and a `data.json` written before this field existed look like.
+	 * Neither is an update, so both record the running version without showing
+	 * anything: the alternative would greet a first-time user with the whole
+	 * history, and hand everyone upgrading into the first version that has this
+	 * dialog every release note the bundle carries.
+	 */
+	lastReleaseNotesVersion: string;
 	/** Insert recording link at the note and cursor position where recording started */
 	insertAtOriginalPosition: boolean;
 	/** Delete original file after successful format conversion */
@@ -333,6 +475,18 @@ export interface AudioRecorderSettings {
 	transcriptionAutoChaptersEnabled: boolean;
 	/** Automatically generate chapters after each transcription run. */
 	transcriptionAutoChaptersOnTranscribe: boolean;
+	/**
+	 * Whether quick notes are offered: a ribbon button and a command that
+	 * dictate into the note at the cursor. Off by default, and while off the
+	 * button is hidden and the command is not offered.
+	 */
+	quickNotesEnabled: boolean;
+	/**
+	 * Engine a dictated quick note is transcribed with. Its own choice rather
+	 * than the recordings' engine, so a vault can dictate through one service
+	 * and transcribe its meetings with another.
+	 */
+	quickNoteTranscriptionProvider: TranscriptionProviderId;
 	/** Upload size limit per chunk, in megabytes (Whisper API) */
 	transcriptionChunkMb: number;
 	/** Per-request transcription timeout, in minutes (a hung request fails after this) */
@@ -368,6 +522,20 @@ export interface AudioRecorderSettings {
 	geminiModel: string;
 	/** Known Gemini model ids offered in the picker (user-editable) */
 	geminiModels: string[];
+	/**
+	 * Mistral endpoint and key. One account serves two catalogues: the Voxtral
+	 * speech models and the Mistral chat models, so the pair is entered once
+	 * and read by both.
+	 */
+	mistralBaseUrl: string;
+	mistralApiKey: string;
+	/** DeepSeek endpoint and key, read by its one chat catalogue. */
+	deepSeekBaseUrl: string;
+	deepSeekApiKey: string;
+	/** Voxtral transcription model id (the selected one) */
+	voxtralModel: string;
+	/** Known Voxtral model ids offered in the picker (user-editable) */
+	voxtralModels: string[];
 	/** Path to the local whisper.cpp binary */
 	localWhisperBinaryPath: string;
 	/** Path to the local whisper model file */
@@ -433,6 +601,8 @@ export interface AudioRecorderSettings {
 	chaptersLlmProvider: LlmProviderId;
 	/** Engine the two-pass context agents call */
 	advancedLlmProvider: LlmProviderId;
+	/** Engine that rewrites a dictated quick note with its profile */
+	quickNoteLlmProvider: LlmProviderId;
 	/**
 	 * Anthropic endpoint and key. Every provider keeps its endpoint and its key
 	 * in fields of its own, and a provider that both transcribes and answers
@@ -449,6 +619,14 @@ export interface AudioRecorderSettings {
 	llmAnthropicModel: string;
 	/** Known Anthropic LLM model ids offered in the picker (user-editable) */
 	llmAnthropicModels: string[];
+	/** Selected Mistral LLM model id */
+	llmMistralModel: string;
+	/** Known Mistral LLM model ids offered in the picker (user-editable) */
+	llmMistralModels: string[];
+	/** Selected DeepSeek LLM model id */
+	llmDeepSeekModel: string;
+	/** Known DeepSeek LLM model ids offered in the picker (user-editable) */
+	llmDeepSeekModels: string[];
 	/**
 	 * Longest answer each engine is allowed to write. A ceiling belongs to the
 	 * engine that has to honour it, not to one of the jobs that calls it, so
@@ -457,6 +635,8 @@ export interface AudioRecorderSettings {
 	llmOpenAiMaxTokens: number;
 	llmAnthropicMaxTokens: number;
 	geminiMaxTokens: number;
+	llmMistralMaxTokens: number;
+	llmDeepSeekMaxTokens: number;
 	/**
 	 * Generation of the shipped model catalogues the saved lists were last
 	 * topped up from. A list is the user's to edit, so new ids are merged in
@@ -640,6 +820,8 @@ export interface SerializedAudioSource {
 	channelMode: ChannelMode;
 	gainDb: number;
 	pan: number;
+	processing: TrackProcessingMode;
+	kind: TrackSourceKind;
 }
 
 /**
@@ -666,25 +848,25 @@ function seededProfiles(): Profile[] {
 	return [
 		{
 			id: DEFAULT_CHAPTER_PROMPT_PROFILE_ID,
-			kind: 'chapterPrompt',
+			kind: ProfileKindId.ChapterPrompt,
 			name: DEFAULT_PROFILE_NAME,
 			body: DEFAULT_CHAPTER_PROMPT,
 		},
 		{
 			id: DEFAULT_LLM_CLEANUP_PROFILE_ID,
-			kind: 'llmCleanup',
+			kind: ProfileKindId.LlmCleanup,
 			name: DEFAULT_PROFILE_NAME,
 			body: DEFAULT_LLM_CLEANUP_PROMPT,
 		},
 		{
 			id: DEFAULT_LLM_SUMMARY_PROFILE_ID,
-			kind: 'llmSummary',
+			kind: ProfileKindId.LlmSummary,
 			name: DEFAULT_PROFILE_NAME,
 			body: DEFAULT_LLM_SUMMARY_PROMPT,
 		},
 		{
 			id: DEFAULT_LLM_CUSTOM_PROFILE_ID,
-			kind: 'llmCustom',
+			kind: ProfileKindId.LlmCustom,
 			name: DEFAULT_PROFILE_NAME,
 			body: DEFAULT_LLM_CUSTOM_INSTRUCTION,
 		},
@@ -705,24 +887,28 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	resumeHotkey: '',
 	audioDeviceId: '',
 	sampleRate: DEFAULT_SAMPLE_RATE,
-	recordingChannels: CHANNEL_MODE_SOURCE,
+	recordingChannels: ChannelMode.Source,
+	recordingBitDepth: PcmSampleFormat.Int16,
 	bitrate: DEFAULT_BITRATE,
+	includeSystemAudio: false,
 	enableMultiTrack: false,
 	maxTracks: 2,
 	mixAlignTrackLevels: false,
-	outputMode: 'single',
+	outputMode: OutputMode.Single,
 	useSourceNamesForTracks: true,
 	trackAudioSources: new Map(),
 	perPlatform: createPerPlatformDefaults(),
 	debug: false,
+	showReleaseNotes: true,
+	lastReleaseNotesVersion: '',
 	insertAtOriginalPosition: false,
 	deleteSourceAfterConversion: false,
-	conversionLinkAction: 'replace',
+	conversionLinkAction: ConversionLinkAction.Replace,
 	autoSplitEnabled: false,
 	splitChunkMinutes: DEFAULT_SPLIT_CHUNK_MINUTES,
 	splitPartSuffix: DEFAULT_SPLIT_PART_SUFFIX,
 	deleteSourceAfterSplit: false,
-	enhancedPlayerEnabled: false,
+	enhancedPlayerEnabled: true,
 	playerShowWaveform: true,
 	playerEnableMarkers: true,
 	playerSkipSeconds: PLAYER_SKIP_SECONDS,
@@ -740,6 +926,8 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	transcriptionSpeakerRenameEnabled: false,
 	transcriptionAutoChaptersEnabled: false,
 	transcriptionAutoChaptersOnTranscribe: false,
+	quickNotesEnabled: false,
+	quickNoteTranscriptionProvider: TRANSCRIPTION_PROVIDER_IDS.WHISPER_API,
 	transcriptionChunkMb: DEFAULT_TRANSCRIBE_CHUNK_MB,
 	transcriptionTimeoutMinutes: DEFAULT_TRANSCRIPTION_TIMEOUT_MINUTES,
 	whisperApiBaseUrl: DEFAULT_OPENAI_BASE_URL,
@@ -754,6 +942,12 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	geminiApiKey: '',
 	geminiModel: DEFAULT_GEMINI_MODEL,
 	geminiModels: [...GEMINI_MODEL_SUGGESTIONS],
+	mistralBaseUrl: DEFAULT_MISTRAL_BASE_URL,
+	mistralApiKey: '',
+	deepSeekBaseUrl: DEFAULT_DEEPSEEK_BASE_URL,
+	deepSeekApiKey: '',
+	voxtralModel: DEFAULT_VOXTRAL_MODEL,
+	voxtralModels: [...VOXTRAL_MODEL_SUGGESTIONS],
 	localWhisperBinaryPath: '',
 	localWhisperModelPath: '',
 	localWhisperExtraArgs: '',
@@ -762,8 +956,8 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	localDiarizerScriptPath: '',
 	localDiarizerMaxSpeakers: 0,
 	localWhisperTimeoutMinutes: DEFAULT_LOCAL_WHISPER_TIMEOUT_MINUTES,
-	transcriptDestination: 'note',
-	transcriptFileFormat: 'json',
+	transcriptDestination: TranscriptDestination.Note,
+	transcriptFileFormat: TranscriptFileFormat.Json,
 	transcriptIncludeTimestamps: true,
 	transcriptTimestampLinks: true,
 	transcriptSpeakerLinks: false,
@@ -774,28 +968,35 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	transcriptLineFormat: '{timestamp} {speaker} {text}',
 	transcriptHeading: '## Transcript',
 	llmPostProcessEnabled: false,
-	llmPostProcessTask: 'cleanup',
+	llmPostProcessTask: LlmTask.Cleanup,
 	llmTranslateTargetLanguage: '',
 	profiles: seededProfiles(),
 	selectedProfileIds: {
 		...noSelectedProfiles(),
-		chapterPrompt: DEFAULT_CHAPTER_PROMPT_PROFILE_ID,
-		llmCleanup: DEFAULT_LLM_CLEANUP_PROFILE_ID,
-		llmSummary: DEFAULT_LLM_SUMMARY_PROFILE_ID,
-		llmCustom: DEFAULT_LLM_CUSTOM_PROFILE_ID,
+		[ProfileKindId.ChapterPrompt]: DEFAULT_CHAPTER_PROMPT_PROFILE_ID,
+		[ProfileKindId.LlmCleanup]: DEFAULT_LLM_CLEANUP_PROFILE_ID,
+		[ProfileKindId.LlmSummary]: DEFAULT_LLM_SUMMARY_PROFILE_ID,
+		[ProfileKindId.LlmCustom]: DEFAULT_LLM_CUSTOM_PROFILE_ID,
 	},
 	llmProvider: LLM_PROVIDER_IDS.OPENAI_COMPATIBLE,
 	chaptersLlmProvider: LLM_PROVIDER_IDS.OPENAI_COMPATIBLE,
 	advancedLlmProvider: LLM_PROVIDER_IDS.OPENAI_COMPATIBLE,
+	quickNoteLlmProvider: LLM_PROVIDER_IDS.OPENAI_COMPATIBLE,
 	anthropicBaseUrl: DEFAULT_ANTHROPIC_BASE_URL,
 	anthropicApiKey: '',
 	llmOpenAiModel: DEFAULT_LLM_OPENAI_MODEL,
 	llmOpenAiModels: [...LLM_OPENAI_MODEL_SUGGESTIONS],
 	llmAnthropicModel: DEFAULT_LLM_ANTHROPIC_MODEL,
 	llmAnthropicModels: [...LLM_ANTHROPIC_MODEL_SUGGESTIONS],
+	llmMistralModel: DEFAULT_LLM_MISTRAL_MODEL,
+	llmMistralModels: [...LLM_MISTRAL_MODEL_SUGGESTIONS],
+	llmDeepSeekModel: DEFAULT_LLM_DEEPSEEK_MODEL,
+	llmDeepSeekModels: [...LLM_DEEPSEEK_MODEL_SUGGESTIONS],
 	llmOpenAiMaxTokens: DEFAULT_LLM_MAX_TOKENS,
 	llmAnthropicMaxTokens: DEFAULT_LLM_MAX_TOKENS,
 	geminiMaxTokens: DEFAULT_LLM_MAX_TOKENS,
+	llmMistralMaxTokens: DEFAULT_LLM_MAX_TOKENS,
+	llmDeepSeekMaxTokens: DEFAULT_LLM_MAX_TOKENS,
 	modelSeedGeneration: MODEL_SEED_GENERATION,
 	inputNoiseSuppression: true,
 	inputEchoCancellation: true,
@@ -851,4 +1052,42 @@ export function autoChaptersAfterTranscribe(
 		settings.transcriptionAutoChaptersEnabled &&
 		settings.transcriptionAutoChaptersOnTranscribe
 	);
+}
+
+/**
+ * Whether quick notes are on offer: the feature is switched on and there is
+ * transcription to dictate through. The one predicate the ribbon button, the
+ * command, the settings block, and the engine check read, so the feature
+ * cannot be visible in one place and switched off in another.
+ * @param settings - The active settings
+ * @returns True when a quick note can be dictated
+ */
+export function quickNotesAvailable(
+	settings: Pick<
+		AudioRecorderSettings,
+		'transcriptionEnabled' | 'quickNotesEnabled'
+	>,
+): boolean {
+	return settings.transcriptionEnabled && settings.quickNotesEnabled;
+}
+
+/**
+ * The settings a dictation is transcribed with: the vault's own, with the
+ * transcription engine replaced by the one quick notes pick.
+ *
+ * Everything downstream that depends on the engine reads
+ * `transcriptionProvider`: the provider factory, the language and dictionary
+ * gates, the part limits, and the price of the run. Replacing it once on the
+ * snapshot moves all of them together, where teaching each a second field
+ * would let one of them keep reading the recordings' engine.
+ * @param settings - The vault's settings
+ * @returns A copy that transcribes with the quick note transcription engine
+ */
+export function quickNoteTranscriptionSettings(
+	settings: AudioRecorderSettings,
+): AudioRecorderSettings {
+	return {
+		...settings,
+		transcriptionProvider: settings.quickNoteTranscriptionProvider,
+	};
 }

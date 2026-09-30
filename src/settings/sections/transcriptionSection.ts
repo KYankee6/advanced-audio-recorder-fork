@@ -12,57 +12,23 @@ import {
 	TRANSCRIPTION_PROVIDER_IDS,
 } from '../../constants';
 import {
-	isProviderAvailableOnPlatform,
+	languageNote,
 	providerSupportsDiarization,
 	providerSupportsSpeechTranslation,
 	wordTimestampsNote,
 	wordTimestampsSelectable,
 } from '../../transcription/providers/capabilities';
-import { TRANSCRIPTION_PROVIDER_LABELS } from '../labels';
-import type {
-	AudioRecorderSettings,
-	TranscriptionProviderId,
-} from '../settingsSchema';
 import {
 	SETTINGS_SECTION_CLASS,
 	type SettingsDefinitionContext,
 } from './context';
 import { profileCatalogues } from './profilesSection';
+import { transcriptionEngineChoiceRow } from './rowHelpers';
+import { ProfileSection } from '../profileKinds';
 import type { SettingDefinitionItem, SettingGroupItem } from 'obsidian';
 
 /** Accepted shape of the transcription language field: an ISO code or empty. */
 const LANGUAGE_CODE_PATTERN = /^([a-z]{2,3}(-[a-z0-9]{2,8})?|auto)?$/i;
-
-/**
- * Which service transcribes. Only the choice: where that service is reached and
- * which models it serves are configured once, on its own page under Engines.
- * @param settings - Live settings, read by the predicate
- */
-function transcriptionEngineRow(
-	settings: AudioRecorderSettings,
-): SettingGroupItem {
-	return {
-		// Named for the job it configures rather than "Engine": three rows pick
-		// an engine, on three pages, and the settings search lists them by name
-		// alone - three results reading "Engine" name nothing.
-		name: 'Transcription engine',
-		aliases: ['provider', 'whisper', 'deepgram', 'gemini', 'elevenlabs'],
-		desc: 'Whisper API, Deepgram, or Google Gemini (cloud), or a local whisper.cpp binary (desktop). Configure each one under Engines.',
-		visible: (): boolean => settings.transcriptionEnabled,
-		control: {
-			type: 'dropdown',
-			key: 'transcriptionProvider',
-			// Every device lists every engine, so the dropdown reads the same
-			// everywhere; picking one this device cannot run is refused with
-			// the reason instead of silently blocked.
-			options: TRANSCRIPTION_PROVIDER_LABELS,
-			validate: (value: string): string | undefined =>
-				isProviderAvailableOnPlatform(value as TranscriptionProviderId)
-					? undefined
-					: 'Not available on this device.',
-		},
-	};
-}
 
 /**
  * The transcription section. Everything below the section's own switch is
@@ -97,7 +63,15 @@ export function transcriptionGroup(
 			// The first thing to settle once transcription is on, so it opens
 			// the block rather than sitting below the run options: which
 			// service transcribes, and the page where every service is set up.
-			transcriptionEngineRow(settings),
+			// Named for the job it configures rather than "Engine": several
+			// rows pick an engine, on several pages, and the settings search
+			// lists them by name alone.
+			transcriptionEngineChoiceRow(
+				'Transcription engine',
+				'Whisper API, Deepgram, or Google Gemini (cloud), or a local whisper.cpp binary (desktop). Configure each one under Engines.',
+				'transcriptionProvider',
+				enabled,
+			),
 			enginesEntry,
 			{
 				name: 'Transcribe after recording',
@@ -117,12 +91,23 @@ export function transcriptionGroup(
 			{
 				name: 'Language',
 				aliases: ['locale', 'spoken language'],
-				desc: 'ISO code (e.g. en, ru, es). Leave empty, or write "auto", to detect it.',
+				// Read at build time rather than per render, which is enough:
+				// picking another engine reshapes the tree (see
+				// CONTROL_WRITE_EFFECTS), so this row is built again with it.
+				desc: languageNote(settings.transcriptionProvider),
 				visible: enabled,
 				control: {
 					type: 'text',
 					key: 'transcriptionLanguage',
 					placeholder: 'auto',
+					// Editable on every engine, unlike the two rows below.
+					// Those gate a setting only they read, so an engine that
+					// cannot honour one may disable it; this field is also the
+					// fallback auto chapters name the language to the model
+					// with, and no engine gates that reader. Disabling the row
+					// left that fallback with no way to be set at all, so the
+					// note above says the field is ignored for transcription
+					// instead of the control pretending it is unavailable.
 					validate: (value: string): string | undefined =>
 						LANGUAGE_CODE_PATTERN.test(value.trim())
 							? undefined
@@ -157,7 +142,7 @@ export function transcriptionGroup(
 			},
 			// The rosters a run labels speakers with, beside the switch that
 			// asks for the labels.
-			...profileCatalogues(ctx, 'transcription'),
+			...profileCatalogues(ctx, ProfileSection.Transcription),
 			{
 				name: 'Word-level timestamps',
 				// Read at build time rather than per render, which is enough:

@@ -21,10 +21,21 @@ import {
 	FORMAT_WEBM,
 } from '../constants';
 import type { RecordingSessionConfig, TrackMix } from '../types';
+import { OutputMode } from '../types';
 import type { AudioRecorderSettings } from '../settings/settingsSchema';
-import type { TrackAudioSource } from './AudioStreamHandler';
+import {
+	effectiveOutputMode,
+	effectiveTrackLevelAlignment,
+	recordingEncodingFor,
+	type TrackAudioSource,
+} from './AudioStreamHandler';
 import { normalizeChannelMode, type ChannelMode } from '../audio/downmix';
+import { normalizePcmSampleFormat, PcmSampleFormat } from '../audio/pcm';
 import { clampSplitMinutes, sanitizePartSuffix } from './AudioSplitter';
+import {
+	buildMimeType,
+	effectiveBitrate,
+} from '../audio/AudioCapabilityDetector';
 import {
 	getChunkFlushThresholdBytes,
 	isMidStreamSegmentFlushAllowed,
@@ -65,8 +76,22 @@ export interface CaptureSessionRequest {
 	readonly outputFormat: string;
 	/** Container the MediaRecorders produce, unused on the PCM path. */
 	readonly recorderFormat: string;
+	/**
+	 * MIME type the platform agreed to record that container as, unused on
+	 * the PCM path. Left out, the plain `audio/<format>` type is assumed,
+	 * which is what every session recorded before an M4A refusal used.
+	 */
+	readonly recorderMimeType?: string;
 	/** Whether this session captures raw PCM for WAV output. */
 	readonly isWavPcm: boolean;
+	/**
+	 * Bitrate already resolved against this device's encoder, when the caller
+	 * asked it. Only the encoder knows which rates a platform AAC codec
+	 * accepts, and that answer is asynchronous, so a caller that can wait for
+	 * it passes the result here. Left out, the format's own tables settle the
+	 * rate, which is everything a synchronous caller can know.
+	 */
+	readonly bitrate?: number;
 }
 
 /**
@@ -93,9 +118,15 @@ export function createCaptureSession(
 			: Array.from({ length: streamCount }, () =>
 					normalizeChannelMode(settings.recordingChannels),
 				);
+	// Read here, from the one place that answers them: both are rows of the
+	// multi-track page, and a session pairing the microphone with the system
+	// output shows none of that page, so it is mixed into one file and left at
+	// the levels it was recorded at whatever those rows were last set to.
+	const outputMode = effectiveOutputMode(settings);
+	const alignTrackLevels = effectiveTrackLevelAlignment(settings);
 	// A session writing one file per track never mixes, so it carries no
 	// placement at all rather than a set of neutral ones nothing reads.
-	const merging = settings.outputMode === 'single' && trackOrder.length > 1;
+	const merging = outputMode === OutputMode.Single && trackOrder.length > 1;
 	const trackMix: readonly TrackMix[] = merging
 		? Object.freeze(
 				trackOrder.map(
@@ -108,7 +139,7 @@ export function createCaptureSession(
 		: Object.freeze([]);
 	const requestedSplit = settings.autoSplitEnabled;
 	const autoSplitSkipped =
-		requestedSplit && settings.outputMode === 'single' && streamCount > 1;
+		requestedSplit && outputMode === OutputMode.Single && streamCount > 1;
 	const session: CaptureSession = Object.freeze({
 		// Platforms that must not leave raw mid-stream segments behind run
 		// their buffer flushes as full part rotations at this size boundary.
@@ -116,16 +147,35 @@ export function createCaptureSession(
 			? null
 			: getChunkFlushThresholdBytes(),
 		isWavPcm: request.isWavPcm,
+		// Normalized here for the same reason the channel modes are: the
+		// capture worklet, the header writer and the mixer all branch on it,
+		// and a hand-edited data.json must not leave one of them writing a
+		// width the other two do not expect.
+		pcmFormat: normalizePcmSampleFormat(settings.recordingBitDepth),
 		recorderFormat: request.recorderFormat,
+		recorderMimeType:
+			request.recorderMimeType ?? buildMimeType(request.recorderFormat),
 		outputFormat: request.outputFormat,
-		outputMode: settings.outputMode,
-		bitrate: settings.bitrate,
+		outputMode,
+		// Snapped onto the output format's own rates here, at the one point
+		// every recorder, merge and conversion of the session reads it from: a
+		// rate the codec cannot write would otherwise be raised silently by
+		// the encoder, leaving the file at a bitrate nothing announced. The
+		// floor is taken at the rate the encoder writes at, which is what the
+		// bitrate row and the summary line are cut to as well.
+		bitrate:
+			request.bitrate ??
+			effectiveBitrate(
+				request.outputFormat,
+				settings.bitrate,
+				recordingEncodingFor(settings, trackOrder).sampleRate,
+			),
 		splitEnabled: requestedSplit && !autoSplitSkipped,
 		partMinutes: clampSplitMinutes(settings.splitChunkMinutes),
 		partSuffix: sanitizePartSuffix(settings.splitPartSuffix),
 		channelModes: Object.freeze(channelModes),
 		trackMix,
-		alignTrackLevels: merging && settings.mixAlignTrackLevels,
+		alignTrackLevels: merging && alignTrackLevels,
 	});
 	return { session, autoSplitSkipped };
 }
@@ -134,9 +184,11 @@ export function createCaptureSession(
 export const IDLE_CAPTURE_SESSION: CaptureSession = Object.freeze({
 	chunkRotationBytes: null,
 	isWavPcm: false,
+	pcmFormat: PcmSampleFormat.Int16,
 	recorderFormat: FORMAT_WEBM,
+	recorderMimeType: buildMimeType(FORMAT_WEBM),
 	outputFormat: FORMAT_WEBM,
-	outputMode: 'multiple' as const,
+	outputMode: OutputMode.Multiple,
 	bitrate: 0,
 	splitEnabled: false,
 	partMinutes: DEFAULT_SPLIT_CHUNK_MINUTES,

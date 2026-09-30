@@ -6,6 +6,7 @@
  */
 
 import { RecordingManager } from 'src/recording/RecordingManager';
+import { probeOfflineEncodingSupport } from 'src/audio/AudioEncoder';
 import { RecordingStatus } from 'src/types';
 import {
 	DEFAULT_SETTINGS,
@@ -606,6 +607,30 @@ describe('RecordingManager', () => {
 			);
 		});
 
+		it('records M4A through the container type the platform agreed to', async () => {
+			// Windows profile: MediaRecorder answers no to audio/m4a and yes
+			// to audio/mp4, and an M4A file is an MP4 container by another
+			// name. The resolver knew that; the manager rebuilt the type from
+			// the format name and the constructor refused it.
+			const mockMediaRecorder = makeMediaRecorderDouble();
+			const ctor = installMediaRecorder(
+				mockMediaRecorder,
+				(type) => type === 'audio/mp4' || type === 'audio/webm',
+			);
+			mockSettings.recordingFormat = 'm4a';
+			stubAudioStreams();
+
+			const failure = await manager.startRecording();
+
+			expect(failure).toBeNull();
+			expect(manager.getStatus()).toBe(RecordingStatus.Recording);
+			expect(ctor).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({ mimeType: 'audio/mp4' }),
+			);
+			await manager.stopRecording();
+		});
+
 		it('falls back to a recordable format when the configured one is unsupported', async () => {
 			// iOS profile: only audio/mp4 is recordable and no offline
 			// encoder works - the configured webm cannot be produced, so
@@ -615,6 +640,7 @@ describe('RecordingManager', () => {
 				mockMediaRecorder,
 				(type) => type === 'audio/mp4',
 			);
+			jest.mocked(probeOfflineEncodingSupport).mockResolvedValue(false);
 			stubAudioStreams();
 
 			await manager.startRecording();
@@ -924,6 +950,39 @@ describe('an input device that disappears mid-session', () => {
 			RecordingStatus.Interrupted,
 			undefined,
 		);
+	});
+
+	// A granted capture of this machine's own output is revoked or switched
+	// off. Calling that a disconnected device sends the user to their cables.
+	it('says what ended when the system audio capture is the track that went', async () => {
+		makeMediaRecorderDouble();
+		stubAudioStreams({
+			count: 1,
+			trackOrder: [
+				{
+					trackNumber: 1,
+					deviceId: '',
+					channelMode: 'source',
+					kind: 'system-audio',
+				},
+			],
+		});
+		const sut = createRecordingSut({
+			settings: { enableMultiTrack: true },
+		});
+		await sut.manager.startRecording();
+
+		endStream(0);
+		await untilSaved(sut);
+
+		const said = noticeMessages().join(' ');
+
+		expect(said).toContain("the capture of this computer's output ended");
+		expect(said).not.toContain('was disconnected');
+		// The name standing in for the device such a track has not got is
+		// either "SystemAudio" or "TrackN", and quoting either of them said
+		// nothing the sentence had not already said.
+		expect(said).not.toContain('"SystemAudio"');
 	});
 
 	// The name is read out of the session's targets by the stream's index, and

@@ -38,15 +38,28 @@ import {
 	initializeStatusBar,
 	renderPlaybackStatusBar,
 	renderTranscriptionStatusBar,
+	renderQuickNoteStatusBar,
 } from './ui/StatusBar';
 import { RecordingBanner } from './ui/RecordingBanner';
-import { updateRibbonIcon, initializeRibbonIcon } from './ui/RibbonIcon';
+import {
+	ICON_MIC,
+	ICON_QUICK_NOTE,
+	QUICK_NOTE_GLYPHS,
+	RIBBON_HIDDEN_CLASS,
+	updateRibbonIcon,
+	initializeRibbonIcon,
+} from './ui/RibbonIcon';
 import { ContextMenu } from './ui/ContextMenu';
 import type { ActionServices, SessionServices } from './actions/PluginAction';
 import { activeAudioFile, FILE_ACTIONS } from './actions/fileActions';
 import { SESSION_ACTIONS } from './actions/sessionActions';
+import {
+	activeTranscriptSelection,
+	TRANSCRIPT_ACTIONS,
+} from './actions/transcriptActions';
 import { PLAYBACK_ACTIONS } from './actions/playbackActions';
 import { SEARCH_ACTIONS } from './actions/searchActions';
+import { HELP_ACTIONS } from './actions/helpActions';
 import { registerActionCommands } from './actions/registerActionCommands';
 import { EnhancedPlayerRegistrar } from './player/EnhancedPlayerRegistrar';
 import { MediaKindStore, MEDIA_KIND_STORE_FILE } from './player/MediaKindStore';
@@ -56,6 +69,11 @@ import { RecordingMarkerModal } from './ui/MarkerModal';
 import { isAudioFile } from './utils/audioFile';
 import { openPluginSettings } from './obsidian/settingsNavigation';
 import { transcriptionRefusal } from './settings/settingsAttention';
+import { quickNotesAvailable } from './settings/settingsSchema';
+import { QuickNoteController } from './quicknotes/QuickNoteController';
+import { MemoryRecorder } from './recording/MemoryRecorder';
+import { TranscriptionService } from './transcription/TranscriptionService';
+import { ProfileNoteStore } from './settings/ProfileNoteStore';
 import { registerCliCommands, type CliHost } from './obsidian/cliCommands';
 import { TranscriptionModal } from './ui/TranscriptionModal';
 import type { TranscriptionModalOptions } from './ui/TranscriptionModal';
@@ -74,6 +92,8 @@ import {
 } from './transcription/TranscriptionQueue';
 import { QUEUE_ASSUMED_RECORDING_SECONDS } from './constants';
 import { transcribeFile } from './transcription/runTranscription';
+import { releaseNotesSince } from './release/releaseNotes';
+import { ReleaseNotesModal } from './ui/ReleaseNotesModal';
 
 /** Delay before retrying a failed settings read, in milliseconds. */
 const SETTINGS_READ_RETRY_DELAY_MS = 250;
@@ -139,6 +159,21 @@ export default class AudioRecorderPlugin extends Plugin {
 	private recordingManager!: RecordingManager;
 	private statusBarItem: HTMLElement | null = null;
 	private ribbonIconEl: HTMLElement | null = null;
+	/**
+	 * The quick note button, registered the first time quick notes are on
+	 * and hidden while they are off.
+	 */
+	private quickNoteRibbonEl: HTMLElement | null = null;
+	private quickNotes!: QuickNoteController;
+	/** What the quick note is doing, as the status bar shows it. */
+	private quickNoteStatus: RecordingStatus = RecordingStatus.Idle;
+	/** The processing stage the quick note reported last. */
+	private quickNoteProgress: SaveProgress | undefined;
+	/**
+	 * Where a quick note says what it is doing on a platform with no status
+	 * bar, which is where the recording banner stands in for it.
+	 */
+	private quickNoteNotice: Notice | null = null;
 	private contextMenu!: ContextMenu;
 	private recordingBanner!: RecordingBanner;
 	private playerRegistrar!: EnhancedPlayerRegistrar;
@@ -168,6 +203,16 @@ export default class AudioRecorderPlugin extends Plugin {
 	 * across dialogs until Obsidian restarts.
 	 */
 	private readonly transcriptionCostTracker = new SessionCostTracker();
+
+	/**
+	 * Keeps the bodies of note-backed profiles in step with their notes. Built
+	 * with the plugin, so every path into saveSettings finds it there.
+	 */
+	private readonly profileNotes = new ProfileNoteStore(
+		this.app,
+		() => this.settings,
+		() => this.saveSettings(),
+	);
 
 	/**
 	 * The queue of recordings to transcribe. Built on load so a queue a
@@ -211,6 +256,7 @@ export default class AudioRecorderPlugin extends Plugin {
 	 */
 	override async onload(): Promise<void> {
 		await this.loadSettings();
+		this.profileNotes.register(this);
 
 		// Offload streaming conversions to a Web Worker when the build
 		// injected its source; everything falls back to the main thread
@@ -258,7 +304,30 @@ export default class AudioRecorderPlugin extends Plugin {
 				this.handleRecordingSaved(result);
 			},
 			() => this.encodingWorker,
+			// The mirror of the quick note's own refusal: two captures of one
+			// microphone would record the same speech twice.
+			() =>
+				this.quickNotes.getStatus() === RecordingStatus.Recording
+					? 'Stop the quick note before starting a recording.'
+					: null,
 		);
+
+		this.quickNotes = new QuickNoteController({
+			app: this.app,
+			getSettings: () => this.settings,
+			recorder: new MemoryRecorder(),
+			// Its own service rather than the dialog's: a dictation reports
+			// to the same session total, and nothing else about it is shared.
+			dictate: (audio, options) =>
+				new TranscriptionService(this.app, () => this.settings, {
+					costSink: this.transcriptionCostTracker,
+				}).dictate(audio, options),
+			costs: this.transcriptionCostTracker,
+			recordingActive: () => this.recordingManager.isSessionActive(),
+			onStatusChange: (status, progress) => {
+				this.handleQuickNoteStatus(status, progress);
+			},
+		});
 
 		this.addSettingTab(new AudioRecorderSettingTab(this.app, this));
 		this.registerCommands();
@@ -266,19 +335,29 @@ export default class AudioRecorderPlugin extends Plugin {
 		// registered, which is what the CLI-less platforms and the Obsidians
 		// below 1.12.2 answer.
 		registerCliCommands(this, this.createCliHost());
+		// Named after the plugin, because Obsidian's own Audio recorder puts a
+		// button with the same job in the same ribbon under the tooltip
+		// "Start/stop recording", and the ribbon's context menu, where a
+		// button is hidden, lists every button by exactly that text. The name
+		// comes from the manifest so it cannot drift from the one Obsidian
+		// shows everywhere else.
 		this.ribbonIconEl = this.addRibbonIcon(
-			'microphone',
-			'Start/stop recording',
+			ICON_MIC,
+			`${this.manifest.name}: start/stop recording`,
 			() => {
 				void this.recordingManager.toggleRecording();
 			},
 		);
+		// After the recorder's own button, so the two sit side by side with
+		// the recorder first whenever quick notes are on.
+		this.applyQuickNoteSettings();
 		this.setupStatusBar();
 
 		this.contextMenu = new ContextMenu(
 			this,
 			this.createActionServices(),
 			FILE_ACTIONS,
+			TRANSCRIPT_ACTIONS,
 		);
 		this.contextMenu.register();
 
@@ -359,6 +438,10 @@ export default class AudioRecorderPlugin extends Plugin {
 		// Recovery runs after the workspace is ready so plugin load is
 		// never delayed; a failure here must not break the plugin
 		this.app.workspace.onLayoutReady(() => {
+			// Announced before the recovery check rather than after it: both
+			// can open a dialog, and a recording the app lost is the one the
+			// user has to answer first, so it belongs on top of the stack.
+			this.announceReleaseNotes();
 			void this.checkForInterruptedSessions();
 		});
 	}
@@ -524,6 +607,11 @@ export default class AudioRecorderPlugin extends Plugin {
 		this.silentChannelNotice?.hide();
 		this.silentChannelNotice = null;
 		this.recordingManager.cleanup();
+		// A dictation has nowhere to go once the plugin is gone, so its
+		// microphone is closed and its run cancelled rather than finished.
+		this.quickNotes.cancel();
+		this.quickNoteNotice?.hide();
+		this.quickNoteNotice = null;
 		this.recordingBanner.hide();
 		this.playerRegistrar.dispose();
 		this.encodingWorker?.terminate();
@@ -601,6 +689,9 @@ export default class AudioRecorderPlugin extends Plugin {
 	 * Saves plugin settings to storage.
 	 */
 	async saveSettings(): Promise<void> {
+		// A note just picked for a profile is read before anything is written
+		// or redrawn, so the save carries its text and the tab shows it.
+		await this.profileNotes.reconcile();
 		if (this.settingsLoadFailed) {
 			// Never overwrite a possibly intact data.json with the
 			// in-memory fallback that replaced the unreadable settings
@@ -613,12 +704,14 @@ export default class AudioRecorderPlugin extends Plugin {
 			// sees the same session state even though nothing is
 			// persisted
 			this.recordingManager.updateSettings(this.settings);
+			this.applyQuickNoteSettings();
 			this.playerRegistrar.refresh();
 			return;
 		}
 		await this.saveData(serializeSettings(this.settings));
 		await this.backupSettings();
 		this.recordingManager.updateSettings(this.settings);
+		this.applyQuickNoteSettings();
 		// Apply player-affecting changes (enable toggle, waveform, etc.)
 		// to open embeds immediately, without re-opening the note
 		this.playerRegistrar.refresh();
@@ -632,7 +725,47 @@ export default class AudioRecorderPlugin extends Plugin {
 	 */
 	override async onExternalSettingsChange(): Promise<void> {
 		await this.loadSettings();
+		// The bodies that arrived were cached on another device and may be
+		// older than the notes here. Read again, and not written back: writing
+		// would send data.json straight back to the device it came from.
+		await this.profileNotes.reconcile();
 		this.recordingManager.updateSettings(this.settings);
+		this.applyQuickNoteSettings();
+	}
+
+	/**
+	 * Shows the quick note button while quick notes are available and hides it
+	 * otherwise, at once rather than on the next start. Switching the feature
+	 * off also discards a dictation under way, since its button and its
+	 * command are about to disappear from under it.
+	 *
+	 * The button is registered once, the first time the feature is on, and
+	 * hidden rather than removed afterwards. The plugin API has no way to take
+	 * a ribbon action back short of unloading: detaching the element left its
+	 * registration in the ribbon, and every switch back on added another.
+	 */
+	private applyQuickNoteSettings(): void {
+		const available = quickNotesAvailable(this.settings);
+		if (!available) {
+			this.quickNotes.cancel();
+		}
+		if (available && !this.quickNoteRibbonEl) {
+			// Named after the plugin for the reason the recorder's button is:
+			// the ribbon's context menu lists every button by this text.
+			this.quickNoteRibbonEl = this.addRibbonIcon(
+				ICON_QUICK_NOTE,
+				`${this.manifest.name}: start/stop quick note`,
+				() => {
+					void this.quickNotes.toggle();
+				},
+			);
+			updateRibbonIcon(
+				this.quickNoteRibbonEl,
+				this.quickNotes.getStatus(),
+				QUICK_NOTE_GLYPHS,
+			);
+		}
+		this.quickNoteRibbonEl?.toggleClass(RIBBON_HIDDEN_CLASS, !available);
 	}
 
 	/**
@@ -859,6 +992,14 @@ export default class AudioRecorderPlugin extends Plugin {
 			activeAudioFile(this.createActionServices()),
 		);
 
+		// A transcript action acts on a selection inside a transcript line,
+		// which the active editor's selection resolves to (or does not).
+		registerActionCommands(
+			this,
+			TRANSCRIPT_ACTIONS,
+			activeTranscriptSelection(this.createActionServices()),
+		);
+
 		// The player registrar is created after this method runs, so the
 		// resolver reaches it through the field it later fills. It pulls the
 		// live playback rather than reusing the snapshot the status bar was
@@ -876,6 +1017,64 @@ export default class AudioRecorderPlugin extends Plugin {
 				this.transcriptionQueue?.open();
 			},
 		}));
+
+		// Asked for deliberately rather than met after an update, so it shows
+		// every release the bundle carries notes for instead of only the ones
+		// since the last announcement.
+		registerActionCommands(this, HELP_ACTIONS, () => ({
+			showReleaseNotes: () => {
+				new ReleaseNotesModal(this.app, releaseNotesSince('')).open();
+			},
+		}));
+	}
+
+	/**
+	 * Shows what changed when the running version is not the one whose notes
+	 * were last announced.
+	 *
+	 * The version is recorded whether or not the dialog opens. A user who
+	 * turned the dialog off is therefore not shown two releases at once when
+	 * they turn it back on, and an install that has announced nothing yet -
+	 * a first install, or a config written before this field existed - starts
+	 * from the version it is running rather than from the whole history.
+	 */
+	private announceReleaseNotes(): void {
+		if (this.settingsLoadFailed) {
+			// Recording the version would be refused and would report that
+			// refusal as a Notice, which says nothing about what the user was
+			// doing. The unreadable settings file is reported on its own.
+			return;
+		}
+		const current = this.manifest.version;
+		const announced = this.settings.lastReleaseNotesVersion;
+		if (announced === current) {
+			return;
+		}
+		this.settings.lastReleaseNotesVersion = current;
+		// Through the shared save rather than a bare saveData, although this
+		// writes one bookkeeping field. Everything else saveSettings does is
+		// either wanted here or costs nothing: the backup stays in step with
+		// data.json, the player refresh returns without touching an embed when
+		// no player setting moved, and the profile-note read is idempotent and
+		// swallows its own failures. A second persistence path would drift
+		// from this one the first time the shared one gains a step.
+		void this.saveSettings().catch((error: unknown) => {
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} Recording the announced version failed:`,
+				error,
+			);
+		});
+		if (announced === '' || !this.settings.showReleaseNotes) {
+			return;
+		}
+		const notes = releaseNotesSince(announced);
+		if (notes === '') {
+			// An update with nothing on record to say about it: a build from
+			// between releases, or a version so old its entry has since been
+			// pruned. A dialog saying nothing is worse than no dialog.
+			return;
+		}
+		new ReleaseNotesModal(this.app, notes).open();
 	}
 
 	/**
@@ -890,6 +1089,7 @@ export default class AudioRecorderPlugin extends Plugin {
 			getSettings: () => this.settings,
 			saveSettings: () => this.saveSettings(),
 			recording: this.recordingManager,
+			quickNote: this.quickNotes,
 			openMarkerModal: (kind) => {
 				this.openMarkerModal(kind);
 			},
@@ -1173,6 +1373,26 @@ export default class AudioRecorderPlugin extends Plugin {
 	 */
 	private renderStatusBar(): void {
 		const active = this.activeBackgroundTranscription();
+		// A dictation is what the user is doing right now, so it outranks a
+		// playback and a minimized transcription the way a recording does.
+		if (
+			this.recordingStatus === RecordingStatus.Idle &&
+			this.quickNoteStatus !== RecordingStatus.Idle
+		) {
+			renderQuickNoteStatusBar(
+				this.statusBarItem,
+				this.quickNoteStatus,
+				this.quickNoteProgress,
+				() => {
+					void this.quickNotes.toggle();
+				},
+				{
+					showStats: this.settings.showRecordingStats,
+					showMeter: this.settings.showInputLevelMeter,
+				},
+			);
+			return;
+		}
 		if (
 			this.recordingStatus === RecordingStatus.Idle &&
 			this.playbackState
@@ -1265,6 +1485,44 @@ export default class AudioRecorderPlugin extends Plugin {
 	}
 
 	/**
+	 * Shows what the quick note is doing: on its ribbon button, in the status
+	 * bar the way a recording shows itself there, and, where there is no
+	 * status bar, in a notice that follows each stage.
+	 * @param status - Recording while it captures, Saving while processed
+	 * @param progress - The processing stage, while it is processed
+	 */
+	private handleQuickNoteStatus(
+		status: RecordingStatus,
+		progress: SaveProgress | undefined,
+	): void {
+		if (this.unloaded) {
+			return;
+		}
+		this.quickNoteStatus = status;
+		this.quickNoteProgress = progress;
+		updateRibbonIcon(this.quickNoteRibbonEl, status, QUICK_NOTE_GLYPHS);
+		this.renderStatusBar();
+		if (!isRecordingBannerSupported()) {
+			return;
+		}
+		if (status === RecordingStatus.Idle) {
+			this.quickNoteNotice?.hide();
+			this.quickNoteNotice = null;
+			return;
+		}
+		// A processing stage always arrives with its progress, and recording
+		// is the one state that carries none.
+		const message = progress
+			? progress.description
+			: 'Quick note: recording. Run the command again to stop.';
+		if (this.quickNoteNotice) {
+			this.quickNoteNotice.setMessage(message);
+		} else {
+			this.quickNoteNotice = new Notice(message, 0);
+		}
+	}
+
+	/**
 	 * Renders the status bar and the mobile banner for a status change.
 	 * @param status - New recording status
 	 * @param saveProgress - Optional save progress for the saving state
@@ -1311,6 +1569,10 @@ export default class AudioRecorderPlugin extends Plugin {
 			status !== RecordingStatus.Recording &&
 			status !== RecordingStatus.Paused
 		) {
+			const dictation = this.quickNotes.liveStats();
+			if (dictation) {
+				updateRecordingLiveStats(this.statusBarItem, dictation);
+			}
 			return;
 		}
 		const elapsedMs = this.recordingManager.getElapsedMs();

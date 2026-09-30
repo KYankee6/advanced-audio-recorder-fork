@@ -9,6 +9,7 @@ This is an end-to-end workflow that ties several features together: you record a
     - [3. Choose where the transcript goes](#3-choose-where-the-transcript-goes)
     - [4. Turn on LLM post-processing with the Summarize task](#4-turn-on-llm-post-processing-with-the-summarize-task)
     - [5. (Optional) Multiple microphones](#5-optional-multiple-microphones)
+- [Recording a call with its remote participants](#recording-a-call-with-its-remote-participants)
 - [Steps: run the workflow](#steps-run-the-workflow)
 - [Cleanup tips for noisy rooms and large files](#cleanup-tips-for-noisy-rooms-and-large-files)
 - [End-to-end checklist](#end-to-end-checklist)
@@ -57,20 +58,21 @@ You only do this part once. All of it lives under **Settings > Advanced Audio Re
 
 ### 1. Pick a diarizing engine
 
-Diarization (splitting the transcript by speaker) is what makes a meeting transcript readable. Only two engines support it:
+Diarization (splitting the transcript by speaker) is what makes a meeting transcript readable. Three engines support it:
 
-| Engine            | Diarization | Max file | Cost                        | Best for                                        | Set-up guide                       |
-| ----------------- | ----------- | -------- | --------------------------- | ----------------------------------------------- | ---------------------------------- |
-| **Deepgram**      | Yes         | 2 GB     | Free credit, then pay-as-go | Consistent speaker labels across the whole file | [Deepgram](deepgram-api-key.md)    |
-| **Google Gemini** | Yes         | 2 GB     | Free tier, then paid        | Long recordings and reuse for LLM summarization | [Google Gemini](gemini-api-key.md) |
+| Engine              | Diarization | Max file | Cost                        | Best for                                                | Set-up guide                       |
+| ------------------- | ----------- | -------- | --------------------------- | ------------------------------------------------------- | ---------------------------------- |
+| **Deepgram**        | Yes         | 2 GB     | Free credit, then pay-as-go | Consistent speaker labels across the whole file         | [Deepgram](deepgram-api-key.md)    |
+| **Google Gemini**   | Yes         | 2 GB     | Free tier, then paid        | Long recordings and reuse for LLM summarization         | [Google Gemini](gemini-api-key.md) |
+| **Mistral Voxtral** | Yes         | 1 GB     | Paid, about $0.003 a minute | Up to three hours in one request, one speaker numbering | [Mistral](mistral-api-key.md)      |
 
 The **Whisper API** engine (OpenAI / Groq) and **local whisper.cpp** do **not** diarize - the **Speaker diarization** toggle is greyed out for them. Use them only if you do not need speaker labels.
 
-For a multi-hour meeting, Deepgram sends the whole file in one request, so speaker numbering stays consistent end to end. Gemini also accepts up to 2 GB, but a recording longer than **15 minutes** is split into parts and stitched back together; a diarized split **resets speaker numbering** at each part boundary, which the plugin surfaces as a warning. If consistent labels across a very long meeting matter most, prefer Deepgram. See [Speakers and diarization](../transcription.md#speakers-and-diarization) for the full behavior.
+For a multi-hour meeting, Deepgram sends the whole file in one request, so speaker numbering stays consistent end to end. Gemini also accepts up to 2 GB, but a recording longer than **15 minutes** is split into parts and stitched back together, and a diarized split **resets speaker numbering** at each part boundary, which the plugin surfaces as a warning. Mistral Voxtral also sends the recording whole, up to three hours or 1 GB, so its speaker numbering holds end to end as Deepgram's does. If consistent labels across a very long meeting matter most, prefer Deepgram or Voxtral. See [Speakers and diarization](../transcription.md#speakers-and-diarization) for the full behavior.
 
-1. Set **Transcription engine** to **Deepgram** or **Google Gemini**.
-2. Paste the **API key** for that engine (follow the linked guide above).
-3. Leave **Model** on its default (`nova-3` for Deepgram, `gemini-3.5-flash` for Gemini) unless you have a reason to change it.
+1. Set **Transcription engine** to **Deepgram**, **Google Gemini**, or **Mistral Voxtral**.
+2. Open **Engines**, then that engine's page, and paste the **API key** for it (follow the linked guide above).
+3. Leave **Model** on its default (`nova-3` for Deepgram, `gemini-3.5-flash` for Gemini, `voxtral-mini-latest` for Voxtral) unless you have a reason to change it.
 
 ### 2. Enable speaker diarization
 
@@ -85,8 +87,7 @@ When diarization is on, several speaker-related options unlock further down in t
 | **Merge speaker turns** | On              | Combines consecutive lines from the same speaker into one block. |
 | **Speaker format**      | `**{speaker}**` | The template that renders each label (bold by default).          |
 
-![Speaker diarization toggle turned on in the Transcription settings, with the speaker-related output options visible below](../images/settings-transcription-diarization.png)
-_Figure: With diarization on, the Include speakers, Merge speaker turns, and Speaker format options become available._
+![Speaker diarization turned on in the Transcription settings, with Deepgram selected as the engine](../images/settings-transcription-diarization.png)
 
 ### 3. Choose where the transcript goes
 
@@ -99,9 +100,9 @@ A meeting note benefits from having both the readable transcript **in the note**
 | **Note and file**                        | Both - the readable transcript in the note **and** a sidecar file. |
 | **Save to file and link it in the note** | A sidecar file, with a link to it inserted in the note.            |
 
-For meetings, **Note and file** is the most useful: you read the transcript inline, and you keep a structured sidecar (default **JSON**, which preserves speaker labels and word-level timings) for search or later reuse. Choose **Save to file and link it in the note** instead if you want to keep the note short and link out to the transcript.
+For meetings, **Note and file** is the most useful: you read the transcript inline, and you keep a structured sidecar (default **JSON**, which preserves speaker labels and the segment timings) for search or later reuse. Choose **Save to file and link it in the note** instead if you want to keep the note short and link out to the transcript.
 
-When the destination is anything other than note-only, a **File format** option appears: **JSON** (default - full data including speakers and word timings), **SubRip .srt**, **WebVTT .vtt**, or **Plain text .txt**. Keep **JSON** for meetings so nothing is lost.
+When the destination is anything other than note-only, a **File format** option appears: **JSON** (default - full data including speakers and timings), **SubRip .srt**, **WebVTT .vtt**, or **Plain text .txt**. Keep **JSON** for meetings so nothing is lost. Per-word timings reach that file only where the engine returns them: Deepgram does on every run, the Whisper API does when **Word-level timestamps** is on, and Gemini, Mistral Voxtral, and local whisper.cpp never do.
 
 The in-note formatting defaults are already tuned for meetings:
 
@@ -119,16 +120,26 @@ See [Transcription](../transcription.md) for the complete output reference, and 
 This is what turns a wall of transcript text into a usable summary with action items. In the **LLM post-processing** subsection (inside Transcription):
 
 1. Turn on **Enable LLM post-processing**.
-2. Set **Task** to **Summarize**. (The other tasks are **Clean up**, which fixes punctuation and formatting, and **Custom**, which sends your own instruction verbatim.)
-3. Each task carries its own editable prompt. The **Summarize** prompt ships with a sensible default and has the transcript language appended automatically - edit it if you want a specific structure (for example, "list decisions, then action items with owners").
-4. Pick its **Post-processing engine**: **OpenAI**, **Anthropic (Claude)**, or **Google Gemini**, and set that service up on its page under **Engines**.
+2. Set **Task** to **Summarize**. (The other tasks are **Clean up**, which fixes punctuation and formatting, **Translate**, which rewrites the transcript in the language named in **Translate into**, and **Custom**, which sends your own instruction verbatim.)
+3. Each task carries its own catalogue of named prompt profiles. The **Summarize** catalogue ships with a **Default** profile and has the transcript language appended automatically - edit that profile, or add one of your own, if you want a specific structure (for example, "list decisions, then action items with owners").
+4. Pick its **Post-processing engine**: **OpenAI**, **Anthropic (Claude)**, **Google Gemini**, **Mistral**, or **DeepSeek**, and set that service up on its page under **Engines**.
 5. Confirm the **API key**. The plugin shares keys where the same vendor does both jobs:
-    - **OpenAI** LLM reuses your **Whisper API** key.
-    - **Gemini** LLM reuses your **Gemini** key.
+    - **OpenAI** LLM reuses the **OpenAI API key** the Whisper API engine reads.
+    - **Gemini** LLM reuses your **Google Gemini API key**.
+    - **Mistral** LLM reuses the **Mistral API key** the Voxtral engine reads.
     - **Anthropic (Claude)** has its **own** dedicated key - see [Anthropic / Claude](anthropic-api-key.md).
+    - **DeepSeek** has its **own** dedicated key, entered on the **DeepSeek** page.
 6. Leave **Max output tokens** at its default of **4096** (range 512-200000) unless your summaries are getting cut off, in which case raise it.
 
-Provider model defaults are **OpenAI** `gpt-5.6-sol`, **Anthropic** `claude-opus-4-8`, and **Gemini** `gemini-3.5-flash`. The **LLM base URL** auto-switches to the provider default unless you have typed a custom one.
+Each provider starts on its own default model:
+
+- **OpenAI** runs `gpt-5.6-sol` by default.
+- **Anthropic** runs `claude-opus-4-8` by default.
+- **Gemini** runs `gemini-3.5-flash` by default.
+- **Mistral** runs `mistral-medium-latest` by default.
+- **DeepSeek** runs `deepseek-flash` by default.
+
+Each account keeps its own **Base URL**, so switching the engine reads that account's field rather than rewriting a shared one, and a custom URL you typed for a gateway survives every switch.
 
 A practical pairing: use **Gemini** for both transcription and the summary so one key covers everything, or **Deepgram** for the diarized transcript plus **OpenAI** or **Anthropic** for the summary. See [LLM post-processing](../llm-post-processing.md) for the full reference.
 
@@ -143,6 +154,37 @@ If everyone in the room has their own microphone, or you want a clean track per 
 For a transcribe-and-diarize workflow, **Single file** is usually the right choice: the engine sees one timeline and can diarize across it. Multi-file output gives you per-speaker isolation but you would transcribe each file separately. See [Multi-track recording](../multi-track-recording.md) for the details.
 
 > Multi-track is optional. A single good room or lapel microphone, plus diarization, already produces a per-speaker transcript.
+
+---
+
+## Recording a call with its remote participants
+
+Everything above assumes the meeting is in the room with you. A Zoom, Teams or Meet call is different: your microphone carries your voice, and every other participant arrives as **playback**, on an output device. The plugin records input devices, so a call recorded with nothing else configured holds one side of the conversation.
+
+On **Windows** the plugin can capture the system output directly, and the shortest way to ask for it is the **Include system audio** switch under **Settings > Advanced Audio Recorder > Audio input**. Turn it on and the next recording holds two tracks - your microphone as the rows beside the switch describe it, and the call - mixed into one file. There is nothing to install and nothing else to set: the second track has no device to pick, no filtering to choose and no place in the mix to set, which is what makes it one switch rather than a page. It is off on mobile, which cannot open two captures at once, and the row says so itself where the build cannot be granted the output, which is every platform but Windows.
+
+Turning on multi-track recording hands those answers back to you, and the switch stands down for it: set **Track N source** to **System audio (this computer)** for the track that records the machine's own output, and its device dropdown disappears because such a track names no device. Go that way when two mixed tracks are not what the meeting needs - a third microphone in the room, one file per side, or a level correction on the remote participants.
+
+Everywhere else, and on Windows if you prefer it, route that output back into the machine as an **input** and record it on a second track. Any such input appears in the device dropdowns like a microphone, marked `(system audio)`.
+
+**Windows.** Some Realtek drivers already publish **Stereo Mix**. It is disabled by default: open **Sound settings > More sound settings > Recording**, right-click in the list, choose **Show Disabled Devices**, then enable it. Many newer laptops do not ship it at all, in which case install [VB-CABLE](https://vb-audio.com/Cable/) or VoiceMeeter, both free. Note the naming: with VB-CABLE, applications play into **CABLE Input** and the recorder captures **CABLE Output**. Plain VB-CABLE also takes the audio away from your speakers while it is routed, so you stop hearing the call; VoiceMeeter exists precisely to route and monitor at the same time and is worth the extra ten minutes for a call you have to take part in.
+
+**macOS.** Install [BlackHole](https://existential.audio/blackhole/) (free). To hear the call while recording it, open **Audio MIDI Setup**, create a **Multi-Output Device** containing both your normal output and BlackHole, and select that as the system output. Record from **BlackHole 2ch**. Loopback by Rogue Amoeba does the same with a friendlier interface.
+
+**Linux.** Nothing to install. PipeWire and PulseAudio publish a `Monitor of ...` source for every output, and it is already in the device list.
+
+With the routing in place, configure the session under **Settings > Advanced Audio Recorder > Multi-track recording**. A loopback input is an input device like any other, so the **Include system audio** switch has nothing to do with this route and stays off:
+
+1. Turn on **Enable multi-track recording** and set **Maximum tracks** to 2.
+2. Leave **Track 1 source** on **Input device** and set **Track 1 input** to your microphone.
+3. For track 2, either set **Track 2 source** to **System audio (this computer)** on Windows, or leave it on **Input device** and set **Track 2 input** to the loopback input.
+4. On the loopback-input route, set **Track 2 processing** to **Raw**. This is the step that decides whether the recording is usable: the browser's echo cancellation treats the far end of a call as this machine's own speaker output and suppresses it, so a loopback track captured with the default filtering fades in and out or goes quiet altogether. Leave **Track 1 processing** on **Same as global settings** or set it to **Voice**, since your own microphone does want that filtering.
+5. Leave **Output mode** on **Single file**, so both sides land on one timeline and the transcription engine can diarize across everyone.
+6. If the remote side comes in louder or quieter than your own voice, correct it with **Track 2 level** rather than at the operating system.
+
+![Track 1 input set to a microphone with Track 1 processing on Voice, and Track 2 input set to a Stereo Mix loopback marked "(system audio)" with Track 2 processing on Raw](../images/settings-multi-track-processing.png)
+
+From there the workflow is the one above: record, and the diarized transcript plus the LLM summary cover both sides of the call. The **System info** report (**Settings > Diagnostics**) lists any loopback input it found, which is the quickest way to confirm the routing before a meeting rather than after it.
 
 ---
 
@@ -174,7 +216,6 @@ Once the setup above is done, each meeting is fast.
     Start the recording playing and then click any later timestamp to jump playback straight to that line, so you can skim the transcript and drop into the audio wherever something needs a second listen. While it plays, the **status-bar playback controls** appear at the bottom-right of the window, letting you pause, skip 10 seconds either way, stop, adjust volume, or drop a marker or chapter without scrolling back to the embed. The controls dismiss when you stop playback. See [Playback controls in the status bar](../audio-player.md#playback-controls-in-the-status-bar).
 
     ![Status-bar playback controls shown while reviewing a meeting recording, with skip, play or pause, stop, volume, marker, chapter, and the elapsed over total time](../images/status-bar-playback-controls.png)
-    _Figure: reviewing the transcript, the status-bar controls drive playback while you read and click timestamps._
 
 8. **Put real names on the speakers.** With **Rename speakers** enabled (Settings > Transcription), right-click the recording and choose **Rename speakers**. Each speaker is one row: its label, a name field, and a **▶ button that plays where that speaker first talks** - so you identify `Speaker 2` by listening rather than by remembering, which matters because the dialog is covering the transcript. Press ▶ to hear the opening turn, ■ (the same button) to stop, type the name, and press **Apply**: every line in the note and in the transcript files is rewritten, and re-transcribing this recording later re-applies the names automatically.
 
@@ -206,7 +247,7 @@ Use this once to confirm your setup, then just record.
 **One-time setup**
 
 1. Settings > Transcription > **Enable transcription** = On.
-2. **Transcription engine** = Deepgram or Google Gemini, with a valid **API key**.
+2. **Transcription engine** = Deepgram, Google Gemini, or Mistral Voxtral, with a valid **API key** on its page under **Engines**.
 3. **Speaker diarization** = On.
 4. **Transcript output > Destination** = **Note and file** (File format **JSON**).
 5. **LLM post-processing** = On, **Task** = **Summarize**, its **Post-processing engine** chosen, and that engine's **API key** confirmed under **Engines**.
@@ -230,10 +271,11 @@ Use this once to confirm your setup, then just record.
 
 ## Troubleshooting
 
-- **The Speaker diarization toggle is greyed out** - the selected engine cannot diarize. Switch **Transcription engine** to **Deepgram** or **Google Gemini**.
+- **The Speaker diarization toggle is greyed out** - the selected engine cannot diarize. Switch **Transcription engine** to **Deepgram**, **Google Gemini**, or **Mistral Voxtral**.
 - **Speaker numbers reset partway through a long Gemini transcript** - Gemini splits recordings longer than 15 minutes into parts, and diarized splits restart speaker numbering at each boundary (surfaced as a warning). Use **Deepgram** for consistent labels across a long meeting.
+- **One person came back as two speakers** - diarization split them across labels (a changed microphone position, a long pause, a phone joining). In **Rename speakers**, type the same name into both rows and confirm the merge: their lines become one speaker everywhere. Do it before anyone edits the note, since merged lines read identically afterwards and only a new transcription can separate them again.
 - **The play buttons in Rename speakers are greyed out** - that recording's roster predates speaker samples. Transcribe it once more with **Speaker diarization** on and the samples appear.
-- **No summary appeared** - confirm **Enable LLM post-processing** is on, **Task** is **Summarize**, and the chosen engine's **API key** is set on its page under **Engines** (the OpenAI and Gemini pages are shared with transcription; Anthropic keeps its own).
+- **No summary appeared** - confirm **Enable LLM post-processing** is on, **Task** is **Summarize**, and the chosen engine's **API key** is set on its page under **Engines** (the OpenAI, Gemini, and Mistral accounts are shared with transcription, while Anthropic and DeepSeek keep their own).
 - **The summary is cut off** - raise **Max output tokens** (default 4096), up to whatever your model allows; the service refuses a larger budget and names its own maximum.
 - **Transcription accuracy is poor in a noisy room** - run [Clean up audio](../audio-cleanup.md) first, or move to a better microphone.
 - **The transcription dialog closed and the job stopped** - closing the dialog cancels the job. Use **Minimize** to keep it running in the status bar.

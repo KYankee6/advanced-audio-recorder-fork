@@ -121,6 +121,17 @@ export const DESKTOP_FLUSH_THRESHOLD_BYTES = 50 * 1024 * 1024;
 /** Common MIME type prefix for audio formats. */
 export const MIME_TYPE_AUDIO_PREFIX = 'audio/';
 
+/**
+ * Container every path that decodes audio before sending it produces: 16 kHz
+ * mono WAV. Built from {@link FORMAT_WAV} rather than spelled out, because the
+ * type declared for those bytes, the extension they are renamed to, and the
+ * entries that say an endpoint takes them all have to agree, and a second
+ * spelling is where they stop agreeing. The format keys are already the
+ * extensions a recording is written under, so the registry key is that one
+ * spelling and no separate extension constant is needed.
+ */
+export const WAV_MIME = `${MIME_TYPE_AUDIO_PREFIX}${FORMAT_WAV}`;
+
 /** Default audio sample rate in Hz. */
 export const DEFAULT_SAMPLE_RATE = 44100;
 
@@ -276,6 +287,15 @@ export const PLAYER_ICONS = {
 	previousChapter: 'chevron-first',
 	nextChapter: 'chevron-last',
 	chapterLoop: 'repeat-1',
+	/**
+	 * Live cleanup of the playing audio. The older `mic-2` name rather than
+	 * the `mic-vocal` it was renamed to in Lucide 0.395, because Obsidian
+	 * pins its icon set and only reached 0.446 in 1.7, while the manifest
+	 * supports 1.6.6. Both names draw the same glyph, and the old one still
+	 * resolves in current Lucide, so this is the name that resolves on every
+	 * version the plugin runs on.
+	 */
+	voiceBoost: 'mic-2',
 	searchMarkers: 'search',
 	speed: 'gauge',
 	copyLink: 'link',
@@ -396,6 +416,7 @@ export const TRANSCRIPTION_PROVIDER_IDS = {
 	LOCAL_WHISPER: 'local-whisper',
 	DEEPGRAM: 'deepgram',
 	GEMINI: 'gemini',
+	VOXTRAL: 'voxtral',
 } as const;
 
 /**
@@ -542,6 +563,106 @@ export const DEEPGRAM_MODELS_DOC_URL =
 export const DEEPGRAM_MAX_REQUEST_BYTES = 2 * 1024 * 1024 * 1024;
 
 /**
+ * Default Mistral API base URL. One account serves both jobs: the Voxtral
+ * speech models behind `/audio/transcriptions` and the Mistral chat models
+ * behind `/chat/completions`, which is why the version segment is part of the
+ * value rather than of each path.
+ */
+export const DEFAULT_MISTRAL_BASE_URL = 'https://api.mistral.ai/v1';
+
+/** Default Mistral Voxtral transcription model id. */
+export const DEFAULT_VOXTRAL_MODEL = 'voxtral-mini-latest';
+
+/**
+ * Seed Voxtral model ids for the model picker on first run; the list is
+ * user-editable. Only the batch transcription catalogue is seeded: the
+ * realtime model takes a streaming connection and refuses `diarize`, so it
+ * belongs to live transcription rather than to this engine. See
+ * {@link VOXTRAL_MODELS_DOC_URL} for the authoritative, current list.
+ */
+export const VOXTRAL_MODEL_SUGGESTIONS = ['voxtral-mini-latest'];
+
+/** Authoritative, current list of Mistral audio models. */
+export const VOXTRAL_MODELS_DOC_URL =
+	'https://docs.mistral.ai/studio/audio/speech_to_text/offline_transcription';
+
+/**
+ * Hard per-request upload ceiling for Voxtral, in bytes (1 GB, the size the
+ * Mistral audio guide documents per audio file). Voxtral transcribes about
+ * three hours in one request with consistent speaker numbering, so a recording
+ * under this is sent in one piece instead of chunked.
+ *
+ * Mistral's general "Known limitations" page still says 500 MB and 60 minutes.
+ * That page describes the endpoint before Voxtral Transcribe 2, which is the
+ * model this engine runs and whose own page states three hours per request, so
+ * the smaller pair is read as the stale one rather than as a second limit.
+ * Worth re-checking against a live key: being wrong here costs a full upload
+ * before the endpoint refuses it.
+ */
+export const VOXTRAL_MAX_REQUEST_BYTES = 1024 * 1024 * 1024;
+
+/**
+ * Hard per-request duration ceiling for Voxtral, in seconds: three hours, the
+ * length the Voxtral Transcribe 2 announcement documents for one request.
+ *
+ * Deliberately separate from `VOXTRAL_CAPABILITIES.maxRequestSeconds`, which is
+ * the cap `audioPrep` splits on and has to stay unbounded. That cap is proven
+ * through a byte proxy ({@link MIN_AUDIO_BYTES_PER_SEC}), so stating three
+ * hours there would clear only files under about 10.8 MB and send every longer
+ * recording down the decode path, which is the whole-file upload this engine is
+ * chosen for. This ceiling is proven exactly instead, against the decoded
+ * sample count, which is the first moment the real duration is known and still
+ * early enough to refuse locally rather than after uploading several hundred
+ * megabytes the endpoint then declines.
+ */
+export const VOXTRAL_MAX_REQUEST_SECONDS = 3 * 60 * 60;
+
+/**
+ * Floor for the Voxtral transcription request timeout, in milliseconds.
+ *
+ * The same reason Gemini has one ({@link GEMINI_GENERATE_MIN_TIMEOUT_MS}) and a
+ * stronger one: the size-scaled budget funds the transfer, so whatever is left
+ * for the engine to think is the floor underneath it, and this is the engine
+ * that sends a whole recording of up to {@link VOXTRAL_MAX_REQUEST_SECONDS} in
+ * a single request. On the bare {@link TRANSCRIBE_REQUEST_TIMEOUT_MS} floor a
+ * three-hour mp3 - uploaded untouched, so its byte count says nothing about its
+ * length - was given three and a half minutes in total and a healthy request
+ * was aborted while the endpoint was still transcribing. The user's request
+ * timeout still caps this, so the floor only stops the deadline falling below
+ * it.
+ */
+export const VOXTRAL_TRANSCRIBE_MIN_TIMEOUT_MS = 20 * 60_000;
+
+/**
+ * File extensions the Voxtral transcription endpoint reads directly. Any other
+ * container, notably the `webm` this plugin records by default, is decoded to
+ * 16 kHz mono WAV before upload.
+ *
+ * Extensions rather than MIME types, because that is the unit Mistral publishes
+ * the list in and a MIME set cannot express it. This plugin's format registry
+ * maps both `m4a` and `mp4` onto one `audio/mp4`, and `mp4` is absent from
+ * Mistral's list while being the container iOS falls back to recording in, so a
+ * MIME gate sent every mobile recording untouched as a container the endpoint
+ * never claimed to read. Mistral's own client derives a part's container from
+ * its filename, so the name is what the endpoint is told either way.
+ *
+ * Taken from the Voxtral Transcribe 2 announcement, which is the model this
+ * engine runs and which lists exactly these five alongside the 1 GB ceiling
+ * above. Mistral's older "Known limitations" page lists a different five,
+ * dropping m4a and adding webm. Worth settling with one request against a live
+ * key, because webm is what this plugin records by default: if the endpoint does
+ * read it, every default recording stops paying a full decode and the WAV
+ * expansion that goes with it.
+ */
+export const VOXTRAL_AUDIO_EXTENSIONS: ReadonlySet<string> = new Set([
+	FORMAT_MP3,
+	FORMAT_WAV,
+	FORMAT_M4A,
+	FORMAT_FLAC,
+	FORMAT_OGG,
+]);
+
+/**
  * Default Gemini API base URL. The provider appends `/v1beta/...` for model
  * and file operations and `/upload/v1beta/files` for the File API upload, so
  * this value carries no version segment.
@@ -594,7 +715,7 @@ export const GEMINI_MAX_REQUEST_BYTES = 2 * 1024 * 1024 * 1024;
  * can record) is decoded to 16 kHz mono WAV before upload.
  */
 export const GEMINI_AUDIO_MIME_TYPES: ReadonlySet<string> = new Set([
-	`${MIME_TYPE_AUDIO_PREFIX}wav`,
+	WAV_MIME,
 	`${MIME_TYPE_AUDIO_PREFIX}mpeg`,
 	`${MIME_TYPE_AUDIO_PREFIX}aac`,
 	`${MIME_TYPE_AUDIO_PREFIX}ogg`,
@@ -723,6 +844,8 @@ export const LLM_PROVIDER_IDS = {
 	OPENAI_COMPATIBLE: 'openai-compatible',
 	ANTHROPIC: 'anthropic',
 	GEMINI: 'gemini',
+	MISTRAL: 'mistral',
+	DEEPSEEK: 'deepseek',
 } as const;
 
 /**
@@ -747,6 +870,28 @@ export const ANTHROPIC_API_VERSION = '2023-06-01';
  * it is priced for the most demanding work rather than everyday cleanup.
  */
 export const DEFAULT_LLM_ANTHROPIC_MODEL = 'claude-opus-4-8';
+
+/**
+ * Default Mistral chat model for transcript post-processing. Mistral Medium is
+ * the vendor's balanced tier and the one its own documentation reaches for
+ * first, so it leads rather than the cheaper Small or the Large above it.
+ */
+export const DEFAULT_LLM_MISTRAL_MODEL = 'mistral-medium-latest';
+
+/**
+ * Default endpoint of the DeepSeek account. The vendor serves the OpenAI Chat
+ * Completions wire format at the bare host, so `/chat/completions` is appended
+ * to it directly, with no `/v1` segment. DeepSeek does not transcribe, so this
+ * account backs a chat catalogue only.
+ */
+export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+
+/**
+ * Default DeepSeek chat model for transcript post-processing. The Flash tier
+ * is the vendor's everyday model and costs a fraction of the Pro tier, which is
+ * more than enough for punctuation, cleanup and a summary.
+ */
+export const DEFAULT_LLM_DEEPSEEK_MODEL = 'deepseek-flash';
 
 /** Minimum configurable transcription chunk size in megabytes. */
 export const MIN_TRANSCRIBE_CHUNK_MB = 1;
@@ -824,6 +969,32 @@ export const LLM_ANTHROPIC_MODEL_SUGGESTIONS = [
 	'claude-fable-5',
 ];
 
+/**
+ * Seed Mistral chat model ids for the LLM model picker on first run; the list
+ * is user-editable. The three `-latest` aliases track the current generation
+ * of each tier, so a catalog refresh at the vendor reaches the user without a
+ * plugin release. See {@link MISTRAL_MODELS_DOC_URL} for the current list.
+ */
+export const LLM_MISTRAL_MODEL_SUGGESTIONS = [
+	'mistral-medium-latest',
+	'mistral-small-latest',
+	'mistral-large-latest',
+];
+
+/**
+ * Seed DeepSeek chat model ids for the LLM model picker on first run; the list
+ * is user-editable. `deepseek-flash` (DeepSeek-V4.1-Flash) is the everyday
+ * pick and `deepseek-v4-pro` the dearer one for harder prompts. The retired
+ * `deepseek-chat` and `deepseek-reasoner` (July 24, 2026) and
+ * `deepseek-v4-flash` (September 10, 2026) are left out, because an id the
+ * vendor no longer serves answers with an error instead of a completion. See
+ * {@link DEEPSEEK_MODELS_DOC_URL} for the current list.
+ */
+export const LLM_DEEPSEEK_MODEL_SUGGESTIONS = [
+	'deepseek-flash',
+	'deepseek-v4-pro',
+];
+
 /** Where to find the OpenAI model catalog. */
 export const OPENAI_MODELS_DOC_URL =
 	'https://developers.openai.com/api/docs/models';
@@ -831,6 +1002,14 @@ export const OPENAI_MODELS_DOC_URL =
 /** Where to find the Anthropic (Claude) model catalog. */
 export const ANTHROPIC_MODELS_DOC_URL =
 	'https://platform.claude.com/docs/en/about-claude/models/overview';
+
+/** Where to find the Mistral chat model catalog. */
+export const MISTRAL_MODELS_DOC_URL =
+	'https://docs.mistral.ai/getting-started/models/models_overview';
+
+/** Where to find the DeepSeek model catalog and its rates. */
+export const DEEPSEEK_MODELS_DOC_URL =
+	'https://api-docs.deepseek.com/quick_start/pricing';
 
 /**
  * Default editable system prompt for the cleanup task. The language clause is
@@ -1174,6 +1353,47 @@ export const CLEANUP_SEGMENT_SECONDS = 120;
  */
 export const CLEANUP_WARMUP_SECONDS = 3;
 
+/**
+ * Level-tracking window, in seconds, of the noise gate. The offline pass
+ * measures the signal over this window, and the live chain reads its analyser
+ * on the same cadence, so a gate tuned in the cleanup dialog responds at the
+ * pace it was tuned at when it runs during playback.
+ */
+export const CLEANUP_GATE_WINDOW_SECONDS = 0.02;
+
+/**
+ * Hysteresis, in dB, of the noise gate: the level has to fall this far below
+ * the threshold before the gate closes, so it cannot chatter on and off around
+ * it. Shared by the offline gate and the live chain, which is what keeps the
+ * two from gating differently on the same recording.
+ */
+export const CLEANUP_GATE_HYSTERESIS_DB = 6;
+
+/** Gate open ramp time constant, in milliseconds (fast, to avoid clipping onsets). */
+export const CLEANUP_GATE_ATTACK_MS = 5;
+
+/** Gate close ramp time constant, in milliseconds (slower, to avoid clicks). */
+export const CLEANUP_GATE_RELEASE_MS = 80;
+
+/**
+ * Threshold, in dBFS, of the fixed speech-leveling compressor curve. Fixed
+ * rather than configurable: only the makeup gain is a setting, and the live
+ * chain has to compress exactly as the offline pass does.
+ */
+export const CLEANUP_LEVELING_THRESHOLD_DB = -24;
+
+/** Knee width, in dB, of the fixed speech-leveling compressor curve. */
+export const CLEANUP_LEVELING_KNEE_DB = 30;
+
+/** Compression ratio of the fixed speech-leveling compressor curve. */
+export const CLEANUP_LEVELING_RATIO = 12;
+
+/** Attack time, in seconds, of the fixed speech-leveling compressor curve. */
+export const CLEANUP_LEVELING_ATTACK_SECONDS = 0.003;
+
+/** Release time, in seconds, of the fixed speech-leveling compressor curve. */
+export const CLEANUP_LEVELING_RELEASE_SECONDS = 0.25;
+
 // Actions
 
 /** Menu section identifier grouping all plugin context-menu items. */
@@ -1186,6 +1406,7 @@ export const AAR_MENU_SECTION = 'aar';
  */
 export const COMMAND_IDS = {
 	startStopRecording: 'start-stop-recording',
+	startStopQuickNote: 'start-stop-quick-note',
 	pauseResumeRecording: 'pause-resume-recording',
 	addRecordingMarker: 'add-recording-marker',
 	addRecordingBookmark: 'add-recording-bookmark',
@@ -1197,6 +1418,8 @@ export const COMMAND_IDS = {
 	cleanupAudio: 'clean-up-audio',
 	transcribeAudio: 'transcribe-active-audio',
 	renameSpeakers: 'rename-transcript-speakers',
+	splitTranscriptSelection: 'split-transcript-selection-to-speaker',
+	mergeTranscriptLines: 'merge-transcript-lines',
 	generateChapters: 'generate-chapters-from-transcript',
 	deleteRecording: 'delete-recording',
 	togglePlayback: 'toggle-playback',
@@ -1215,4 +1438,5 @@ export const COMMAND_IDS = {
 	exportChapters: 'export-chapters-and-markers',
 	addPlaybackBookmark: 'add-playback-bookmark',
 	addPlaybackChapter: 'add-playback-chapter',
+	showReleaseNotes: 'show-release-notes',
 } as const;

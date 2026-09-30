@@ -18,6 +18,7 @@ import type {
 	TranscriptionProvider,
 } from 'src/transcription/providers/TranscriptionProvider';
 import type { WhisperResult } from 'src/transcription/providers/whisperResponse';
+import { TRANSCRIPTION_ENGINES } from 'src/transcription/providers/engines';
 
 /**
  * An engine with no request limits that takes the original container. This is
@@ -33,6 +34,7 @@ export const UNLIMITED_CAPABILITIES: ProviderCapabilities = {
 	wordTimestamps: 'requested',
 	biasChannel: 'prompt',
 	supportsSpeechTranslation: false,
+	readsLanguageHint: true,
 };
 
 /** What a suite varies about the provider it transcribes through. */
@@ -82,7 +84,7 @@ export function fakeProvider(options: FakeProviderOptions = {}): FakeProvider {
 			: (): Promise<WhisperResult> => Promise.resolve(transcribe);
 	return {
 		id,
-		label: 'Fake',
+		label: TRANSCRIPTION_ENGINES[id].label,
 		requiresNetwork: false,
 		capabilities: { ...UNLIMITED_CAPABILITIES, ...capabilities },
 		transcribe: jest.fn(implementation),
@@ -95,3 +97,18 @@ export const NO_DIARIZATION: Partial<ProviderCapabilities> = {
 	supportsDictionary: false,
 	wordTimestamps: 'none',
 };
+
+/**
+ * The options a run carries, with only what a test cares about differing.
+ *
+ * Both switches are off, which is the shape of a plain transcription: a suite
+ * asking for diarization or word timing says so, and every other suite is
+ * spared restating the defaults.
+ * @param overrides - The fields this run varies
+ * @returns Options ready to hand to a provider's `transcribe`
+ */
+export function transcribeOptions(
+	overrides: Partial<TranscribeOptions> = {},
+): TranscribeOptions {
+	return { diarize: false, wordTimestamps: false, ...overrides };
+}

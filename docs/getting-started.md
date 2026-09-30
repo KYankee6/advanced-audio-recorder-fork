@@ -6,6 +6,7 @@ This guide takes you from zero to your first recording with **Advanced Audio Rec
 - [Installation](#installation)
     - [From Community Plugins](#from-community-plugins)
     - [Manual installation](#manual-installation)
+- [After an update](#after-an-update)
 - [Granting microphone access](#granting-microphone-access)
 - [Your first recording](#your-first-recording)
 - [Playing it back](#playing-it-back)
@@ -43,6 +44,10 @@ You can install the plugin from Obsidian's built-in plugin browser (recommended)
 
 Once enabled, a **microphone icon** appears in the left ribbon and a new **Advanced Audio Recorder** entry appears in your settings.
 
+> **Turn Obsidian's own Audio recorder off.** Obsidian ships a core plugin of that name which puts its own microphone button in the same ribbon, and two recording buttons side by side are easy to confuse. Switch it off under **Settings > Core plugins**. To keep the core plugin and drop only its button, right-click an empty part of the ribbon strip instead and untick its entry, which leaves its commands in the palette. Hovering this plugin's button always names it in full, **Advanced Audio Recorder: start/stop recording**.
+
+![The Audio recorder core plugin with its toggle switched off in Settings, Core plugins](images/settings-core-audio-recorder-off.png)
+
 ### Manual installation
 
 Use this method to install a specific release or a build you compiled yourself.
@@ -58,6 +63,18 @@ Use this method to install a specific release or a build you compiled yourself.
 The `.obsidian` folder is hidden by default; enable hidden files in your file manager if you cannot see it.
 
 Enabling the plugin opens its settings tab straight away (Obsidian 1.7.2 and later), which is where the documentation link and the three settings a first recording needs - input device, output format, and save folder - live.
+
+---
+
+## After an update
+
+The first time a new version of the plugin runs, a **What's new** dialog opens with everything that changed since the version you were on, newest release first. Each release is headed by its version number, and the text is the release note written for it, so an upgrade that skipped three releases reads as three sections rather than one.
+
+![The What's new dialog after an update, showing the release headed by its version number above the notes written for it, with the dialog title above the notes and the Close button below them, both staying in place while the notes scroll between them](images/modal-release-notes.png)
+
+The dialog appears once per version. It never appears on a fresh install, and it never appears the first time you run a version of the plugin that has this dialog at all: in both cases there is nothing on record to compare against, so the plugin remembers the version you are on and shows the notes from the next update onwards.
+
+To stop it appearing, turn **Release notes** off at the top of **Settings > Advanced Audio Recorder**. The version is remembered either way, so turning the dialog back on shows the next update rather than every release you missed while it was off. The notes stay reachable at any time through the **Advanced Audio Recorder: Show what's new** command, which shows every release the installed version carries notes for, and the full history is on the [releases page](https://github.com/akhmialeuski/advanced-audio-recorder/releases).
 
 ---
 
@@ -86,14 +103,13 @@ With the plugin enabled and your microphone allowed, record your first clip:
 1. Open or create a note where you want the audio link to land, and place your cursor there.
 2. Click the **microphone icon** in the left ribbon, or open the command palette (`Ctrl/Cmd + P`) and run **Start/stop recording**. The plugin assigns no default hotkeys; you can add your own under **Settings > Hotkeys**.
 3. Speak (or play audio) into your microphone. While recording:
-    - The **ribbon icon** changes from a microphone to an active recording indicator.
+    - The **ribbon icon** turns red and pulses while the session is live.
     - The **status bar** shows `Recording...` with **Pause** and **Stop** buttons. If you enabled **Markers and chapters**, an **Add marker** button appears too.
     - When enabled, a live **input level meter** and **recording stats** (elapsed time and total recorded size) appear in the status bar.
 4. To pause, click **Pause** in the status bar (or run **Pause/resume recording**); the status bar then reads `Recording paused`. Click **Resume** to continue.
 5. To finish, click the ribbon icon again (or run **Start/stop recording** again), or click **Stop** in the status bar.
 
 ![Status bar reading Recording with Pause, Stop, and Add marker buttons and a live input level meter](images/status-bar-recording.png)
-_Figure: The status bar while a recording is in progress._
 
 When you stop, the plugin flushes the audio buffers, assembles the final file, writes it to your save location, and inserts an embed link (`![[filename.ext]]`) into the active note. For longer recordings, saving can take a moment; the status bar shows a progress bar that walks through `Saving... > Flushing buffers... > Assembling audio... > Writing file... > Cleaning up... > Saved`, and the ribbon switches to a **save** icon while saving runs.
 
@@ -108,13 +124,12 @@ The inserted embed link plays your recording directly in the note. Out of the bo
 For a richer experience, turn on the **Enhanced audio player**:
 
 1. Open **Settings > Advanced Audio Recorder > Audio player**.
-2. Enable **Enhanced audio player**. Two extra options appear: **Show waveform** (on by default) and **Markers and chapters** (on by default).
-3. Reopen or re-render the note. The embed is now a waveform player with playback-speed presets, ±10-second skip, volume and mute, a loop toggle, an elapsed/total time display, and a copy-timestamp-link button.
+2. Enable **Enhanced audio player**. Three rows appear below it: **Show waveform** (on by default), **Markers and chapters** (on by default), and **Skip step**, the number of seconds the skip controls move by.
+3. Reopen or re-render the note. The embed is now a waveform player with playback-speed presets, skip buttons moving by the **Skip step** (10 seconds unless you change it), volume and mute, a loop toggle, an elapsed/total time display, and a copy-timestamp-link button.
 
 The enhanced player applies to **audio-only** files. Files that carry a video track, and any file the app cannot decode, keep Obsidian's built-in player. See [Audio player](audio-player.md) for the full control reference, markers and chapters, and timecode links.
 
 ![Enhanced audio player showing the waveform seek bar and the transport controls](images/player-overview.png)
-_Figure: The enhanced audio player with its waveform seek bar._
 
 ---
 

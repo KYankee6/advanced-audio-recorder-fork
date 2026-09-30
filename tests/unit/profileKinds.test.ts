@@ -11,7 +11,7 @@ import { PROFILE_KINDS } from 'src/settings/profileKinds';
 import {
 	createProfile,
 	freeProfileName,
-	PROFILE_KIND_IDS,
+	ProfileKindId,
 	NEW_PROFILE_NAME,
 } from 'src/settings/profiles';
 
@@ -32,12 +32,15 @@ describe.each(PROFILE_KINDS.map((kind) => [kind.heading, kind] as const))(
 		it('derives its control keys from its id, so two kinds cannot collide', () => {
 			expect(kind.selectionKey).toBe(`profile.${kind.id}.selection`);
 			expect(kind.bodyKey).toBe(`profile.${kind.id}.body`);
+			expect(kind.choiceKey).toBe(`profile.${kind.id}.choice`);
+			expect(kind.noteKey).toBe(`profile.${kind.id}.note`);
 		});
 
 		it('says what a profile holds, and says so when it holds nothing', () => {
 			const empty = createProfile(kind.id, 'Empty');
 
-			expect(kind.summary(empty)).toMatch(/^No /);
+			// Lowercase, because the entry reads it after where the text is from.
+			expect(kind.summary(empty)).toMatch(/^no /);
 			expect(
 				kind.summary(createProfile(kind.id, 'Full', 'Alex')),
 			).not.toBe(kind.summary(empty));
@@ -84,7 +87,7 @@ describe('the profile kinds together', () => {
 		// A kind the model knows but the settings never describe is a stored
 		// profile with no editor; the reverse is a catalogue over nothing.
 		expect(PROFILE_KINDS.map((kind) => kind.id).sort()).toEqual(
-			[...PROFILE_KIND_IDS].sort(),
+			Object.values(ProfileKindId).sort(),
 		);
 	});
 
@@ -101,6 +104,26 @@ describe('the profile kinds together', () => {
 			expect(two).toMatch(/^2 /);
 		},
 	);
+
+	describe('a list-shaped body kept in a note', () => {
+		const noteBody = '# Team\n- Alex\n- Bob\n\n1. Cleo';
+
+		it.each([
+			['dictionary', '3 terms'],
+			['participants', '3 names'],
+		] as const)(
+			'counts the %s entries the run would use, not the markup',
+			(kindId, summary) => {
+				const kind = PROFILE_KINDS.find(
+					(candidate) => candidate.id === kindId,
+				);
+
+				expect(
+					kind?.summary(createProfile(kindId, 'Note', noteBody)),
+				).toBe(summary);
+			},
+		);
+	});
 
 	it('gives each post-processing task a catalogue of its own', () => {
 		const promptKinds = PROFILE_KINDS.filter(

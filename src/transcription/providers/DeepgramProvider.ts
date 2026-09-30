@@ -9,9 +9,11 @@
  */
 
 import { TRANSCRIPTION_PROVIDER_IDS } from '../../constants';
+import { EngineLabel } from '../../providers/providers';
 import {
 	DEEPGRAM_KEYWORDS_LIMIT,
 	deepgramBiasMechanism,
+	DeepgramBiasMechanism,
 	termsWithinDeepgramKeyterm,
 } from '../dictionaryBias';
 import { dedupeTerms } from '../dictionary';
@@ -45,7 +47,7 @@ export interface DeepgramConfig {
  */
 export class DeepgramProvider implements TranscriptionProvider {
 	readonly id = TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM;
-	readonly label = 'Deepgram';
+	readonly label = EngineLabel.Deepgram;
 	readonly requiresNetwork = true;
 	readonly capabilities: ProviderCapabilities = DEEPGRAM_CAPABILITIES;
 
@@ -90,7 +92,7 @@ export class DeepgramProvider implements TranscriptionProvider {
 			const mechanism = deepgramBiasMechanism(this.config.model);
 			if (mechanism) {
 				const terms =
-					mechanism === 'keyterm'
+					mechanism === DeepgramBiasMechanism.Keyterm
 						? termsWithinDeepgramKeyterm(biasTerms)
 						: biasTerms.slice(0, DEEPGRAM_KEYWORDS_LIMIT);
 				for (const term of terms) {

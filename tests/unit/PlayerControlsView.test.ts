@@ -51,6 +51,7 @@ function makeCallbacks(): jest.Mocked<PlayerControlsCallbacks> {
 		onPreviousChapter: jest.fn(),
 		onNextChapter: jest.fn(),
 		onToggleChapterLoop: jest.fn(),
+		onToggleVoiceBoost: jest.fn(),
 		onCopyTimestampLink: jest.fn(),
 	};
 }
@@ -79,6 +80,10 @@ function createSut(state: Partial<PlayerControlsState> = {}): Sut {
 		markersEnabled: true,
 		skipSeconds: 10,
 		chapterLoop: false,
+		// Web Audio is present in both apps the plugin ships to, so the row is
+		// rendered with the live chain offered unless a test says otherwise
+		voiceBoostAvailable: true,
+		voiceBoost: false,
 		...state,
 	});
 	return { view, container, callbacks };
@@ -92,6 +97,7 @@ const FIXED_CONTROLS = [
 	'Playback speed',
 	'Mute / unmute',
 	'Volume',
+	'Voice boost',
 	'Loop',
 ];
 
@@ -115,6 +121,34 @@ describe('the controls the row offers', () => {
 		]);
 	});
 
+	// Play / pause is the one control the stylesheet draws as the primary
+	// action, and it can only do so while the button carries its class.
+	it('marks play / pause as the primary control', () => {
+		const { container } = createSut();
+
+		expect(control(container, 'Play / pause').matches(PLAYER.play)).toBe(
+			true,
+		);
+		expect(allEls(container, PLAYER.play)).toHaveLength(1);
+	});
+
+	// The app's slider class fills the track up to a ratio, which has to follow
+	// the value, or the fill stays wherever the mount left it.
+	it('fills the volume track up to the thumb as it moves', () => {
+		const { container } = createSut({ volume: 0.4 });
+		const volume = el<HTMLInputElement>(container, PLAYER.volume);
+		expect(volume.style.getPropertyValue('--slider-fill-ratio')).toBe(
+			'0.4',
+		);
+
+		volume.value = '0.7';
+		volume.dispatchEvent(new Event('input', { bubbles: true }));
+
+		expect(volume.style.getPropertyValue('--slider-fill-ratio')).toBe(
+			'0.7',
+		);
+	});
+
 	// Adding markers edits the note, which reading view does not allow; the
 	// four marker controls are the ones a markerless render leaves out.
 	it('leaves the marker controls out when markers are off', () => {
@@ -124,6 +158,14 @@ describe('the controls the row offers', () => {
 			...FIXED_CONTROLS,
 			'Copy timestamp link',
 		]);
+	});
+
+	// The chain is built from Web Audio nodes, so a runtime without them gets
+	// no control rather than one that could not process anything.
+	it('leaves the voice boost out where the runtime cannot host it', () => {
+		const { container } = createSut({ voiceBoostAvailable: false });
+
+		expect(maybeControl(container, 'Voice boost')).toBeNull();
 	});
 
 	// Adding a marker writes to the note, so reading view hides exactly
@@ -234,6 +276,17 @@ describe('what each control reports', () => {
 		expect(callbacks.onNextChapter).toHaveBeenCalledTimes(1);
 	});
 
+	// The chain is one switch for the whole plugin, so what is engaged is the
+	// player's answer rather than this button's own click.
+	it('reports a voice boost press without deciding anything itself', () => {
+		const { container, callbacks } = createSut();
+
+		control(container, 'Voice boost').click();
+
+		expect(callbacks.onToggleVoiceBoost).toHaveBeenCalledTimes(1);
+		expect(control(container, 'Voice boost')).not.toBeActiveControl();
+	});
+
 	it('reports a request to copy the timestamp link', () => {
 		const { container, callbacks } = createSut();
 
@@ -282,6 +335,14 @@ describe('a row mounted over audio that is already running', () => {
 		const { container } = createSut({ loop: true });
 
 		expect(control(container, 'Loop')).toBeActiveControl();
+	});
+
+	// A player rendered later in the session plays through a chain that is
+	// already running, and a lit control on a processed recording is what says so.
+	it('shows the voice boost the plugin is already running', () => {
+		const { container } = createSut({ voiceBoost: true });
+
+		expect(control(container, 'Voice boost')).toBeActiveControl();
 	});
 
 	it('shows the muted state the audio was already in', () => {
@@ -353,6 +414,32 @@ describe('reflecting a change the player made', () => {
 
 		expect(control(container, 'Mute / unmute')).not.toBeActiveControl();
 	});
+
+	it('marks the voice boost once the player reports it engaged', () => {
+		const { view, container } = createSut({ voiceBoost: false });
+
+		view.setVoiceBoost(true);
+
+		expect(control(container, 'Voice boost')).toBeActiveControl();
+	});
+
+	it('clears the voice boost mark once the player reports it released', () => {
+		const { view, container } = createSut({ voiceBoost: true });
+
+		view.setVoiceBoost(false);
+
+		expect(control(container, 'Voice boost')).not.toBeActiveControl();
+	});
+
+	// The registry tells every player of the new state, and one rendered where
+	// the runtime cannot host the chain has no button to repaint.
+	it('ignores a voice boost state reported to a row without the control', () => {
+		const { view } = createSut({ voiceBoostAvailable: false });
+
+		expect(() => {
+			view.setVoiceBoost(true);
+		}).not.toThrow();
+	});
 });
 
 // The player owns the row's lifetime and can report a state change while no
@@ -374,6 +461,10 @@ describe('a state change reported before anything is mounted', () => {
 		{
 			name: 'a chapter loop',
 			act: (v: PlayerControlsView) => v.setChapterLoop(true),
+		},
+		{
+			name: 'a voice boost',
+			act: (v: PlayerControlsView) => v.setVoiceBoost(true),
 		},
 	])('ignores $name', ({ act }) => {
 		const view = unmounted();
@@ -442,6 +533,26 @@ describe('reporting a toggle state to assistive technology', () => {
 		view.setMuted(false);
 
 		expect(pressed(container, 'Mute / unmute')).toBe('false');
+	});
+
+	it('reports the voice boost the plugin is already running', () => {
+		const { container } = createSut({ voiceBoost: true });
+
+		expect(pressed(container, 'Voice boost')).toBe('true');
+	});
+
+	it('reports the voice boost as off when it is', () => {
+		const { container } = createSut({ voiceBoost: false });
+
+		expect(pressed(container, 'Voice boost')).toBe('false');
+	});
+
+	it('reports the voice boost state the player moved to', () => {
+		const { view, container } = createSut({ voiceBoost: false });
+
+		view.setVoiceBoost(true);
+
+		expect(pressed(container, 'Voice boost')).toBe('true');
 	});
 
 	// The play button had the gap in its stronger form: it carried its state

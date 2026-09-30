@@ -18,7 +18,11 @@ import {
 	mergeSettingsAsync,
 } from 'src/settings/settingsSerialization';
 import type { Profile } from 'src/settings/profiles';
-import { MODEL_SEED_GENERATION } from 'src/constants';
+import {
+	MODEL_SEED_GENERATION,
+	LLM_PROVIDER_IDS,
+	TRANSCRIPTION_PROVIDER_IDS,
+} from 'src/constants';
 import { fullyPopulatedSettings } from '../helpers/settingsFixtures';
 import { partial } from '../helpers/doubles';
 import { mediaDevice } from '../helpers/mediaMocks';
@@ -48,6 +52,10 @@ describe('Settings', () => {
 			{ key: 'outputMode', value: 'single' },
 			{ key: 'useSourceNamesForTracks', value: true },
 			{ key: 'debug', value: false },
+			{ key: 'showReleaseNotes', value: true },
+			// Nothing has been announced in a fresh config, which is what
+			// keeps a first install from being greeted with the history.
+			{ key: 'lastReleaseNotesVersion', value: '' },
 			{ key: 'insertAtOriginalPosition', value: false },
 			{ key: 'autoSplitEnabled', value: false },
 			{ key: 'splitChunkMinutes', value: 15 },
@@ -298,9 +306,9 @@ describe('Settings', () => {
 		it('migrates a legacy llmApiKey/llmModel onto the Anthropic vendor fields', () => {
 			// Pre-rework data held one flat key and model for the stored provider.
 			const legacy = partial<AudioRecorderSettingsInput>({
-				llmProvider: 'anthropic',
-				chaptersLlmProvider: 'anthropic',
-				advancedLlmProvider: 'anthropic',
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+				chaptersLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+				advancedLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 				llmApiKey: 'ak-legacy',
 				llmModel: 'claude-legacy',
 			});
@@ -317,7 +325,7 @@ describe('Settings', () => {
 
 		it('maps a legacy OpenAI llmApiKey onto the shared Whisper/OpenAI key', () => {
 			const result = mergeSettings({
-				llmProvider: 'openai-compatible',
+				llmProvider: LLM_PROVIDER_IDS.OPENAI_COMPATIBLE,
 				llmApiKey: 'sk-legacy',
 				llmModel: 'gpt-legacy',
 			});
@@ -328,7 +336,7 @@ describe('Settings', () => {
 
 		it('does not overwrite a vendor key that is already set', () => {
 			const result = mergeSettings({
-				llmProvider: 'gemini',
+				llmProvider: LLM_PROVIDER_IDS.GEMINI,
 				geminiApiKey: 'gm-current',
 				llmApiKey: 'gm-legacy',
 			});
@@ -398,7 +406,7 @@ describe('Settings', () => {
 
 		it('ignores a non-string legacy LLM key and model instead of throwing', () => {
 			const corrupt = partial<AudioRecorderSettingsInput>({
-				llmProvider: 'gemini',
+				llmProvider: LLM_PROVIDER_IDS.GEMINI,
 				llmApiKey: 42,
 				llmModel: { nested: true },
 			});
@@ -441,7 +449,7 @@ describe('Settings', () => {
 			const corrupt = partial<AudioRecorderSettingsInput>({
 				llmProvider: 'no-such-vendor',
 				chaptersLlmProvider: 'also-gone',
-				advancedLlmProvider: 'gemini',
+				advancedLlmProvider: LLM_PROVIDER_IDS.GEMINI,
 			});
 
 			const result = mergeSettings(corrupt);
@@ -451,7 +459,7 @@ describe('Settings', () => {
 				DEFAULT_SETTINGS.chaptersLlmProvider,
 			);
 			// A claimed id is a deliberate choice and is left alone.
-			expect(result.advancedLlmProvider).toBe('gemini');
+			expect(result.advancedLlmProvider).toBe(LLM_PROVIDER_IDS.GEMINI);
 		});
 
 		it('points transcription at an engine that exists', () => {
@@ -471,11 +479,64 @@ describe('Settings', () => {
 			// behaviour it had by starting all three on the one it named - but
 			// only where that one names an engine at all.
 			const result = mergeSettings({
-				llmProvider: 'anthropic',
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 			});
 
-			expect(result.chaptersLlmProvider).toBe('anthropic');
-			expect(result.advancedLlmProvider).toBe('anthropic');
+			expect(result.chaptersLlmProvider).toBe(LLM_PROVIDER_IDS.ANTHROPIC);
+			expect(result.advancedLlmProvider).toBe(LLM_PROVIDER_IDS.ANTHROPIC);
+		});
+
+		it('starts quick notes on the engine post-processing already uses', () => {
+			// Quick notes arrived after the engine choice was split per job. A
+			// stored config holds a key for the post-processing engine and may
+			// hold none for the shipped default, so the new job starts there.
+			const upgraded = mergeSettings({
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+			});
+			const chosen = mergeSettings({
+				llmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
+				quickNoteLlmProvider: LLM_PROVIDER_IDS.GEMINI,
+			});
+
+			expect(upgraded.quickNoteLlmProvider).toBe(
+				LLM_PROVIDER_IDS.ANTHROPIC,
+			);
+			expect(chosen.quickNoteLlmProvider).toBe(LLM_PROVIDER_IDS.GEMINI);
+		});
+
+		it('starts quick notes on the engine recordings are transcribed with', () => {
+			// Dictation used to be transcribed by the recordings' engine. A
+			// stored config holds a key for that one and may hold none for the
+			// shipped default, so dictation keeps the engine it had.
+			const upgraded = mergeSettings({
+				transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+			});
+			const chosen = mergeSettings({
+				transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+				quickNoteTranscriptionProvider:
+					TRANSCRIPTION_PROVIDER_IDS.GEMINI,
+			});
+			const gone = mergeSettings({
+				quickNoteTranscriptionProvider:
+					'gone' as AudioRecorderSettings['quickNoteTranscriptionProvider'],
+			});
+
+			expect(upgraded.quickNoteTranscriptionProvider).toBe(
+				TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
+			);
+			expect(chosen.quickNoteTranscriptionProvider).toBe(
+				TRANSCRIPTION_PROVIDER_IDS.GEMINI,
+			);
+			expect(gone.quickNoteTranscriptionProvider).toBe(
+				DEFAULT_SETTINGS.quickNoteTranscriptionProvider,
+			);
+		});
+
+		it('keeps quick notes off, with no profile selected, on a fresh install', () => {
+			const fresh = mergeSettings({});
+
+			expect(fresh.quickNotesEnabled).toBe(false);
+			expect(fresh.selectedProfileIds.quickNote).toBe('');
 		});
 
 		it('enables the advanced master switch on upgrade for a config with a dictionary profile', () => {

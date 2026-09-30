@@ -1,10 +1,10 @@
 {
 	"coverage": {
 		"total": {
-			"statements": 98.64,
-			"branches": 94.01,
-			"functions": 98.56,
-			"lines": 98.65
+			"statements": 98.81,
+			"branches": 95.05,
+			"functions": 98.78,
+			"lines": 98.81
 		},
 		"files": {
 			"src/constants.ts": {
@@ -20,10 +20,10 @@
 				"lines": 100
 			},
 			"src/main.ts": {
-				"statements": 99.44,
-				"branches": 96.92,
-				"functions": 98.86,
-				"lines": 99.71
+				"statements": 99.54,
+				"branches": 97.56,
+				"functions": 99.03,
+				"lines": 99.77
 			},
 			"src/types.ts": {
 				"statements": 100,
@@ -32,6 +32,12 @@
 				"lines": 100
 			},
 			"src/actions/fileActions.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/actions/helpActions.ts": {
 				"statements": 100,
 				"branches": 100,
 				"functions": 100,
@@ -67,17 +73,23 @@
 				"functions": 100,
 				"lines": 100
 			},
-			"src/audio/AudioCapabilityDetector.ts": {
-				"statements": 95.95,
-				"branches": 92.3,
+			"src/actions/transcriptActions.ts": {
+				"statements": 100,
+				"branches": 100,
 				"functions": 100,
-				"lines": 95.95
+				"lines": 100
+			},
+			"src/audio/AudioCapabilityDetector.ts": {
+				"statements": 97.88,
+				"branches": 96,
+				"functions": 100,
+				"lines": 97.87
 			},
 			"src/audio/AudioEncoder.ts": {
-				"statements": 93.54,
-				"branches": 82.14,
+				"statements": 93.65,
+				"branches": 85.29,
 				"functions": 100,
-				"lines": 93.54
+				"lines": 93.65
 			},
 			"src/audio/AudioFormatConverter.ts": {
 				"statements": 100,
@@ -99,13 +111,13 @@
 			},
 			"src/audio/WavEncoder.ts": {
 				"statements": 100,
-				"branches": 91.66,
+				"branches": 96.55,
 				"functions": 100,
 				"lines": 100
 			},
 			"src/audio/downmix.ts": {
 				"statements": 100,
-				"branches": 91.66,
+				"branches": 100,
 				"functions": 100,
 				"lines": 100
 			},
@@ -134,10 +146,10 @@
 				"lines": 100
 			},
 			"src/chapters/AutoChapterService.ts": {
-				"statements": 98.61,
-				"branches": 89.36,
-				"functions": 90.9,
-				"lines": 98.59
+				"statements": 98.7,
+				"branches": 88.88,
+				"functions": 90,
+				"lines": 98.68
 			},
 			"src/chapters/chapterExport.ts": {
 				"statements": 100,
@@ -152,10 +164,10 @@
 				"lines": 98.98
 			},
 			"src/chapters/transcriptSources.ts": {
-				"statements": 91.25,
+				"statements": 91.3,
 				"branches": 81.73,
 				"functions": 95.65,
-				"lines": 91.62
+				"lines": 91.66
 			},
 			"src/cleanup/AudioProcessingModal.ts": {
 				"statements": 100,
@@ -164,14 +176,14 @@
 				"lines": 100
 			},
 			"src/cleanup/AudioProcessingService.ts": {
-				"statements": 99.19,
-				"branches": 83.72,
+				"statements": 100,
+				"branches": 88.37,
 				"functions": 90.9,
-				"lines": 99.15
+				"lines": 100
 			},
 			"src/cleanup/audioDsp.ts": {
 				"statements": 100,
-				"branches": 88.88,
+				"branches": 90.9,
 				"functions": 100,
 				"lines": 100
 			},
@@ -200,10 +212,10 @@
 				"lines": 100
 			},
 			"src/markers/markerModel.ts": {
-				"statements": 98.83,
+				"statements": 98.87,
 				"branches": 98.57,
 				"functions": 100,
-				"lines": 98.76
+				"lines": 98.79
 			},
 			"src/obsidian/cliCommands.ts": {
 				"statements": 100,
@@ -235,6 +247,12 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/platform/hostProcess.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/platform/platformKind.ts": {
 				"statements": 100,
 				"branches": 100,
@@ -242,16 +260,16 @@
 				"lines": 100
 			},
 			"src/player/AudioPlayer.ts": {
-				"statements": 98.94,
-				"branches": 91.4,
-				"functions": 98.46,
-				"lines": 98.94
+				"statements": 98.96,
+				"branches": 92.42,
+				"functions": 98.49,
+				"lines": 98.96
 			},
 			"src/player/AudioPlayerRegistry.ts": {
-				"statements": 99.52,
-				"branches": 95.18,
-				"functions": 98.24,
-				"lines": 99.51
+				"statements": 99.58,
+				"branches": 96.55,
+				"functions": 98.46,
+				"lines": 99.58
 			},
 			"src/player/DetachedPlayback.ts": {
 				"statements": 93.5,
@@ -266,10 +284,16 @@
 				"lines": 100
 			},
 			"src/player/EnhancedPlayerRegistrar.ts": {
-				"statements": 98.88,
+				"statements": 98.89,
 				"branches": 93.84,
 				"functions": 97.43,
-				"lines": 98.88
+				"lines": 98.89
+			},
+			"src/player/LiveVoiceBoost.ts": {
+				"statements": 93.16,
+				"branches": 92.5,
+				"functions": 91.66,
+				"lines": 93.16
 			},
 			"src/player/MediaEmbedShell.ts": {
 				"statements": 100,
@@ -296,10 +320,10 @@
 				"lines": 100
 			},
 			"src/player/PlayerMarkerController.ts": {
-				"statements": 96.05,
-				"branches": 85.18,
+				"statements": 97.36,
+				"branches": 88,
 				"functions": 100,
-				"lines": 95.83
+				"lines": 97.22
 			},
 			"src/player/SeekController.ts": {
 				"statements": 100,
@@ -398,22 +422,28 @@
 				"lines": 98.5
 			},
 			"src/providers/providers.ts": {
-				"statements": 97,
+				"statements": 97.6,
 				"branches": 83.33,
-				"functions": 98.43,
-				"lines": 96.87
+				"functions": 98.86,
+				"lines": 97.52
+			},
+			"src/quicknotes/QuickNoteController.ts": {
+				"statements": 100,
+				"branches": 94.87,
+				"functions": 100,
+				"lines": 100
 			},
 			"src/recording/AudioSplitter.ts": {
-				"statements": 99.09,
-				"branches": 97.36,
+				"statements": 99.13,
+				"branches": 97.67,
 				"functions": 100,
-				"lines": 99.05
+				"lines": 99.09
 			},
 			"src/recording/AudioStreamHandler.ts": {
-				"statements": 99.27,
-				"branches": 94.73,
+				"statements": 99.46,
+				"branches": 96.92,
 				"functions": 100,
-				"lines": 99.24
+				"lines": 99.45
 			},
 			"src/recording/CaptureLossWatcher.ts": {
 				"statements": 100,
@@ -434,14 +464,20 @@
 				"lines": 100
 			},
 			"src/recording/ConversionService.ts": {
-				"statements": 94.52,
+				"statements": 94.59,
 				"branches": 82.05,
 				"functions": 100,
-				"lines": 94.52
+				"lines": 94.59
 			},
 			"src/recording/InputLevelMonitor.ts": {
 				"statements": 100,
-				"branches": 92.85,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/recording/MemoryRecorder.ts": {
+				"statements": 100,
+				"branches": 93.93,
 				"functions": 100,
 				"lines": 100
 			},
@@ -452,10 +488,10 @@
 				"lines": 100
 			},
 			"src/recording/NoteInserter.ts": {
-				"statements": 98.24,
-				"branches": 80.55,
+				"statements": 98.36,
+				"branches": 79.06,
 				"functions": 100,
-				"lines": 98.21
+				"lines": 98.33
 			},
 			"src/recording/PartRotationController.ts": {
 				"statements": 97.1,
@@ -464,10 +500,10 @@
 				"lines": 97.1
 			},
 			"src/recording/PcmStreamRecorder.ts": {
-				"statements": 97.53,
-				"branches": 93.1,
+				"statements": 97.59,
+				"branches": 93.33,
 				"functions": 92.85,
-				"lines": 97.53
+				"lines": 97.59
 			},
 			"src/recording/RecorderFactory.ts": {
 				"statements": 100,
@@ -477,15 +513,15 @@
 			},
 			"src/recording/RecordingFinalizer.ts": {
 				"statements": 96.39,
-				"branches": 87.5,
+				"branches": 89.58,
 				"functions": 94.28,
 				"lines": 96.39
 			},
 			"src/recording/RecordingManager.ts": {
-				"statements": 98.99,
-				"branches": 92.59,
+				"statements": 99.07,
+				"branches": 93.44,
 				"functions": 100,
-				"lines": 98.98
+				"lines": 99.06
 			},
 			"src/recording/RecordingMarkerCoordinator.ts": {
 				"statements": 100,
@@ -494,10 +530,10 @@
 				"lines": 100
 			},
 			"src/recording/RecoveryService.ts": {
-				"statements": 98.91,
+				"statements": 98.92,
 				"branches": 95.65,
 				"functions": 100,
-				"lines": 98.9
+				"lines": 98.91
 			},
 			"src/recording/SessionJournal.ts": {
 				"statements": 98.38,
@@ -509,19 +545,13 @@
 				"statements": 99.3,
 				"branches": 97.14,
 				"functions": 100,
-				"lines": 99.27
+				"lines": 99.28
 			},
 			"src/recording/StreamingMixer.ts": {
-				"statements": 98.8,
-				"branches": 82.6,
+				"statements": 98.82,
+				"branches": 83.56,
 				"functions": 100,
-				"lines": 98.74
-			},
-			"src/recording/TestRecorder.ts": {
-				"statements": 100,
-				"branches": 88.88,
-				"functions": 100,
-				"lines": 100
+				"lines": 98.76
 			},
 			"src/recording/TrackWriteQueue.ts": {
 				"statements": 100,
@@ -537,7 +567,7 @@
 			},
 			"src/recording/mixMath.ts": {
 				"statements": 100,
-				"branches": 84.61,
+				"branches": 86.36,
 				"functions": 100,
 				"lines": 100
 			},
@@ -559,11 +589,35 @@
 				"functions": 100,
 				"lines": 96.49
 			},
+			"src/recording/systemAudioSupport.ts": {
+				"statements": 98.7,
+				"branches": 94.44,
+				"functions": 100,
+				"lines": 98.7
+			},
+			"src/release/releaseNotes.ts": {
+				"statements": 100,
+				"branches": 66.66,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/settings/ProfileNoteStore.ts": {
+				"statements": 100,
+				"branches": 97.5,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/settings/ProfileTextSource.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/settings/SettingsTab.ts": {
-				"statements": 94.47,
-				"branches": 90.19,
-				"functions": 88.88,
-				"lines": 94.42
+				"statements": 96.05,
+				"branches": 94.19,
+				"functions": 91.26,
+				"lines": 96.02
 			},
 			"src/settings/controlValues.ts": {
 				"statements": 100,
@@ -578,10 +632,10 @@
 				"lines": 100
 			},
 			"src/settings/legacySettingsRenderer.ts": {
-				"statements": 97.43,
-				"branches": 89.39,
+				"statements": 97.45,
+				"branches": 89.62,
 				"functions": 100,
-				"lines": 97.42
+				"lines": 97.44
 			},
 			"src/settings/modelList.ts": {
 				"statements": 100,
@@ -608,10 +662,10 @@
 				"lines": 100
 			},
 			"src/settings/settingControls.ts": {
-				"statements": 99.17,
-				"branches": 97.72,
+				"statements": 99.48,
+				"branches": 98.76,
 				"functions": 100,
-				"lines": 99.17
+				"lines": 99.47
 			},
 			"src/settings/settingsAttention.ts": {
 				"statements": 100,
@@ -638,10 +692,10 @@
 				"lines": 100
 			},
 			"src/settings/settingsSerialization.ts": {
-				"statements": 98.97,
-				"branches": 95.58,
+				"statements": 99,
+				"branches": 95.89,
 				"functions": 100,
-				"lines": 98.97
+				"lines": 99
 			},
 			"src/settings/settingsValidation.ts": {
 				"statements": 100,
@@ -735,13 +789,19 @@
 			},
 			"src/settings/sections/profilesSection.ts": {
 				"statements": 100,
-				"branches": 75,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/settings/sections/quickNotesSection.ts": {
+				"statements": 100,
+				"branches": 100,
 				"functions": 100,
 				"lines": 100
 			},
 			"src/settings/sections/rowHelpers.ts": {
 				"statements": 100,
-				"branches": 91.66,
+				"branches": 92.85,
 				"functions": 100,
 				"lines": 100
 			},
@@ -753,7 +813,7 @@
 			},
 			"src/settings/sections/transcriptionAdvancedSection.ts": {
 				"statements": 100,
-				"branches": 83.33,
+				"branches": 100,
 				"functions": 100,
 				"lines": 100
 			},
@@ -770,22 +830,28 @@
 				"lines": 100
 			},
 			"src/sidecar/RecordingSidecarStore.ts": {
-				"statements": 98.5,
-				"branches": 96.15,
-				"functions": 98.38,
-				"lines": 98.46
+				"statements": 98.57,
+				"branches": 96.25,
+				"functions": 98.48,
+				"lines": 98.52
 			},
 			"src/sidecar/recordingSidecarModel.ts": {
-				"statements": 97.66,
-				"branches": 96.23,
+				"statements": 97.67,
+				"branches": 96.8,
 				"functions": 100,
-				"lines": 97.66
+				"lines": 97.67
 			},
 			"src/speakers/applySpeakerRenames.ts": {
-				"statements": 94.04,
+				"statements": 94.11,
 				"branches": 88.57,
 				"functions": 100,
-				"lines": 93.9
+				"lines": 93.97
+			},
+			"src/speakers/applyTranscriptEdit.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
 			},
 			"src/speakers/participantRoster.ts": {
 				"statements": 100,
@@ -801,7 +867,13 @@
 			},
 			"src/speakers/speakerRename.ts": {
 				"statements": 100,
-				"branches": 97.05,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/speakers/transcriptMerge.ts": {
+				"statements": 100,
+				"branches": 100,
 				"functions": 100,
 				"lines": 100
 			},
@@ -811,11 +883,23 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/speakers/transcriptRows.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/speakers/transcriptSplit.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/transcription/QueueCoordinator.ts": {
-				"statements": 97.56,
+				"statements": 97.61,
 				"branches": 85.71,
 				"functions": 90.9,
-				"lines": 97.56
+				"lines": 97.61
 			},
 			"src/transcription/QueueRunner.ts": {
 				"statements": 100,
@@ -836,16 +920,16 @@
 				"lines": 100
 			},
 			"src/transcription/TranscriptionQueue.ts": {
-				"statements": 98.23,
+				"statements": 98.24,
 				"branches": 98,
 				"functions": 97.29,
-				"lines": 98.16
+				"lines": 98.18
 			},
 			"src/transcription/TranscriptionService.ts": {
-				"statements": 99.59,
-				"branches": 98.63,
+				"statements": 99.65,
+				"branches": 98.8,
 				"functions": 100,
-				"lines": 99.59
+				"lines": 99.65
 			},
 			"src/transcription/api.ts": {
 				"statements": 100,
@@ -891,7 +975,7 @@
 			},
 			"src/transcription/httpClient.ts": {
 				"statements": 100,
-				"branches": 99.07,
+				"branches": 99.08,
 				"functions": 100,
 				"lines": 100
 			},
@@ -913,6 +997,12 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/transcription/recordedTranscript.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/transcription/retryFailedParts.ts": {
 				"statements": 100,
 				"branches": 100,
@@ -920,14 +1010,14 @@
 				"lines": 100
 			},
 			"src/transcription/runTranscription.ts": {
-				"statements": 97.77,
+				"statements": 97.82,
 				"branches": 87.5,
 				"functions": 100,
-				"lines": 97.77
+				"lines": 97.82
 			},
 			"src/transcription/transcriptFormat.ts": {
 				"statements": 100,
-				"branches": 92.59,
+				"branches": 97.87,
 				"functions": 100,
 				"lines": 100
 			},
@@ -938,10 +1028,10 @@
 				"lines": 100
 			},
 			"src/transcription/transcriptOutput.ts": {
-				"statements": 98.33,
-				"branches": 95.23,
+				"statements": 98.21,
+				"branches": 94.44,
 				"functions": 100,
-				"lines": 98.33
+				"lines": 98.21
 			},
 			"src/transcription/transcriptionErrors.ts": {
 				"statements": 100,
@@ -951,15 +1041,15 @@
 			},
 			"src/transcription/advanced/AdvancedTwoPassRunner.ts": {
 				"statements": 100,
-				"branches": 96.29,
+				"branches": 96.66,
 				"functions": 100,
 				"lines": 100
 			},
 			"src/transcription/advanced/advancedBias.ts": {
-				"statements": 94.73,
-				"branches": 80,
+				"statements": 96.29,
+				"branches": 84.21,
 				"functions": 100,
-				"lines": 94.73
+				"lines": 96.29
 			},
 			"src/transcription/advanced/contextPipeline.ts": {
 				"statements": 100,
@@ -968,10 +1058,10 @@
 				"lines": 100
 			},
 			"src/transcription/llm/LlmProvider.ts": {
-				"statements": 97.91,
+				"statements": 97.95,
 				"branches": 100,
 				"functions": 100,
-				"lines": 97.91
+				"lines": 97.95
 			},
 			"src/transcription/llm/TranscriptTranslator.ts": {
 				"statements": 100,
@@ -992,10 +1082,10 @@
 				"lines": 100
 			},
 			"src/transcription/llm/vendors.ts": {
-				"statements": 96,
+				"statements": 97.14,
 				"branches": 50,
 				"functions": 100,
-				"lines": 96
+				"lines": 97.14
 			},
 			"src/transcription/providers/DeepgramProvider.ts": {
 				"statements": 100,
@@ -1015,6 +1105,18 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/transcription/providers/TranscriptionProvider.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/transcription/providers/VoxtralProvider.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/transcription/providers/WhisperApiProvider.ts": {
 				"statements": 100,
 				"branches": 100,
@@ -1023,7 +1125,7 @@
 			},
 			"src/transcription/providers/capabilities.ts": {
 				"statements": 100,
-				"branches": 92.85,
+				"branches": 95.45,
 				"functions": 100,
 				"lines": 100
 			},
@@ -1069,6 +1171,12 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/transcription/providers/uploadContainer.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/transcription/providers/whisperResponse.ts": {
 				"statements": 100,
 				"branches": 100,
@@ -1088,10 +1196,10 @@
 				"lines": 98.11
 			},
 			"src/ui/ChapterGenerationModal.ts": {
-				"statements": 97.08,
+				"statements": 97.14,
 				"branches": 86.36,
 				"functions": 91.3,
-				"lines": 97.08
+				"lines": 97.14
 			},
 			"src/ui/ConfirmModal.ts": {
 				"statements": 100,
@@ -1101,19 +1209,19 @@
 			},
 			"src/ui/ContextMenu.ts": {
 				"statements": 100,
-				"branches": 91.66,
+				"branches": 93.84,
 				"functions": 100,
 				"lines": 100
 			},
 			"src/ui/ConversionModal.ts": {
-				"statements": 96.62,
+				"statements": 97.84,
 				"branches": 91.66,
-				"functions": 95.45,
-				"lines": 96.62
+				"functions": 100,
+				"lines": 97.84
 			},
 			"src/ui/DeviceSelectionModal.ts": {
 				"statements": 100,
-				"branches": 83.33,
+				"branches": 100,
 				"functions": 100,
 				"lines": 100
 			},
@@ -1136,10 +1244,10 @@
 				"lines": 100
 			},
 			"src/ui/PluginModal.ts": {
-				"statements": 97.14,
-				"branches": 90,
-				"functions": 90.9,
-				"lines": 97.14
+				"statements": 100,
+				"branches": 91.66,
+				"functions": 100,
+				"lines": 100
 			},
 			"src/ui/ProfileNameModal.ts": {
 				"statements": 96.55,
@@ -1159,6 +1267,12 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/ui/ReleaseNotesModal.ts": {
+				"statements": 95.45,
+				"branches": 100,
+				"functions": 80,
+				"lines": 95.45
+			},
 			"src/ui/RibbonIcon.ts": {
 				"statements": 100,
 				"branches": 100,
@@ -1166,10 +1280,10 @@
 				"lines": 100
 			},
 			"src/ui/SpeakerRenameModal.ts": {
-				"statements": 96.09,
-				"branches": 84.69,
-				"functions": 86.04,
-				"lines": 96.55
+				"statements": 97.07,
+				"branches": 86.84,
+				"functions": 89.36,
+				"lines": 97.07
 			},
 			"src/ui/SplitModal.ts": {
 				"statements": 100,
@@ -1189,11 +1303,29 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/ui/TimeSpanSlider.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/ui/TranscriptMergeModal.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/ui/TranscriptSplitModal.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/ui/TranscriptionModal.ts": {
-				"statements": 96.6,
+				"statements": 96.65,
 				"branches": 90.78,
-				"functions": 96.05,
-				"lines": 96.6
+				"functions": 96.1,
+				"lines": 96.65
 			},
 			"src/ui/TranscriptionQueueModal.ts": {
 				"statements": 100,
@@ -1202,6 +1334,12 @@
 				"lines": 100
 			},
 			"src/ui/formatDescriptions.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/ui/transcriptLineDialog.ts": {
 				"statements": 100,
 				"branches": 100,
 				"functions": 100,
@@ -1279,6 +1417,12 @@
 				"functions": 100,
 				"lines": 100
 			},
+			"src/utils/listLines.ts": {
+				"statements": 100,
+				"branches": 96.96,
+				"functions": 100,
+				"lines": 100
+			},
 			"src/utils/mediaDuration.ts": {
 				"statements": 97.91,
 				"branches": 90,
@@ -1286,6 +1430,12 @@
 				"lines": 97.91
 			},
 			"src/utils/multiWindowDomEvents.ts": {
+				"statements": 100,
+				"branches": 100,
+				"functions": 100,
+				"lines": 100
+			},
+			"src/utils/noteViews.ts": {
 				"statements": 100,
 				"branches": 100,
 				"functions": 100,
@@ -1318,9 +1468,9 @@
 		}
 	},
 	"suite": {
-		"suites": 229,
-		"tests": 5308,
-		"passed": 5308,
+		"suites": 261,
+		"tests": 6478,
+		"passed": 6478,
 		"failed": 0,
 		"todo": 0
 	}

@@ -20,10 +20,7 @@ import {
 } from '../markers/markerModel';
 import { normalizeParticipantNames } from '../speakers/participantRoster';
 import type { PartFailure } from '../transcription/partFailure';
-import {
-	TRANSCRIPT_FILE_FORMATS,
-	type TranscriptFileFormat,
-} from '../transcription/TranscriptTypes';
+import { TranscriptFileFormat } from '../transcription/TranscriptTypes';
 
 /** Current on-disk sidecar schema version. */
 const SIDECAR_VERSION = 2;
@@ -98,6 +95,11 @@ export interface NoteOutputTemplates {
 	lineFormat: string;
 	/** Speaker template with a `{speaker}` token. */
 	speakerFormat: string;
+	/**
+	 * Timestamp template with a `{time}` token. Absent on outputs recorded
+	 * before it was stored, which then read as the current setting.
+	 */
+	timestampFormat?: string;
 	/** Whether a timestamp fragment was written on each line. */
 	includeTimestamps: boolean;
 	/** Whether timestamps were written as timecode links. */
@@ -419,6 +421,9 @@ function parseTemplates(value: unknown): NoteOutputTemplates | null {
 	return {
 		lineFormat,
 		speakerFormat,
+		...(typeof record.timestampFormat === 'string'
+			? { timestampFormat: record.timestampFormat }
+			: {}),
 		includeTimestamps:
 			typeof record.includeTimestamps === 'boolean'
 				? record.includeTimestamps
@@ -469,6 +474,7 @@ function parseFileOutputs(value: unknown): FileOutput[] {
 		return [];
 	}
 	const seen = new Set<string>();
+	const formats: readonly string[] = Object.values(TranscriptFileFormat);
 	const result: FileOutput[] = [];
 	for (const entry of value) {
 		if (typeof entry !== 'object' || entry === null) {
@@ -477,11 +483,7 @@ function parseFileOutputs(value: unknown): FileOutput[] {
 		const record = entry as Record<string, unknown>;
 		const path = trimmedString(record.path);
 		const format = record.format;
-		if (
-			!path ||
-			seen.has(path) ||
-			!TRANSCRIPT_FILE_FORMATS.includes(format as TranscriptFileFormat)
-		) {
+		if (!path || seen.has(path) || !formats.includes(format as string)) {
 			continue;
 		}
 		seen.add(path);

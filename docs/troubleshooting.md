@@ -8,6 +8,7 @@ This guide helps you diagnose and fix problems with Advanced Audio Recorder. It 
     - [Debug mode](#debug-mode)
 - [Common problems and fixes](#common-problems-and-fixes)
     - [No sound is recorded](#no-sound-is-recorded)
+    - [Voice only in one channel (hard-panned left or right)](#voice-only-in-one-channel-hard-panned-left-or-right)
     - [A recording format is not available](#a-recording-format-is-not-available)
     - [Conversion fails](#conversion-fails)
     - [Recording is slow to save](#recording-is-slow-to-save)
@@ -44,33 +45,31 @@ What it tells you:
 
 The test uses exactly the same input device, sample rate, bitrate, and browser input processing (noise suppression, echo cancellation, automatic gain control) as a real recording, so it is a faithful preview. Nothing is written to disk - when you leave the section the clip is discarded.
 
-![Test recording control after a successful 5-second clip, showing the inline playback player](images/diagnostics-test-recording.png)
-_Figure: a completed test recording with the inline audio player ready to play the captured clip back._
+![The Diagnostics section with the Test recording row and its Start test button, the System info row and the Debug mode toggle](images/settings-diagnostics.png)
 
 ### System info
 
 **System info** gathers everything needed to diagnose an environment problem into a single JSON snapshot you can paste into a bug report.
 
 1. Open **Settings > Advanced Audio Recorder** and scroll to **Diagnostics**.
-2. Click **Show info** next to **System info**.
+2. Click the **System info** row.
 3. A modal titled **System diagnostics** opens with the full JSON.
 4. Click **Copy to clipboard** (the button briefly reads **Copied!**).
 5. Paste the JSON into your bug report or wherever you need it.
 
 The snapshot contains the following groups:
 
-| Group                       | What it includes                                                                                                                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Plugin settings**         | Recording format, bitrate, sample rate, save folder, save-near-active-file, active-file subfolder, file prefix, multi-track on/off, max tracks, output mode, per-track sources, selected input device id, and debug flag. |
-| **Environment**             | Obsidian (API) version, Electron, Chromium and Node versions, platform, architecture, and user agent.                                                                                                                                       |
-| **Audio devices**           | Every detected audio input and output device, with id, label, group id, and kind.                                                                                                                                         |
-| **Audio capabilities**      | Supported formats, sample rates, and bitrates; per-codec support; and whether `MediaRecorder` and `getUserMedia` are available.                                                                                           |
-| **Active recording config** | The format actually handed to the recorder, the resolved MIME type, the expected codec, whether that MIME type is supported, and the pre-recording validation result.                                                     |
+| Group                       | What it includes                                                                                                                                                                                                                                             |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Plugin settings**         | Recording format, bitrate, sample rate, bit depth, save folder, save-near-active-file, active-file subfolder, file prefix, multi-track on/off, max tracks, output mode, per-track sources, selected input device id, and debug flag.                         |
+| **Environment**             | Obsidian (API) version, Electron, Chromium and Node versions, platform, architecture, and user agent.                                                                                                                                                        |
+| **Audio devices**           | Every detected audio input and output device, with id, label, group id, and kind.                                                                                                                                                                            |
+| **Audio capabilities**      | Supported formats, sample rates and bitrates, the bitrates each compressed format's encoder really accepts on this device at the rate an offline encode runs at, the per-codec support matrix, and whether `MediaRecorder` and `getUserMedia` are available. |
+| **Active recording config** | The format actually handed to the recorder, the resolved MIME type, the expected codec, whether that MIME type is supported, and the pre-recording validation result.                                                                                        |
 
 The snapshot never contains your API keys, transcripts, or note contents - only the technical configuration listed above. It is safe to share in a public issue.
 
 ![The System diagnostics modal showing the formatted JSON snapshot and the Copy to clipboard button](images/modal-system-info.png)
-_Figure: the System diagnostics modal with the full JSON snapshot and the Copy to clipboard button._
 
 ### Debug mode
 
@@ -106,6 +105,8 @@ The recording finishes but the file is silent, or **Test recording** plays back 
 4. Make sure the microphone is not muted in hardware or in the OS mixer, and that the input level is non-zero.
 5. With **Input level meter** enabled (**Settings > Audio processing & feedback**), watch the meter move when you speak - a flat meter means no signal is reaching the plugin.
 6. If a `Test recording failed:` message mentions a denied permission, grant access and restart Obsidian.
+
+If the recording holds your own voice but not the other participants of a call, nothing is broken: a recording captures an input device by default, and the remote side of a Zoom or Teams call goes to an output device. On Windows, turn on **Include system audio** under **Audio input**, which records the machine's own output beside the microphone and mixes both into one file; on a session that configures its tracks by hand, set that track's **Track N source** to **System audio (this computer)** instead. Elsewhere, route the output back in as an input and record it on a second track. See [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
 
 See also: [Recording](recording.md), [Settings reference](settings-reference.md#audio-input).
 
@@ -168,7 +169,7 @@ See also: [Recording](recording.md), [Splitting recordings](splitting.md).
 
 You see Obsidian's plain audio bar, or the enhanced player loads but the waveform is missing.
 
-- The enhanced player is opt-in. Turn on **Enhanced audio player** under **Settings > Audio player**, and make sure **Show waveform** is on.
+- The enhanced player can be turned off. Check that **Enhanced audio player** is on under **Settings > Audio player**, and that **Show waveform** is on with it.
 - The enhanced player applies to **audio-only** files. A file that contains a **video track**, or a file the app cannot decode, keeps Obsidian's built-in player. Files are classified by their container metadata, not by extension, so renaming a file does not change this.
 - For very large or slowly decoding files, the player **falls back to a plain seekable bar** above a certain size or when the audio cannot be decoded. This is expected behaviour, not a bug - playback and seeking still work.
 - The waveform is **decoded lazily** as it scrolls into view and is cached per file revision, so it may appear progressively on long files rather than all at once.
@@ -180,20 +181,23 @@ See also: [Enhanced audio player](audio-player.md), [Settings reference](setting
 
 Transcription stops with an error, or the progress dialog reports a failure.
 
-| Symptom                                                        | Cause and fix                                                                                                                                                                                                                                         |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Set the … API key in settings to transcribe.`                 | The selected engine has no API key. Open **Settings > Transcription**, select your engine, and paste the key. See the per-engine setup guides below.                                                                                                  |
-| `Authentication failed.` / 401 / 403                           | The API key is wrong, expired, or not authorized for this provider/model. Re-copy the key from the provider console and confirm your account has access.                                                                                              |
-| `Rate limit reached. Wait a moment and try again.`             | You hit the provider's rate limit. Wait and retry; for free tiers, consider a paid plan or a different engine.                                                                                                                                        |
-| `Request … timed out after … ms.`                              | The request exceeded the configured **Request timeout** (default 10 minutes, range 1-60). Raise the timeout for long files, or split the recording first.                                                                                             |
-| File too large                                                 | The **Whisper API** caps each request at **25 MB**. Files over that are automatically resampled to 16 kHz mono and split into upload-sized chunks. **Deepgram** and **Gemini** accept up to **2 GB**.                                                 |
-| `Speaker diarization` greyed out                               | Diarization is only supported by **Deepgram** and **Google Gemini**. It is disabled and greyed for **Whisper API** and **Local whisper.cpp** - switch engines if you need speaker labels.                                                             |
-| `Word-level timestamps` greyed out                             | Only **Whisper API** reads that request. **Deepgram** returns per-word timing on every run, and **Gemini** and **Local whisper.cpp** return segment-level timing only, so on those three the switch shows what the engine does and cannot be changed. |
-| Gemini diarization warning on long files                       | Gemini splits recordings longer than 15 minutes into parts and stitches them; diarized splits reset speaker numbering, which the plugin surfaces as a warning.                                                                                        |
-| Play buttons greyed out in **Rename speakers**                 | That recording's roster was stored before speaker samples existed, so it carries no timings. Transcribe it once more with **Speaker diarization** on and the buttons come back.                                                                       |
-| Local `whisper.cpp` fails to start                             | Check the **binary path** and **model path** (an absolute path to a GGML `.bin` file). Make sure the binary is executable and the model file exists.                                                                                                  |
-| Local `whisper.cpp` run stopped before it finished             | The process outlived **Local run timeout** (default 120 minutes, range 1-720). Raise it, or point the engine at a smaller model: a large model on a slow CPU can take longer than the recording itself.                                               |
-| Local `whisper.cpp` wrote more output than the plugin can read | The transcript outgrew the 64 MB the plugin buffers from the process. Split the recording and transcribe the parts separately.                                                                                                                        |
+| Symptom                                                        | Cause and fix                                                                                                                                                                                                                                                                                                                                                                        |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Set the … API key in settings to transcribe.`                 | The selected engine has no API key. Open **Settings > Transcription**, select your engine, and paste the key. See the per-engine setup guides below.                                                                                                                                                                                                                                 |
+| `Authentication failed.` / 401 / 403                           | The API key is wrong, expired, or not authorized for this provider/model. Re-copy the key from the provider console and confirm your account has access.                                                                                                                                                                                                                             |
+| `Rate limit reached. Wait a moment and try again.`             | You hit the provider's rate limit. Wait and retry; for free tiers, consider a paid plan or a different engine.                                                                                                                                                                                                                                                                       |
+| `Request … timed out after … ms.`                              | The request exceeded the configured **Request timeout** (default 10 minutes, range 1-60). Raise the timeout for long files, or split the recording first.                                                                                                                                                                                                                            |
+| File too large                                                 | The **Whisper API** caps each request at **25 MB**. Files over that are automatically resampled to 16 kHz mono and split into upload-sized chunks. **Deepgram** and **Gemini** accept up to **2 GB**.                                                                                                                                                                                |
+| `Speaker diarization` greyed out                               | Diarization is only supported by **Deepgram**, **Google Gemini** and **Mistral Voxtral**. It is disabled and greyed for **Whisper API** and **Local whisper.cpp** - switch engines if you need speaker labels.                                                                                                                                                                       |
+| `Word-level timestamps` greyed out                             | Only **Whisper API** reads that request. **Deepgram** returns per-word timing on every run, and **Gemini**, **Mistral Voxtral** and **Local whisper.cpp** return segment-level timing only, so on those four the switch shows what the engine does and cannot be changed.                                                                                                            |
+| Gemini diarization warning on long files                       | Gemini splits recordings longer than 15 minutes into parts and stitches them; diarized splits reset speaker numbering, which the plugin surfaces as a warning.                                                                                                                                                                                                                       |
+| One speaker detected as two (or more)                          | Diarization split one person across labels. In **Rename speakers**, give every row that is really that person the same name and confirm the merge; their lines become one speaker in every output. It cannot be reversed - merged lines read identically afterwards - so only a new transcription brings separate labels back.                                                       |
+| Two speakers merged into one line                              | Diarization gave one person's words to another speaker. Select those words in the transcript line, right-click, and choose **Split selection into another speaker** to give them to the right speaker (or a new one) and fix their times. See [Splitting a line between speakers](transcription.md#splitting-a-line-between-speakers).                                               |
+| One turn cut into several lines                                | Diarization heard a pause as a change of speaker, or gave a few words in the middle of a turn to someone else. Select the lines, right-click, and choose **Merge selected lines into one**. Play the passage to check it and pick its speaker, and the lines become one in the note and the transcript files. See [Merging lines into one](transcription.md#merging-lines-into-one). |
+| Play buttons greyed out in **Rename speakers**                 | That recording's roster was stored before speaker samples existed, so it carries no timings. Transcribe it once more with **Speaker diarization** on and the buttons come back.                                                                                                                                                                                                      |
+| Local `whisper.cpp` fails to start                             | Check the **binary path** and **model path** (an absolute path to a GGML `.bin` file). Make sure the binary is executable and the model file exists.                                                                                                                                                                                                                                 |
+| Local `whisper.cpp` run stopped before it finished             | The process outlived **Local run timeout** (default 120 minutes, range 1-720). Raise it, or point the engine at a smaller model: a large model on a slow CPU can take longer than the recording itself.                                                                                                                                                                              |
+| Local `whisper.cpp` wrote more output than the plugin can read | The transcript outgrew the 64 MB the plugin buffers from the process. Split the recording and transcribe the parts separately.                                                                                                                                                                                                                                                       |
 
 Other tips:
 
@@ -237,7 +241,7 @@ When you open an issue, attach the diagnostics below so the problem can be repro
 1. **Update and isolate.** Update the plugin to the latest version, restart Obsidian, and (if you can) temporarily disable other plugins to rule out conflicts.
 2. **Write reproduction steps.** Note the exact format and bitrate, single- vs multi-track, recording length, and what you clicked or which command you ran.
 3. **State expected vs actual** behaviour.
-4. **Capture System info.** Open **Settings > Advanced Audio Recorder > Diagnostics > System info > Show info**, click **Copy to clipboard**, and paste the JSON into the report.
+4. **Capture System info.** Open **Settings > Advanced Audio Recorder > Diagnostics** and click the **System info** row, then click **Copy to clipboard** and paste the JSON into the report.
 5. **Capture Audio file info** (when a specific file is involved). Right-click the file, choose **Audio file info**, click **Copy as Markdown**, and paste it in.
 6. **Capture console logs** (optional, advanced). Enable **Debug mode**, reproduce the issue, open **View > Toggle Developer Tools**, and copy the `[AudioRecorder]` log lines.
 7. **Attach a screenshot or screen recording** if the problem is visual.

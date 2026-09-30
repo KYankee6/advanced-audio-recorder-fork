@@ -1,14 +1,15 @@
 # Enhanced audio player
 
-The **Enhanced audio player** replaces Obsidian's built-in audio embed with a richer player wherever an audio file is embedded (`![[recording.webm]]`). It adds a waveform seek bar, playback-speed control, skip buttons, volume and mute, a loop toggle, a chapter repeat, a time display, per-file markers and chapters, and a copy-timestamp-link action. A recording left part-heard resumes where it stopped, and playback is announced to the operating system so the lock screen and the media keys can drive it. While a recording plays, a companion strip of playback controls also appears in the status bar so you can drive it without scrolling back to the embed, and every one of those actions is also a command you can bind to a hotkey. The takeover is opt-in, applies in both Reading view and Live Preview, and falls back cleanly to Obsidian's native embed for video files, undecodable files, or when the feature is off.
+The **Enhanced audio player** replaces Obsidian's built-in audio embed with a richer player wherever an audio file is embedded (`![[recording.webm]]`). It adds a waveform seek bar, playback-speed control, skip buttons, volume and mute, a voice-boost toggle that applies the cleanup chain to the recording as it plays, a loop toggle, a chapter repeat, a time display, per-file markers and chapters, and a copy-timestamp-link action. A recording left part-heard resumes where it stopped, and playback is announced to the operating system so the lock screen and the media keys can drive it. While a recording plays, a companion strip of playback controls also appears in the status bar so you can drive it without scrolling back to the embed, and every one of those actions is also a command you can bind to a hotkey. The takeover is on by default, applies in both Reading view and Live Preview, and falls back cleanly to Obsidian's native embed for video files, undecodable files, or when the feature is turned off.
 
-- [Enabling the player](#enabling-the-player)
+- [Where the player is switched](#where-the-player-is-switched)
 - [How the takeover works](#how-the-takeover-works)
 - [The controls](#the-controls)
     - [Waveform seek bar](#waveform-seek-bar)
     - [Playback speed](#playback-speed)
     - [Skip forward and back](#skip-forward-and-back)
     - [Volume and mute](#volume-and-mute)
+    - [Voice boost](#voice-boost)
     - [Loop](#loop)
     - [Repeat chapter](#repeat-chapter)
     - [Time display](#time-display)
@@ -25,23 +26,21 @@ The **Enhanced audio player** replaces Obsidian's built-in audio embed with a ri
 - [Related settings](#related-settings)
 
 ![Enhanced audio player embedded in a note with the waveform seek bar and control row](images/player-overview.png)
-_Figure: the enhanced player rendered in place of an audio embed, with the waveform seek bar above the control row._
 
-## Enabling the player
+## Where the player is switched
 
-The enhanced player is off by default. Turn it on under **Settings > Advanced Audio Recorder > Audio player > Enhanced audio player**.
+The enhanced player is on by default, so an embedded recording already plays in it. Its three switches live together:
 
 1. Open **Settings > Advanced Audio Recorder**.
-2. Scroll to the **Audio player** section.
-3. Enable **Enhanced audio player**.
-4. Two more options appear below it - **Show waveform** (on by default) and **Markers and chapters** (on by default).
+2. Open the **Audio player** section.
+3. **Enhanced audio player** is the master switch. Turning it off gives every embed back to Obsidian's built-in player.
+4. **Show waveform** and **Markers and chapters**, both on by default, are the two windows the player draws. They are offered only while the master switch is on.
 
-![Audio player settings section with the Enhanced audio player, Show waveform, and Markers and chapters toggles](images/settings-audio-player.png)
-_Figure: the Audio player settings section, with the master toggle and its two windows._
+![Audio player settings with the enhanced player, show waveform and markers and chapters toggles all on, and the skip step field](images/settings-audio-player.png)
 
 The change applies to notes that are **rendered after** the change. Toggling the master switch flips what every embed is (native versus enhanced), so the plugin re-renders open notes to rebuild their embeds. Disabling **Enhanced audio player** restores Obsidian's built-in embed on the next render.
 
-The two sub-toggles - **Show waveform** and **Markers and chapters** - apply **in place** to already-open players, so flipping either one updates the live player immediately without re-rendering the note or interrupting playback. See [Related settings](#related-settings).
+The three settings under the master switch - **Show waveform**, **Markers and chapters**, and **Skip step** - apply **in place** to already-open players, so changing any of them updates the live player immediately without re-rendering the note or interrupting playback. See [Related settings](#related-settings).
 
 ---
 
@@ -53,7 +52,7 @@ The player integrates with Obsidian's own embed rendering rather than bolting on
 - **Markdown post-processor fallback.** When the internal embed-registry API is unavailable, the plugin falls back to a Markdown post-processor that takes over embeds in **Reading view only**. A console warning notes when this fallback is in use.
 - **Clean teardown.** Each player is a render child whose lifecycle - event listeners, the audio element, observers, and registry registration - is torn down automatically when the note re-renders or its leaf closes. If the enhanced render ever throws, the embed degrades to a plain native `audio` element so the note still opens and the audio still plays.
 
-A single audio element is shared per file across view modes, so the same playback is controlled whether you are in Reading view or Live Preview, and switching modes does not stop and restart playback.
+A single audio element is shared per playback position, which is the recording's path together with any `#t=` start the embed names, so the same playback is controlled whether you are in Reading view or Live Preview, and switching modes does not stop and restart playback. Two embeds of the same recording that open at different positions therefore drive an element each.
 
 The player also keeps working in **pop-out windows**: moving a note that embeds a recording into its own window preserves the right-click menu and timecode-link playback there, because the plugin binds those handlers to each window's own document rather than only the main one.
 
@@ -63,10 +62,9 @@ The player also keeps working in **pop-out windows**: moving a note that embeds 
 
 ## The controls
 
-Every control below is **fixed** in what it does. Only the master **Enhanced audio player** toggle, the two windows (**Show waveform**, **Markers and chapters**), and the **Skip step** can be changed in settings.
+Every control below is **fixed** in what it does. Only the master **Enhanced audio player** toggle, the two windows (**Show waveform**, **Markers and chapters**), and the **Skip step** can be changed in settings. The one control that renders a setting without being one is **Voice boost**, which applies whatever the **Audio cleanup defaults** describe.
 
-![Enhanced player control row showing play, skip back, skip forward, speed, mute, volume, loop, chapter navigation, time, and copy-link buttons](images/player-controls.png)
-_Figure: the full control row of the enhanced player._
+![Enhanced player control row showing play, skip back, skip forward, speed, mute, volume, voice boost, loop, chapter navigation, time, and copy-link buttons](images/player-controls.png)
 
 ### Waveform seek bar
 
@@ -77,23 +75,20 @@ The recording is drawn as a waveform that doubles as the seek bar.
 - **Played portion.** The part you have already played uses the **theme accent color**, so progress is visible at a glance.
 - **Caching.** Waveforms are computed once per file revision (keyed on the file path, modification time, and size) and cached, so scrolling a note with many players does not re-decode audio. Resizing the window or switching view modes redraws from the cache instead of decoding again.
 - **Lazy and progressive decoding.** Decoding is deferred until the player scrolls near the viewport, so a long note with several recordings does not decode every embed up front. Peaks are then computed progressively in the background and the waveform fills in as they become ready, so even an hour-plus recording never blocks the interface.
-- **Plain-bar fallback.** A file larger than the safety ceiling (**1 GB** on disk), or one the app cannot decode, falls back to a plain - but still seekable - progress bar instead of the waveform. The plain bar shows a filled track for the played portion and a thumb at the current position.
+- **Plain-bar fallback.** A file larger than the safety ceiling, which is **1 GB** on disk on the desktop and **256 MB** in the mobile app, or one the app cannot decode, falls back to a plain - but still seekable - progress bar instead of the waveform. The plain bar shows a filled track for the played portion and a thumb at the current position.
 - **Disabling the waveform.** Turn off **Show waveform** in settings to always use the plain bar. No audio is decoded in that mode at all.
 
 ![Waveform seek bar with the played portion highlighted in the theme accent color and a position thumb](images/player-waveform-seek.png)
-_Figure: the waveform seek bar, with the played portion in the theme accent and the current position marked._
 
 ![Plain seekable progress bar shown when the waveform is disabled or the file is too large to decode](images/player-plain-bar.png)
-_Figure: the plain (still seekable) bar shown when Show waveform is off or the file exceeds the decode ceiling._
 
 ### Playback speed
 
-Click the **speed** button to open a dropdown of presets and pick any one (the current rate is checked). The presets are `0.5×`, `0.75×`, `1×`, `1.25×`, `1.5×`, `1.75×`, `2×`, `2.5×`, and `3×`.
+Click the **speed** button to open a dropdown of presets and pick any one (the current rate is checked). The presets are `0.5x`, `0.75x`, `1x`, `1.25x`, `1.5x`, `1.75x`, `2x`, `2.5x`, and `3x`.
 
 New players start at `1×`. The button always shows the current rate.
 
-![Playback-speed dropdown menu listing the speed presets with the current rate checked](images/player-speed-menu.png)
-_Figure: the playback-speed dropdown, opened from the speed button._
+![The playback-speed menu listing the nine presets from 0.5x to 3x, with a check beside 1x](images/player-speed-menu.png)
 
 ### Skip forward and back
 
@@ -103,6 +98,20 @@ The **back** and **forward** buttons jump playback by the configured **Skip step
 
 - A **volume slider** sets the level from 0 to 1. Dragging it above 0 while muted automatically unmutes.
 - The **mute** button toggles mute and reflects the state with its icon.
+
+### Voice boost
+
+The **voice boost** button applies the [audio cleanup](audio-cleanup.md) chain to the recording **while it plays**, so a quiet passage becomes intelligible without waiting for a processed copy to be written. The stages are the ones under **Settings > Advanced Audio Recorder > Audio cleanup defaults**, applied to the live signal instead of to a decoded file, and the recording itself is never touched: switching the button off returns the audio to exactly how it sounded before.
+
+- The button stays pressed while the chain is engaged. Every player on screen follows the same switch, so turning it on in one embed turns it on in the others, including a player rendered after the fact.
+- **Remembered for the session.** The chain stays on for the rest of the session, across recordings and across notes, and it is not written to the settings file, so reopening Obsidian starts with it off.
+- Only the stages switched on in the cleanup defaults are rendered. With the stock defaults, where the high-pass filter is on and the noise gate and loudness leveling are off, the change is subtle. Turn the gate and the leveling on for a recording that needs what the offline cleanup produces. With every stage switched off there is nothing to apply, and pressing the button says so instead of changing the sound.
+- The stages run in the offline pass's order, with the gate deciding before the filter, and the gate measures the same short window of signal with the same threshold and hysteresis. A threshold tuned in the cleanup dialog therefore behaves the way it does on a processed copy, rather than gating the quiet passage the button exists for.
+- There is no decoding, no size limit, and no length limit, which is what makes it usable on a recording that is far too long to clean up as a file.
+- The chain is built from Web Audio nodes. On a runtime that does not provide them, the button is not offered at all and playback is unaffected.
+- A recording is taken into the chain only once the player has loaded it. A recording the app will not hand over for processing keeps playing normally and is left out of the chain, so the button never costs you the playback itself.
+
+![The enhanced player control row with the voice boost button pressed, between the volume slider and the loop button](images/player-voice-boost.png)
 
 ### Loop
 
@@ -122,7 +131,7 @@ The time readout shows **elapsed / total** time (for example `1:05 / 3:42`). Bot
 
 ### Copy timestamp link
 
-The **link** button copies a [timecode link](#timecode-links) to the **current position** - for example `[[recording#t=1:30]]` - to the clipboard, following your vault's link-format preferences. A notice confirms the copied timestamp. You can also copy a link at any other position from the [right-click menu](#markers-and-chapters).
+The **link** button copies a [timecode link](#timecode-links) to the **current position** - for example `[[recording#t=90|1:30]]`, which names the offset in whole seconds and displays it as a readable time - to the clipboard, following your vault's link-format preferences. A notice confirms the copied timestamp. You can also copy a link at any other position from the [right-click menu](#markers-and-chapters).
 
 ---
 
@@ -142,8 +151,7 @@ A [timecode link](#timecode-links) outranks the remembered position. An embed th
 
 Whenever an enhanced player is playing, a compact set of **playback controls appears in the status bar** at the bottom-right of the Obsidian window, so you can drive the recording without scrolling back up to the embed. This is the same status-bar slot that shows `Recording...` while you capture; during playback it switches to the transport strip shown below.
 
-![Status-bar playback controls with skip back, play or pause, stop, skip forward, mute, a volume slider, add marker, add chapter, and the elapsed over total time](images/status-bar-playback-controls.png)
-_Figure: the status-bar playback controls shown while a recording plays, with transport, volume, marker, chapter, and time._
+![Status-bar playback controls with skip back, play or pause, stop, skip forward, mute, a volume slider, add marker, add chapter, repeat chapter, and the elapsed over total time](images/status-bar-playback-controls.png)
 
 The strip carries:
 
@@ -151,12 +159,12 @@ The strip carries:
 - **Play or pause** and **stop**. The button reflects the live state, and stop resets the position to the start.
 - **Mute** and a **volume slider** from 0 to 1. Dragging the slider above 0 while muted unmutes it, matching the embed.
 - **Add marker** and **add chapter** at the current position. These two appear only when **Markers and chapters** is enabled for the playing recording.
-- **Repeat chapter**, which engages the same repeat the embed's button does and shows the same state. It appears whenever the playing recording has chapters, including in Reading view where the add buttons do not.
+- **Repeat chapter**, which engages the same repeat the embed's button does and shows the same state. It appears whenever **Markers and chapters** is enabled for the playing recording, including in Reading view where the add buttons do not, so a recording that carries no chapters yet still shows it.
 - The **elapsed over total time** readout, formatted the same way as the embed.
 
 Playback speed is deliberately left out here to keep the strip compact; change the speed from the embed's speed button or with the [speed commands](#playback-commands-and-hotkeys) instead. Every button drives the **same playback** as the embedded control row, because both delegate to one shared audio element per recording, so an action in one surface is reflected in the other.
 
-The strip **appears when playback starts** and **disappears when you stop it** - with the stop button here, with the stop action in the embed, or when the recording reaches its end. Pausing keeps the strip visible, showing the play icon, so you can resume from the status bar; only stopping or reaching the end dismisses it. Recording and saving always take precedence: starting a recording while a player is paused shows the recording controls instead, and the playback strip returns once recording stops if the audio is still active.
+The strip **appears when playback starts** and **disappears when you stop it** - with the stop button here, with the **Stop playback** command, or when the recording reaches its end. The embedded control row has no stop button of its own, so those are the three ways to dismiss it. Pausing keeps the strip visible, showing the play icon, so you can resume from the status bar, and only stopping or reaching the end dismisses it. Recording and saving always take precedence: starting a recording while a player is paused shows the recording controls instead, and the playback strip returns once recording stops if the audio is still active.
 
 ---
 
@@ -164,7 +172,7 @@ The strip **appears when playback starts** and **disappears when you stop it** -
 
 While a recording plays, the plugin announces it to the operating system, so it can be driven from **the lock screen, the media keys, and a headset button** without bringing Obsidian to the front. The announcement names the recording and the chapter playback is inside, and reports the position so a lock screen can draw a scrubber.
 
-The system is offered **play**, **pause**, **stop**, **skip back**, **skip forward**, and **seek to a position**. A recording with chapters is additionally offered **previous track** and **next track**, which move between chapters rather than between files; a recording without them is not, because there would be nothing for the plugin to do with the press.
+The system is offered **play**, **pause**, **stop**, **skip back**, **skip forward**, and **seek to a position**. **Previous track** and **next track** are offered as well whenever **Markers and chapters** is enabled for the recording, and they move between chapters rather than between files. With that window turned off the two are withheld, because nothing would answer the press.
 
 Every one of those controls drives the **same playback** as the embed and the status bar, because all three go through one shared audio element per recording. A skip from the media keys moves the embed's time display, and a pause from the lock screen shows the play icon in both surfaces.
 
@@ -206,8 +214,7 @@ The speed commands move between the same presets the embed's speed button lists,
 
 With **Markers and chapters** enabled, each recording can carry per-file **bookmarks** (jump points) and **chapters** (named segments). These are extra navigation aids stored alongside the recording; they do not change the audio.
 
-![Enhanced player with a marker list below the controls and bookmark and chapter ticks on the seek bar](images/player-marker-list.png)
-_Figure: the marker list under the player, with bookmark ticks and chapter boundaries on the seek bar._
+![The marker list under the seek bar, each row carrying a time, a title, an optional note, the segment length, a jump button, a move-to-position button, a colour and a delete button](images/player-marker-list.png)
 
 **Adding markers**
 
@@ -218,21 +225,20 @@ _Figure: the marker list under the player, with bookmark ticks and chapter bound
 **On the seek bar**
 
 - **Bookmarks** appear as **ticks** on the seek bar.
-- **Chapters** appear as **labelled boundary lines**.
+- **Chapters** appear as **boundary lines** with a small cap at the top. The title is not drawn on the bar, and hovering a line shows it as a tooltip.
 - Clicking either one jumps playback to it (without forcing play/pause to change).
 
-![Seek bar with bookmark ticks and labelled chapter boundary lines](images/player-seek-ticks.png)
-_Figure: bookmark ticks and chapter boundaries rendered on the seek bar._
+![Seek bar with bookmark ticks and chapter boundary lines, each drawn in its marker colour](images/player-seek-ticks.png)
 
 **The marker list**
 
 The list below the player shows every marker and chapter in time order. From it you can:
 
-- **Jump** to an entry by clicking its time (or the whole row in Reading view).
+- **Jump** to an entry with its play button (or by clicking the whole row in Reading view).
 - **Rename** an entry by editing its label inline (saved shortly after you stop typing).
 - **Move** an entry to another time by typing into its time field, in any of the forms a timecode link accepts (`90`, `1:30`, `0:01:30`). A time that means nothing is refused and the field goes back to what it showed.
-- **Move** an entry to wherever playback currently is with the crosshair button beside its time. A marker is almost always pressed a beat after the thing worth marking, so this is the quickest way to correct one.
-- **Note** an entry in the field under its row, for the reason a short label cannot hold.
+- **Move** an entry to wherever playback currently is with the crosshair button beside its play button. A marker is almost always pressed a beat after the thing worth marking, so this is the quickest way to correct one.
+- **Note** an entry in the field under its title, for the reason a short label cannot hold. An empty note field stays hidden until you click into the entry's time or title or tab into its row. A note that has text is always shown.
 - **Colour** an entry from its colour picker, to tell apart what different markers are for.
 - **Delete** an entry with its trash button.
 
@@ -240,18 +246,17 @@ A time outside the recording is refused with a notice and the marker stays where
 
 A marker's colour shows as an edge on its row and as the colour of its tick on the seek bar, so a long recording's markers can be told apart at a glance. A marker with no colour looks exactly as it always did. In Reading view the note is shown under the row and is part of the row's accessible name, so it reaches a screen reader as well as the eye.
 
-The currently playing segment is highlighted as playback crosses chapter boundaries. The read-only list also shows each segment's length.
+The segment playback is inside is highlighted, and the highlight moves as playback crosses any marker, a bookmark as well as a chapter. Each row shows its segment's length at the right, while editing as well as in Reading view.
 
 **Chapter navigation**
 
-The **previous chapter** and **next chapter** buttons move between chapter boundaries. Previous-chapter from just after a boundary returns to the start of the current chapter.
+The **previous chapter** and **next chapter** buttons move between chapter boundaries. Within **2 seconds** of a boundary, previous-chapter jumps to the chapter before it, which is what makes a double press walk backwards through the recording. Past that lead-in it restarts the chapter playback is inside.
 
 **Right-click menu**
 
-Right-click the player to add a **marker** or **chapter**, or copy a **timestamp link**, **at the clicked position** - alongside the usual audio file actions (info, convert, split, delete). Position-aware actions use the spot under the cursor. The **add marker** and **add chapter** items appear only when **Markers and chapters** is enabled and the note is open for editing (Live Preview); **copy timestamp link** is always available.
+Right-click the player to add a **marker** or **chapter**, or copy a **timestamp link**, **at the clicked position** - alongside the same audio file actions the [file explorer menu](file-operations.md#where-the-menu-appears) offers for that recording. Position-aware actions use the spot under the cursor. The **add marker** and **add chapter** items appear only when **Markers and chapters** is enabled and the note is open for editing (Live Preview), while **copy timestamp link** is always available.
 
-![Right-click context menu on the player offering add marker, add chapter, copy timestamp link, and file actions](images/player-context-menu.png)
-_Figure: the right-click menu on the player, with position-aware marker, chapter, and timestamp actions._
+![The player's right-click menu, with Add marker here, Add chapter here and Copy timestamp link here above the file actions, from Audio file info through to Delete recording](images/player-context-menu.png)
 
 **Editing versus read-only**
 
@@ -286,11 +291,11 @@ The index keeps itself current: a recording renamed or deleted is carried over o
 
 **Export chapters and markers**, in the recording's context menu, the editor menu of its embed, and the command palette, writes the recording's markup out in one of three forms:
 
-- A **timecoded list**, one line per marker with the timecode first, which is the form a video description box takes. Written to `<recording>.chapters.txt` beside the audio.
-- A **cue sheet**, which players and audio editors read. Written to `<recording>.cue`. Only chapters go into it: a cue sheet describes a division of the recording into playable tracks, and a bookmark is a point rather than a division.
+- A **timecoded list**, one line per marker with the timecode first, which is the form a video description box takes. Written beside the audio with the recording's extension replaced, so `recording.webm` exports to `recording.chapters.txt`.
+- A **cue sheet**, which players and audio editors read. Written as `recording.cue`, again with the extension replaced. Only chapters go into it: a cue sheet describes a division of the recording into playable tracks, and a bookmark is a point rather than a division.
 - A **Markdown outline** whose timecodes are **clickable links** into the recording, built by the same mechanism transcripts use, so pressing one moves playback there. It is inserted into the open note or copied to the clipboard, as you choose.
 
-The timecodes widen together to the longest one in the export, so a recording over an hour renders every line as `h:mm:ss` and the list reads as a column. A note written on a marker is appended after a dash, in all three forms.
+The timecodes widen together to the longest one in the export, so a recording over an hour renders every line as `h:mm:ss` and the list reads as a column. A note written on a marker is appended after a dash in the timecoded list and in the Markdown outline. The cue sheet carries no notes, because its format has no field for one.
 
 The action is offered on every recording, because whether it has any markers cannot be known without reading the sidecar; a recording with none simply says so.
 
@@ -340,18 +345,19 @@ The enhanced player takes over **audio-only** files. Other media is left to Obsi
 
 Crucially, the media kind is classified from the file's **container metadata, not its extension**. Each file is probed once and cached. This means an **audio-only `.mp4` or `.webm`** recording still gets the enhanced player, even though those containers can also hold video. A file that has not been probed yet renders natively for a moment and is then upgraded to the enhanced player in place once the probe confirms it is audio-only.
 
-The waveform is drawn for supported audio files up to the **1 GB** decode ceiling; a larger or undecodable file falls back to the plain (still seekable) bar, as described under [Waveform seek bar](#waveform-seek-bar).
+The waveform is drawn for supported audio files up to the decode ceiling of **1 GB** on the desktop and **256 MB** in the mobile app. A larger or undecodable file falls back to the plain (still seekable) bar, as described under [Waveform seek bar](#waveform-seek-bar).
 
 ---
 
 ## Related settings
 
-Those settings live under **Settings > Advanced Audio Recorder > Audio player**, together with the **Skip step**. The player's other controls (speed, volume, mute, loop, time display, copy-timestamp link) are fixed and are not listed here because there is nothing to configure.
+Those settings live under **Settings > Advanced Audio Recorder > Audio player**. The player's other controls (speed, volume, mute, loop, time display, copy-timestamp link) are fixed and are not listed here because there is nothing to configure.
 
 | Setting                   | Description                                                                                                                                                | Default |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| **Enhanced audio player** | Replace the built-in audio embed with the enhanced player. Enabling it reveals the two options below. Applies to notes rendered after the change.          | Off     |
+| **Enhanced audio player** | Replace the built-in audio embed with the enhanced player. Enabling it reveals the three rows below. Applies to notes rendered after the change.           | On      |
 | **Show waveform**         | Draw a waveform behind the seek bar. When off, a plain (still seekable) progress bar is shown and no audio is decoded. Applies in place to open players.   | On      |
 | **Markers and chapters**  | Show the markers and chapters list and the add/jump/rename/delete and chapter-navigation controls. Markers are stored in a sidecar next to each recording. | On      |
+| **Skip step**             | Seconds the skip controls move by, from **1 to 120**, in the embed, in the status bar and from the commands. Applies in place to open players.             | 10      |
 
 For the full settings tour, see the [Settings reference](settings-reference.md#audio-player). For the player's role in the wider feature set, see [Features](features.md). For markers added during capture, see [Recording](recording.md). For clickable transcript timestamps, see [Transcription](transcription.md).
