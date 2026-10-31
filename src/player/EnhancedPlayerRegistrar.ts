@@ -962,7 +962,9 @@ export class EnhancedPlayerRegistrar {
 				return null;
 			}
 			const slice = lineText.slice(link.start, link.end);
-			const wiki = /^\[\[([^\]|\n]+)(?:\\?\|([^\]\n]*))?\]\]$/.exec(slice);
+			const wiki = /^\[\[([^\]|\n]+)(?:\\?\|([^\]\n]*))?\]\]$/.exec(
+				slice,
+			);
 			if (wiki) {
 				return { target: link.link, alias: wiki[2] ?? null };
 			}
@@ -976,6 +978,4 @@ export class EnhancedPlayerRegistrar {
 			return null;
 		}
 	}
-
 }
-

@@ -9,7 +9,6 @@ import {
 	parseTimecodeSubpath,
 	hasTimecodeSubpath,
 	isAudioFile,
-	wikiLinkTargetAtCursor,
 	wikiLinkWithAliasAtCursor,
 	isSpeakerAlias,
 } from 'src/player/timecodeLinks';

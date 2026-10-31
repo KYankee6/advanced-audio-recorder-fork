@@ -35,7 +35,6 @@ import {
  */
 const ANY_CONTAINER: ContainerSupport = { accepts: () => true };
 
-
 /**
  * Gemini's File API, asked by MIME type - the unit Google documents the list
  * in. Everything else, notably the `webm` this plugin records by default and
