@@ -33,7 +33,7 @@ import type { PartFailure } from '../partFailure';
 import {
 	AdvancedBiasChannel,
 	advancedBiasChannel,
-	keepsDetectedLanguage,
+	keepsLanguageInEveryPart,
 	meetsLengthSafeguard,
 	planAdvancedBias,
 } from './advancedBias';
@@ -68,6 +68,8 @@ export interface PassResult {
 	offsetSeconds: number;
 	transcript: Transcript;
 	usage?: TranscriptionUsage;
+	/** The rewritten text, when the part was sent with a rewrite instruction. */
+	rewritten?: string;
 }
 
 /** Transcribes every prepared part once, the way the first pass was transcribed. */
@@ -86,6 +88,8 @@ export interface AdvancedTwoPassInput {
 	readonly settings: AudioRecorderSettings;
 	/** The transcript the first pass produced, and the floor the result must beat. */
 	readonly baseline: Transcript;
+	/** The first pass's parts, which each part of the second pass is held to. */
+	readonly baselineResults: readonly PassResult[];
 	/** The options the first pass ran with, which the second pass extends. */
 	readonly transcribeOptions: TranscribeOptions;
 	/** Id of the engine that produced the baseline, for the stitched result. */
@@ -100,8 +104,7 @@ export interface AdvancedTwoPassInput {
 	readonly progressSpan: number;
 	/** Reports progress, in the caller's own scale. */
 	readonly onProgress?:
-		| ((fraction: number, label: string) => void)
-		| undefined;
+		((fraction: number, label: string) => void) | undefined;
 	/** Runs one pass over every part. */
 	readonly transcribePass: TranscribePass;
 	/** Builds the language model the context agents run on. */
@@ -226,7 +229,12 @@ export class AdvancedTwoPassRunner {
 			jobVendorId(settings, LlmJobId.ContextAgents),
 		);
 		const context = await generateContext(baseline, llm, {
-			language: transcribeOptions.language ?? baseline.language,
+			// With several languages the first one typed is only the first in
+			// the list, so the agents write in the one most of the draft is in,
+			// and fall back to it only when the draft names none.
+			language: transcribeOptions.languages
+				? (baseline.language ?? transcribeOptions.language)
+				: (transcribeOptions.language ?? baseline.language),
 			glossary: resolveDictionaryTermList(settings),
 			buildPromptSentence:
 				advancedBiasChannel(settings.transcriptionProvider) ===
@@ -287,11 +295,19 @@ export class AdvancedTwoPassRunner {
 			// lost this much text is discarded in favour of the baseline.
 			return { status: 'skipped', reason: 'too-short' };
 		}
-		if (!keepsDetectedLanguage(baseline.language, secondPass.language)) {
-			// The same guard on the other axis: a pass that answered in another
-			// language transcribed something the first pass did not, however
-			// long it came out, and the field asking for the language cannot
-			// prevent it on an engine that never reads one.
+		// The same guard on the other axis: a pass that answered in another
+		// language transcribed something the first pass did not, however long
+		// it came out, and the field asking for the language cannot prevent it
+		// on an engine that never reads one. Judged part by part, because each
+		// part is its own request and can drift alone while the stitched
+		// transcript still names the language the rest is in.
+		if (
+			!keepsLanguageInEveryPart(
+				this.input.baselineResults,
+				this.input.secondPassResults,
+				transcribeOptions.languages,
+			)
+		) {
 			return { status: 'skipped', reason: 'language-drift' };
 		}
 		// Reached only with `secondFailed` empty, because the guard above turns

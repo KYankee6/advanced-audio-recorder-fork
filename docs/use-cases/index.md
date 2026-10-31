@@ -1,6 +1,6 @@
 # Use cases and how-to guides
 
-This is the hub for the step-by-step guides. The reference docs describe _what_ each feature does; the guides here show _how_ to get something done end to end - sign up for a transcription provider, paste an API key into the right field, set up a fully offline engine, or run a complete record-and-summarize workflow. Each guide is self-contained, so start with the one that matches your goal and follow it from top to bottom.
+This is the hub for the step-by-step guides. The reference docs describe _what_ each feature does, and the guides here show _how_ to get something done end to end - sign up for a transcription provider, paste an API key into the right field, set up a fully offline engine, or run a complete record-and-summarize workflow. Each guide is self-contained, so start with the one that matches your goal and follow it from top to bottom.
 
 - [Where to start](#where-to-start)
 - [Getting API keys](#getting-api-keys)
@@ -21,7 +21,7 @@ This is the hub for the step-by-step guides. The reference docs describe _what_ 
 
 ## Getting API keys
 
-Cloud transcription engines (and the LLM post-processing providers) authenticate with an **API key** you generate on the provider's website. Each guide walks you through creating an account, generating the key, and pasting it into the key field on that service's own page under **Settings > Advanced Audio Recorder > Transcription > Engines**. Keys are stored only in the plugin's `data.json` on this device and are never written to diagnostics.
+Cloud transcription engines (and the LLM post-processing providers) authenticate with an **API key** you generate on the provider's website. Each guide walks you through creating an account, generating the key, and linking it on the key row of that service's own page under **Settings > Advanced Audio Recorder > Transcription > Engines**. Keys are kept in Obsidian's keychain on this device, never in the plugin's `data.json`, and are never written to diagnostics.
 
 | Guide                                             | Provider                 | Use it for                                                  |
 | ------------------------------------------------- | ------------------------ | ----------------------------------------------------------- |
@@ -32,7 +32,7 @@ Cloud transcription engines (and the LLM post-processing providers) authenticate
 | [Mistral](mistral-api-key.md)                     | Mistral                  | The **Mistral Voxtral** engine and Mistral post-processing. |
 | [Anthropic / Claude](anthropic-api-key.md)        | Anthropic                | **LLM post-processing** with Claude (clean up/summarize).   |
 
-Every API-key guide follows the same shape: generate the key on the provider's site, then paste it into the matching field on that engine's page under **Transcription > Engines**.
+Every API-key guide follows the same shape: generate the key on the provider's site, then link it on the matching row of that engine's page under **Transcription > Engines**, which stores it in Obsidian's keychain.
 
 > **Heads-up on shared keys.** A key belongs to the account rather than to the job, so the OpenAI page serves both Whisper API transcription and OpenAI post-processing, and the Gemini page serves transcription and prompts alike. Anthropic/Claude only writes, so it keeps a page and a key of its own. See [LLM post-processing](../llm-post-processing.md) for details.
 
@@ -58,7 +58,10 @@ These guides combine several features into one end-to-end procedure.
 | ------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | [Transcribe automatically after recording](transcribe-after-recording.md) | Turn on **Transcribe after recording** so every clip produces a transcript. |
 | [Record and summarize a meeting](meeting-notes-workflow.md)               | Record a meeting, transcribe it with diarization, and add an LLM summary.   |
+| [A meeting from a script](../command-line.md#a-meeting-from-a-script)     | Transcribe, name speakers, chapter and split a meeting from a terminal.     |
+| [Script recordings from the terminal](scripting-from-the-terminal.md)     | Timed recordings, overnight queues, marker search, exports from a shell.    |
 | [Record a voice memo or lecture on your phone](record-on-mobile.md)       | Record on the Obsidian mobile app and optionally transcribe in the cloud.   |
+| [Transcribe a language lesson](language-lesson.md)                        | Keep each language of a lesson in its own script and the student's errors.  |
 
 The meeting-notes workflow produces a single note with the recording, a diarized transcript, and an LLM summary - see the finished example in that guide.
 
@@ -66,7 +69,7 @@ The meeting-notes workflow produces a single note with the recording, a diarized
 
 ## Which engine should I choose?
 
-Pick a transcription engine before you sign up anywhere - the choice decides which API-key guide you need. The table below summarizes the trade-offs; the [Transcription](../transcription.md) reference covers each engine in full, including [speakers and diarization](../transcription.md#speakers-and-diarization).
+Pick a transcription engine before you sign up anywhere - the choice decides which API-key guide you need. The table below summarizes the trade-offs, and the [Transcription](../transcription.md) reference covers each engine in full, including [speakers and diarization](../transcription.md#speakers-and-diarization).
 
 | Engine                        | Cost                        | Diarization | Max file | Offline | Best for                                |
 | ----------------------------- | --------------------------- | ----------- | -------- | ------- | --------------------------------------- |

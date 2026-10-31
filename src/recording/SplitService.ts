@@ -1,12 +1,14 @@
 /**
  * Pipeline for splitting an audio file into time-based parts. WAV
  * files with a raw sample data chunk are split losslessly at the byte
- * level; compressed formats are decoded once and re-encoded per part.
+ * level; compressed formats are decoded once and re-encoded per part,
+ * as they are decoded where the device can (see audio/streamingSplit)
+ * and from one whole-file decode where it cannot.
  * Extracted from the split dialog so the modal stays a form.
  * @module recording/SplitService
  */
 
-import { Notice, TFile, normalizePath } from 'obsidian';
+import { TFile, normalizePath } from 'obsidian';
 import type { App } from 'obsidian';
 import {
 	encodeAudioBuffer,
@@ -20,6 +22,11 @@ import {
 } from '../platform/capabilities';
 import { decodeAudioBlob } from '../audio/AudioFormatConverter';
 import {
+	SPLIT_TAIL_SECONDS,
+	StreamedSplit,
+	StreamedSplitError,
+} from '../audio/streamingSplit';
+import {
 	parseWavLayout,
 	buildWavPart,
 	buildWavPartRange,
@@ -32,10 +39,17 @@ import {
 	type WavLayout,
 } from './AudioSplitter';
 import { toFileNameSegment, uniqueName } from '../utils/fileNames';
-import { updateLinksInVault } from '../utils/LinkUpdater';
-import type { VaultLinkUpdateResult } from '../utils/LinkUpdater';
 import { delay } from '../utils/TimeUtils';
-import { ConversionLinkAction } from '../settings/settingsSchema';
+import type { ConversionLinkAction } from '../settings/settingsSchema';
+import { errorMessage } from '../errors';
+import { SourceReplacer } from './SourceReplacer';
+import { showNotice, type Notify } from '../utils/notify';
+import { chapters, type PlayerMarker } from '../markers/markerModel';
+import {
+	NEVER_CANCELLED,
+	throwIfCancelled,
+	type CancellationToken,
+} from '../utils/cancellation';
 
 /**
  * The way out of a desktop size ceiling for the splitter, which cannot use
@@ -43,7 +57,10 @@ import { ConversionLinkAction } from '../settings/settingsSchema';
  * they should split it first, sends them back to the button that just
  * refused. What is true instead is the reason the ceiling exists. It bounds
  * the decode, and a WAV file with raw sample data never reaches one - its
- * parts are copied straight out of the source, at any size.
+ * parts are copied straight out of the source, at any size. A compressed
+ * source split as it is decoded never reaches it either, so the refusal is
+ * only ever met on a device that has to decode the file whole, where the
+ * sentence is exactly true.
  */
 const SPLIT_DESKTOP_ADVICE =
 	'Only a WAV source splits at this size, because its parts are copied ' +
@@ -55,6 +72,20 @@ export interface ChapterCut {
 	startSeconds: number;
 	/** The chapter's title, which names the part's file. */
 	title: string;
+}
+
+/**
+ * The cuts a split at chapters makes: one part per chapter of the
+ * recording, named after it. Shared by the split dialog and the command
+ * line, so both cut a recording the same way.
+ * @param markers - The recording's markers, bookmarks among them
+ * @returns The cuts, empty when the recording has no chapters
+ */
+export function chapterCutsOf(markers: readonly PlayerMarker[]): ChapterCut[] {
+	return chapters(markers).map((chapter) => ({
+		startSeconds: chapter.time,
+		title: chapter.label,
+	}));
 }
 
 /**
@@ -82,12 +113,14 @@ export interface SplitRequest {
 }
 
 /**
- * Outcome of a split operation. Failure details are already surfaced
- * to the user via Notices by the pipeline.
+ * Outcome of a split operation. Failure details are already told to
+ * the user through the service's reporter, a notice unless the caller
+ * passed another. A cancelled split says nothing: the user asked for it.
  */
 export type SplitOutcome =
 	| { status: 'completed'; partCount: number; firstPartName: string }
 	| { status: 'aborted' }
+	| { status: 'cancelled' }
 	| { status: 'partial' };
 
 /** Lazily built part: the data callback keeps at most one part alive. */
@@ -97,15 +130,66 @@ interface PreparedPart {
 }
 
 /**
+ * The parts of one split, with what their data callbacks read from: nothing
+ * for the WAV byte copy and the decoded buffer, the open decoder for a
+ * streamed split. Released once the parts are written or the split stops.
+ */
+interface PreparedParts extends Disposable {
+	readonly parts: PreparedPart[];
+}
+
+/** What a split wrote. */
+interface WrittenParts {
+	partFiles: TFile[];
+	partCount: number;
+	firstPartName: string;
+}
+
+/**
+ * How a compressed source is split: as it is decoded, where this device can,
+ * or by decoding it whole first, which is also the answer when the streamed
+ * split fails partway.
+ */
+const SplitAttempt = {
+	Streamed: 'streamed',
+	Decoded: 'decoded',
+} as const;
+
+/** One way of splitting (derived from {@link SplitAttempt}). */
+type SplitAttempt = (typeof SplitAttempt)[keyof typeof SplitAttempt];
+
+/**
+ * Parts that hold nothing open, which is every split but a streamed one.
+ * @param parts - The prepared parts
+ */
+function holdingNothing(parts: PreparedPart[]): PreparedParts {
+	return {
+		parts,
+		[Symbol.dispose]: (): void => {
+			/* nothing is held open */
+		},
+	};
+}
+
+/**
  * Splits audio files into part files and finishes with link updates
  * and optional source deletion.
  */
 export class SplitService {
+	/** Points links at the written parts and removes the source. */
+	private readonly sourceReplacer: SourceReplacer;
+
 	/**
 	 * Creates a new SplitService.
 	 * @param app - The Obsidian App instance
+	 * @param notify - Where failures and warnings are told to the user
 	 */
-	constructor(private readonly app: App) {}
+	constructor(
+		private readonly app: App,
+		private readonly notify: Notify = showNotice,
+	) {
+		this.sourceReplacer = new SourceReplacer(app, notify);
+	}
 
 	/**
 	 * Resolves the extension the part files will get: WAV sources stay
@@ -132,17 +216,24 @@ export class SplitService {
 	 * failures after that are reported as partial success, because the
 	 * part files already exist on disk and a repeated run would abort
 	 * on the collision pre-check.
+	 *
+	 * A cancel is honoured until the last part is written, and leaves the
+	 * vault as it found it: the parts written so far go where a failed
+	 * split's parts go, the trash, and no link is touched. From then on the
+	 * links and the source are finished the way the request asked, because
+	 * stopping halfway through rewriting them would leave notes pointing at
+	 * the source and at parts alike.
 	 * @param request - Split parameters
 	 * @param onProgress - Receives pipeline progress text
+	 * @param token - Cancels the split
 	 * @returns Split outcome
 	 */
 	async split(
 		request: SplitRequest,
 		onProgress: (text: string) => void,
+		token: CancellationToken = NEVER_CANCELLED,
 	): Promise<SplitOutcome> {
-		let partFiles: TFile[];
-		let partCount: number;
-		let firstPartName: string;
+		let written: WrittenParts | null;
 		try {
 			// Platform ceiling on the full-file read itself, checked
 			// BEFORE the bytes are materialized: on mobile, even holding
@@ -150,7 +241,7 @@ export class SplitService {
 			// Desktop is unbounded here - the lossless WAV byte path must
 			// keep splitting files beyond the decode ceiling.
 			if (!isReadableSize(request.sourceFile.stat.size)) {
-				new Notice(
+				this.notify(
 					tooLargeMessage('split', {
 						desktopAdvice: SPLIT_DESKTOP_ADVICE,
 					}),
@@ -158,122 +249,148 @@ export class SplitService {
 				onProgress('');
 				return { status: 'aborted' };
 			}
+			throwIfCancelled(token);
 			onProgress('Reading source file...');
-			const sourceBytes = await this.app.vault.adapter.readBinary(
-				request.sourceFile.path,
-			);
-
-			const parts = await this.preparePartBlobs(
-				request,
-				sourceBytes,
-				onProgress,
-			);
-			if (!parts) {
-				onProgress('');
-				return { status: 'aborted' };
-			}
-
-			const partNames = parts.map((part) => part.fileName);
-			const partPaths = await this.resolvePartPaths(
+			// Through the vault, which is the API for a file it indexes; the
+			// adapter is for paths it does not.
+			const sourceBytes = await this.app.vault.readBinary(
 				request.sourceFile,
-				partNames,
 			);
-			if (!partPaths) {
+			throwIfCancelled(token);
+
+			try {
+				written = await this.prepareAndWrite(
+					request,
+					sourceBytes,
+					onProgress,
+					SplitAttempt.Streamed,
+					token,
+				);
+			} catch (error) {
+				// A streamed split that failed partway has already removed
+				// the parts it wrote, so the decode-everything path starts
+				// from the same place the streamed one did. A cancelled one
+				// is not retried, whatever its part failed with: the decode
+				// cannot be interrupted and would only redo the work the
+				// user stopped.
+				if (
+					token.isCancelled() ||
+					!(error instanceof StreamedSplitError)
+				) {
+					throw error;
+				}
+				console.warn(
+					`${PLUGIN_LOG_PREFIX} Splitting while decoding failed; decoding the whole file instead:`,
+					error,
+				);
+				written = await this.prepareAndWrite(
+					request,
+					sourceBytes,
+					onProgress,
+					SplitAttempt.Decoded,
+					token,
+				);
+			}
+			if (!written) {
 				onProgress('');
 				return { status: 'aborted' };
 			}
-
-			partFiles = await this.writePartFiles(parts, partPaths, onProgress);
-			partCount = parts.length;
-			firstPartName = partNames[0] ?? '';
 		} catch (error) {
-			const message =
-				error instanceof Error ? error.message : String(error);
+			// Asked of the token rather than of the error, which arrives in
+			// whatever shape the step the cancel interrupted fails with.
+			if (token.isCancelled()) {
+				onProgress('');
+				return { status: 'cancelled' };
+			}
+			const message = errorMessage(error);
 			onProgress(`Error: ${message}`);
-			new Notice(`Split failed: ${message}`);
+			this.notify(`Split failed: ${message}`);
 			return { status: 'aborted' };
 		}
 
 		// The parts exist on disk from here on
-		if (!(await this.finishSplit(request, partFiles, onProgress))) {
+		const finished = await this.sourceReplacer.replace(
+			request,
+			{
+				files: written.partFiles,
+				created: 'Parts were created',
+				frontmatterAdvice: ': properties cannot hold several links.',
+			},
+			onProgress,
+		);
+		if (!finished) {
 			return { status: 'partial' };
 		}
 
-		return { status: 'completed', partCount, firstPartName };
+		return {
+			status: 'completed',
+			partCount: written.partCount,
+			firstPartName: written.firstPartName,
+		};
 	}
 
 	/**
-	 * Post-write pipeline steps: updates links and optionally deletes
-	 * the source file. The part files already exist, so errors here are
-	 * reported as partial success and never as a failed split. The
-	 * source file is kept when some links could not be updated, because
-	 * deleting it would leave those links broken.
+	 * Prepares the parts one way, checks their names are free, and writes
+	 * them, releasing whatever the preparation held however that ends.
 	 * @param request - Split parameters
-	 * @param partFiles - Created part files in write order
+	 * @param sourceBytes - Raw bytes of the source file
 	 * @param onProgress - Receives pipeline progress text
-	 * @returns True when every requested step succeeded
+	 * @param attempt - Whether a streamed split may be tried
+	 * @param token - Cancels the split
+	 * @returns The written parts, or null when the split was refused (a
+	 *   Notice explains why)
+	 * @throws StreamedSplitError when a streamed part failed, after the parts
+	 *   written before it were removed, and the cancellation reason once the
+	 *   token is cancelled, after the same removal
 	 */
-	private async finishSplit(
+	private async prepareAndWrite(
 		request: SplitRequest,
-		partFiles: TFile[],
+		sourceBytes: ArrayBuffer,
 		onProgress: (text: string) => void,
-	): Promise<boolean> {
-		let linkResult: VaultLinkUpdateResult | null = null;
-		if (request.linkAction !== ConversionLinkAction.None) {
-			onProgress('Updating links...');
-			try {
-				linkResult = await updateLinksInVault(
-					this.app,
-					request.sourceFile,
-					partFiles,
-					request.linkAction,
-				);
-			} catch (error) {
-				const message =
-					error instanceof Error ? error.message : String(error);
-				onProgress(`Error: ${message}`);
-				new Notice(
-					`Parts were created, but updating links failed: ${message}. The source file was kept.`,
-				);
-				return false;
-			}
-			if (linkResult.frontmatterReferences > 0) {
-				new Notice(
-					`${String(linkResult.frontmatterReferences)} frontmatter link(s) still point to the source file: properties cannot hold several links.`,
-				);
-			}
+		attempt: SplitAttempt,
+		token: CancellationToken,
+	): Promise<WrittenParts | null> {
+		const prepared = await this.preparePartBlobs(
+			request,
+			sourceBytes,
+			onProgress,
+			attempt,
+			token,
+		);
+		if (!prepared) {
+			return null;
 		}
-
-		if (request.deleteSource) {
-			if (linkResult !== null && linkResult.skippedReferences > 0) {
-				new Notice(
-					`Source file kept: ${String(linkResult.skippedReferences)} link(s) could not be updated.`,
-				);
-			} else {
-				onProgress('Removing source file...');
-				try {
-					await this.app.fileManager.trashFile(request.sourceFile);
-				} catch (error) {
-					const message =
-						error instanceof Error ? error.message : String(error);
-					onProgress(`Error: ${message}`);
-					new Notice(
-						`Parts were created, but the source file could not be deleted: ${message}`,
-					);
-					return false;
-				}
-			}
+		using parts = prepared;
+		const partNames = parts.parts.map((part) => part.fileName);
+		const partPaths = await this.resolvePartPaths(
+			request.sourceFile,
+			partNames,
+		);
+		if (!partPaths) {
+			return null;
 		}
-		return true;
+		return {
+			partFiles: await this.writePartFiles(
+				parts.parts,
+				partPaths,
+				onProgress,
+				token,
+			),
+			partCount: parts.parts.length,
+			firstPartName: partNames[0] ?? '',
+		};
 	}
 
 	/**
 	 * Builds part blobs from the source bytes. WAV sources with a raw
-	 * sample data chunk are split byte-exactly without decoding; other
-	 * formats are decoded once and re-encoded per part.
+	 * sample data chunk are split byte-exactly without decoding. Other
+	 * formats are split as they are decoded where this device can, and
+	 * otherwise decoded once and re-encoded per part.
 	 * @param request - Split parameters
 	 * @param sourceBytes - Raw bytes of the source file
 	 * @param onProgress - Receives pipeline progress text
+	 * @param attempt - Whether a streamed split may be tried
+	 * @param token - Cancels the decode and the encode of every part
 	 * @returns Parts with target file names, or null when splitting
 	 * is not possible (a Notice explains why)
 	 */
@@ -281,18 +398,22 @@ export class SplitService {
 		request: SplitRequest,
 		sourceBytes: ArrayBuffer,
 		onProgress: (text: string) => void,
-	): Promise<PreparedPart[] | null> {
+		attempt: SplitAttempt,
+		token: CancellationToken,
+	): Promise<PreparedParts | null> {
 		const baseName = request.sourceFile.basename;
 		const sourceExtension = request.sourceFile.extension.toLowerCase();
 
 		if (sourceExtension === FORMAT_WAV) {
 			const layout = parseWavLayout(sourceBytes);
 			if (layout && request.cuts) {
-				return chapterWavParts(
-					request.cuts,
-					baseName,
-					sourceBytes,
-					layout,
+				return holdingNothing(
+					chapterWavParts(
+						request.cuts,
+						baseName,
+						sourceBytes,
+						layout,
+					),
 				);
 			}
 			if (layout) {
@@ -301,37 +422,72 @@ export class SplitService {
 					request.partSeconds,
 				);
 				if (partBytes <= 0 || layout.dataLength <= partBytes) {
-					new Notice('File is shorter than one part.');
+					this.notify('File is shorter than one part.');
 					return null;
 				}
 				const partCount = computePartCount(
 					layout.dataLength,
 					partBytes,
 				);
-				return Array.from({ length: partCount }, (_, index) => ({
-					fileName: buildPartFileName(
-						baseName,
-						request.suffix,
-						index + 1,
-						FORMAT_WAV,
-					),
-					// Built lazily inside data() so at most one part
-					// buffer is alive at a time while writing files that
-					// can be gigabytes in size
-					data: () =>
-						Promise.resolve(
-							buildWavPart(sourceBytes, layout, partBytes, index),
+				return holdingNothing(
+					Array.from({ length: partCount }, (_, index) => ({
+						fileName: buildPartFileName(
+							baseName,
+							request.suffix,
+							index + 1,
+							FORMAT_WAV,
 						),
-				}));
+						// Built lazily inside data() so at most one part
+						// buffer is alive at a time while writing files that
+						// can be gigabytes in size
+						data: () =>
+							Promise.resolve(
+								buildWavPart(
+									sourceBytes,
+									layout,
+									partBytes,
+									index,
+								),
+							),
+					})),
+				);
 			}
 			// Non-raw WAV (compressed codec inside): fall through to decode
 		}
 
+		const targetFormat = this.getTargetExtension(request.sourceFile);
+		// Said once per split: a streamed attempt that failed partway has
+		// already said it before the decoded one runs.
+		const announceWav =
+			targetFormat !== sourceExtension &&
+			attempt === SplitAttempt.Streamed;
+
+		if (attempt === SplitAttempt.Streamed) {
+			onProgress('Opening audio...');
+			const streamed = await StreamedSplit.open(
+				sourceBytes,
+				targetFormat,
+				request.bitrate,
+				token,
+			);
+			if (streamed) {
+				return streamedParts(
+					request,
+					baseName,
+					targetFormat,
+					streamed,
+					announceWav,
+					this.notify,
+				);
+			}
+		}
+
 		// Platform-dependent decode ceiling (far lower on mobile): the
 		// decode path expands the file to full PCM in memory. The lossless
-		// WAV byte path above never decodes, so it is not capped here.
+		// WAV byte path above and the streamed split never do, so neither is
+		// capped here.
 		if (!isDecodableSize(sourceBytes.byteLength)) {
-			new Notice(
+			this.notify(
 				tooLargeMessage('split', {
 					desktopAdvice: SPLIT_DESKTOP_ADVICE,
 				}),
@@ -341,52 +497,71 @@ export class SplitService {
 
 		onProgress('Decoding audio...');
 		const audioBuffer = await decodeAudioBlob(sourceBytes, 'split');
+		// The decode cannot be interrupted, so its end is where a cancel that
+		// arrived during it is noticed.
+		throwIfCancelled(token);
 		const partSamples = request.partSeconds * audioBuffer.sampleRate;
+		// Planned short of the end by the tail the streamed split plans short
+		// by, so a remainder too short to be a part of its own rides on the
+		// part before it here as well, and the last part still runs to the
+		// end of the audio.
+		const plannedSamples = Math.max(
+			0,
+			audioBuffer.length -
+				Math.floor(SPLIT_TAIL_SECONDS * audioBuffer.sampleRate),
+		);
 		// A chapter split has no fixed part length to be shorter than: its
 		// parts are as long as the chapters make them.
-		if (!request.cuts && audioBuffer.length <= partSamples) {
-			new Notice('File is shorter than one part.');
+		if (!request.cuts && plannedSamples <= partSamples) {
+			this.notify('File is shorter than one part.');
 			return null;
 		}
 
-		const targetFormat = this.getTargetExtension(request.sourceFile);
-		if (targetFormat !== sourceExtension) {
-			new Notice(
-				`Encoding to "${sourceExtension}" is unavailable; parts are saved as WAV.`,
-			);
+		if (announceWav) {
+			announceWavParts(sourceExtension, this.notify);
 		}
 
 		if (request.cuts) {
-			return chapterDecodedParts(
-				request,
-				request.cuts,
-				baseName,
-				targetFormat,
-				audioBuffer,
+			return holdingNothing(
+				chapterDecodedParts(
+					request,
+					request.cuts,
+					baseName,
+					targetFormat,
+					audioBuffer,
+					plannedSamples,
+					token,
+				),
 			);
 		}
 
-		const partCount = computePartCount(audioBuffer.length, partSamples);
-		return Array.from({ length: partCount }, (_, index) => ({
-			fileName: buildPartFileName(
-				baseName,
-				request.suffix,
-				index + 1,
-				targetFormat,
-			),
-			data: async () => {
-				const slice = sliceAudioBuffer(
-					audioBuffer,
-					index * partSamples,
-					(index + 1) * partSamples,
-				);
-				const blob = await encodeAudioBuffer(slice, {
-					format: targetFormat,
-					bitrate: request.bitrate,
-				});
-				return blob.arrayBuffer();
-			},
-		}));
+		const partCount = computePartCount(plannedSamples, partSamples);
+		return holdingNothing(
+			Array.from({ length: partCount }, (_, index) => ({
+				fileName: buildPartFileName(
+					baseName,
+					request.suffix,
+					index + 1,
+					targetFormat,
+				),
+				data: async () => {
+					const slice = sliceAudioBuffer(
+						audioBuffer,
+						index * partSamples,
+						index === partCount - 1
+							? audioBuffer.length
+							: (index + 1) * partSamples,
+					);
+					const blob = await encodeAudioBuffer(
+						slice,
+						{ format: targetFormat, bitrate: request.bitrate },
+						undefined,
+						token,
+					);
+					return blob.arrayBuffer();
+				},
+			})),
+		);
 	}
 
 	/**
@@ -406,7 +581,7 @@ export class SplitService {
 		);
 		for (const path of paths) {
 			if (await this.app.vault.adapter.exists(path)) {
-				new Notice(
+				this.notify(
 					`File "${path}" already exists. Rename it or choose a different suffix.`,
 				);
 				return null;
@@ -418,20 +593,24 @@ export class SplitService {
 	/**
 	 * Writes all part files, yielding to the UI between parts.
 	 * On failure removes already-written parts and rethrows, keeping
-	 * the source file intact.
+	 * the source file intact. The parts go to the trash the user's deletion
+	 * preference names, whether the split ends here or runs again.
 	 * @param parts - Prepared parts in order
 	 * @param partPaths - Resolved part paths
 	 * @param onProgress - Receives pipeline progress text
+	 * @param token - Cancels the split, up to the last part being written
 	 * @returns The created part files in write order
 	 */
 	private async writePartFiles(
 		parts: PreparedPart[],
 		partPaths: string[],
 		onProgress: (text: string) => void,
+		token: CancellationToken,
 	): Promise<TFile[]> {
 		const written: { path: string; file: TFile | null }[] = [];
 		try {
 			for (let i = 0; i < parts.length; i++) {
+				throwIfCancelled(token);
 				onProgress(
 					`Writing part ${String(i + 1)} of ${String(parts.length)}...`,
 				);
@@ -441,6 +620,8 @@ export class SplitService {
 					continue;
 				}
 				const bytes = await part.data();
+				// A part encoded as the cancel arrived is not written.
+				throwIfCancelled(token);
 				const created = await this.app.vault.createBinary(
 					partPath,
 					bytes,
@@ -452,12 +633,16 @@ export class SplitService {
 				// Yield to the UI between parts so the progress text repaints
 				await delay(0);
 			}
+			// The last moment a cancel undoes the split: past it, the links
+			// are rewritten to the parts.
+			throwIfCancelled(token);
 		} catch (error) {
+			// Every part written so far goes where the user's deletion
+			// preference puts it, recoverable, whether the split ends here or
+			// runs again from a whole-file decode that writes every part anew.
 			for (const part of written) {
 				try {
 					if (part.file) {
-						// trashFile respects the user's file deletion
-						// preference and keeps the rollback recoverable
 						await this.app.fileManager.trashFile(part.file);
 					} else {
 						await this.app.vault.adapter.remove(part.path);
@@ -516,6 +701,9 @@ function chapterWavParts(
  * @param baseName - Name of the recording, used when a title yields nothing
  * @param targetFormat - Extension the parts are encoded to
  * @param audioBuffer - The decoded recording
+ * @param plannedSamples - Length the cuts are placed within, short of the
+ *   end by SPLIT_TAIL_SECONDS; the last part still runs to the end
+ * @param token - Cancels the encode of a part
  * @returns The parts, each encoded lazily
  */
 function chapterDecodedParts(
@@ -524,13 +712,16 @@ function chapterDecodedParts(
 	baseName: string,
 	targetFormat: string,
 	audioBuffer: AudioBuffer,
+	plannedSamples: number,
+	token: CancellationToken,
 ): PreparedPart[] {
 	const taken = new Set<string>();
-	return computeCutRanges(
+	const ranges = computeCutRanges(
 		cuts,
 		(seconds) => Math.floor(Math.max(0, seconds) * audioBuffer.sampleRate),
-		audioBuffer.length,
-	).map((range, index) => ({
+		plannedSamples,
+	);
+	return ranges.map((range, index) => ({
 		fileName: chapterPartName(
 			range.cut,
 			index,
@@ -539,14 +730,111 @@ function chapterDecodedParts(
 			taken,
 		),
 		data: async () => {
-			const slice = sliceAudioBuffer(audioBuffer, range.start, range.end);
-			const blob = await encodeAudioBuffer(slice, {
-				format: targetFormat,
-				bitrate: request.bitrate,
-			});
+			const slice = sliceAudioBuffer(
+				audioBuffer,
+				range.start,
+				index === ranges.length - 1 ? audioBuffer.length : range.end,
+			);
+			const blob = await encodeAudioBuffer(
+				slice,
+				{ format: targetFormat, bitrate: request.bitrate },
+				undefined,
+				token,
+			);
 			return blob.arrayBuffer();
 		},
 	}));
+}
+
+/**
+ * Tells the user that a compressed source's parts are written as WAV, because
+ * this device has no encoder for its own format.
+ * @param sourceExtension - The format the parts would otherwise have kept
+ * @param notify - Where the user is told
+ */
+function announceWavParts(sourceExtension: string, notify: Notify): void {
+	notify(
+		`Encoding to "${sourceExtension}" is unavailable; parts are saved as WAV.`,
+	);
+}
+
+/**
+ * The parts a split cuts out of a recording as it is decoded.
+ *
+ * Planned on the same frame arithmetic the decoded path uses - part k ends at
+ * k times the part length in frames, a chapter part at the floor of its start
+ * time in frames - and over the length the container states, a little short
+ * of it (see SPLIT_TAIL_SECONDS). The last part runs to the end of
+ * whatever the decoder produces, so nothing past the plan is lost. Each data
+ * callback continues the one decode where the previous part stopped, which is
+ * why the parts must be written in order, as writePartFiles writes them.
+ * @param request - The split being performed
+ * @param baseName - Name of the recording
+ * @param targetFormat - Extension the parts are encoded to
+ * @param streamed - The open streamed split, which the parts take over
+ * @param announceWav - Whether to say the parts are written as WAV
+ * @param notify - Where the user is told why there are no parts or WAV ones
+ * @returns The parts, or null when the recording is shorter than one part
+ */
+function streamedParts(
+	request: SplitRequest,
+	baseName: string,
+	targetFormat: string,
+	streamed: StreamedSplit,
+	announceWav: boolean,
+	notify: Notify,
+): PreparedParts | null {
+	const { plannedFrames, sampleRate } = streamed;
+	let plan: { fileName: string; end: number }[];
+	if (request.cuts) {
+		const taken = new Set<string>();
+		plan = computeCutRanges(
+			request.cuts,
+			(seconds) => Math.floor(Math.max(0, seconds) * sampleRate),
+			plannedFrames,
+		).map((range, index) => ({
+			fileName: chapterPartName(
+				range.cut,
+				index,
+				baseName,
+				targetFormat,
+				taken,
+			),
+			end: range.end,
+		}));
+	} else {
+		const partFrames = request.partSeconds * sampleRate;
+		if (plannedFrames <= partFrames) {
+			streamed[Symbol.dispose]();
+			notify('File is shorter than one part.');
+			return null;
+		}
+		plan = Array.from(
+			{ length: computePartCount(plannedFrames, partFrames) },
+			(_, index) => ({
+				fileName: buildPartFileName(
+					baseName,
+					request.suffix,
+					index + 1,
+					targetFormat,
+				),
+				end: Math.floor((index + 1) * partFrames),
+			}),
+		);
+	}
+	if (announceWav) {
+		announceWavParts(request.sourceFile.extension.toLowerCase(), notify);
+	}
+	const lastIndex = plan.length - 1;
+	return {
+		parts: plan.map(({ fileName, end }, index) => ({
+			fileName,
+			data: () => streamed.nextPart(index === lastIndex ? null : end),
+		})),
+		[Symbol.dispose]: (): void => {
+			streamed[Symbol.dispose]();
+		},
+	};
 }
 
 /**

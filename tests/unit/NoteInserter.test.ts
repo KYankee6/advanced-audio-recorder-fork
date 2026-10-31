@@ -25,10 +25,19 @@ function createMockDebugLogger(): { log: jest.Mock } {
 	return { log: jest.fn() };
 }
 
-// Helper to create a mock App with workspace methods
+/**
+ * A mock App with workspace methods, over a vault that indexes every file it
+ * is asked about. Links are generated the way Obsidian's default settings
+ * produce them, as a shortest-path wikilink, unless a test supplies its own
+ * generator.
+ * @param overrides - The open views, and the link generator to use
+ * @returns The app
+ */
 function appWithViews(overrides?: {
 	activeView?: SpiedMarkdownView | null;
 	leaves?: Array<{ view: SpiedMarkdownView }>;
+	generateMarkdownLink?: jest.Mock;
+	indexed?: boolean;
 }): App {
 	const activeView = overrides?.activeView ?? null;
 	const leaves = overrides?.leaves ?? [];
@@ -37,6 +46,15 @@ function appWithViews(overrides?: {
 		workspace: {
 			getActiveViewOfType: jest.fn().mockReturnValue(activeView),
 			getLeavesOfType: jest.fn().mockReturnValue(leaves),
+		},
+		vault: {
+			getFileByPath: (path: string): TFile | null =>
+				overrides?.indexed === false ? null : createFile(path),
+		},
+		fileManager: {
+			generateMarkdownLink:
+				overrides?.generateMarkdownLink ??
+				jest.fn((file: TFile): string => `[[${file.name}]]`),
 		},
 	}).app;
 }
@@ -220,7 +238,7 @@ describe('NoteInserter', () => {
 			).not.toThrow();
 		});
 
-		it('formats links correctly as ![[filename]]', () => {
+		it('embeds the link generated for the file', () => {
 			const activeView = createMockView('notes/test.md', 0, 0);
 			const app = appWithViews({ activeView });
 
@@ -276,25 +294,106 @@ describe('NoteInserter', () => {
 			);
 		});
 
-		it('uses filename only, stripping directory path', () => {
+		it('follows the Markdown link format when the vault uses it', () => {
 			const activeView = createMockView('notes/test.md', 0, 0);
-			const app = appWithViews({ activeView });
+			const generateMarkdownLink = jest.fn(
+				(): string => '[my take](../Recordings/my%20take.webm)',
+			);
+			const app = appWithViews({ activeView, generateMarkdownLink });
 
-			insertFileLinks(['a/b/c/d/recording.flac'], null, app);
+			insertFileLinks(['Recordings/my take.webm'], null, app);
 
 			expect(activeView.editor.replaceSelection).toHaveBeenCalledWith(
-				'![[recording.flac]]',
+				'![my take](../Recordings/my%20take.webm)',
 			);
 		});
 
-		it('handles file path without directory separators', () => {
+		it('keeps a path the generator adds to tell same-named files apart', () => {
 			const activeView = createMockView('notes/test.md', 0, 0);
-			const app = appWithViews({ activeView });
+			const generateMarkdownLink = jest.fn(
+				(file: TFile): string => `[[${file.path}]]`,
+			);
+			const app = appWithViews({ activeView, generateMarkdownLink });
 
-			insertFileLinks(['recording.webm'], null, app);
+			insertFileLinks(['Meetings/Audio/recording.flac'], null, app);
+
+			expect(activeView.editor.replaceSelection).toHaveBeenCalledWith(
+				'![[Meetings/Audio/recording.flac]]',
+			);
+		});
+
+		it('writes one embed marker when the generator already embeds', () => {
+			// generateMarkdownLink prefixes media files with "!" by itself
+			const activeView = createMockView('notes/test.md', 0, 0);
+			const generateMarkdownLink = jest.fn(
+				(): string => '![[recording.webm]]',
+			);
+			const app = appWithViews({ activeView, generateMarkdownLink });
+
+			insertFileLinks(['Recordings/recording.webm'], null, app);
 
 			expect(activeView.editor.replaceSelection).toHaveBeenCalledWith(
 				'![[recording.webm]]',
+			);
+		});
+
+		it('generates the link from the note the context names', () => {
+			const view = createMockView('notes/daily.md', 5, 0);
+			const active = createMockView('elsewhere/other.md', 0, 0);
+			const generateMarkdownLink = jest.fn((): string => '[[x]]');
+			const app = appWithViews({
+				activeView: active,
+				leaves: [{ view }],
+				generateMarkdownLink,
+			});
+			const context: InsertionContext = {
+				filePath: 'notes/daily.md',
+				line: 0,
+				ch: 0,
+			};
+
+			insertFileLinks(['Recordings/a.webm'], context, app);
+
+			expect(generateMarkdownLink).toHaveBeenCalledWith(
+				expect.objectContaining({ path: 'Recordings/a.webm' }),
+				'notes/daily.md',
+			);
+		});
+
+		it('generates the link from the active note when falling back to it', () => {
+			const activeView = createMockView('notes/other.md', 0, 0);
+			const generateMarkdownLink = jest.fn((): string => '[[x]]');
+			const app = appWithViews({ activeView, generateMarkdownLink });
+
+			insertFileLinks(['Recordings/a.webm'], null, app);
+
+			expect(generateMarkdownLink).toHaveBeenCalledWith(
+				expect.objectContaining({ path: 'Recordings/a.webm' }),
+				'notes/other.md',
+			);
+		});
+
+		it('generates the link from the vault root for a view showing no note', () => {
+			const activeView = createMockView(null, 0, 0);
+			const generateMarkdownLink = jest.fn((): string => '[[x]]');
+			const app = appWithViews({ activeView, generateMarkdownLink });
+
+			insertFileLinks(['Recordings/a.webm'], null, app);
+
+			expect(generateMarkdownLink).toHaveBeenCalledWith(
+				expect.objectContaining({ path: 'Recordings/a.webm' }),
+				'',
+			);
+		});
+
+		it('names the full vault path of a file the vault does not index', () => {
+			const activeView = createMockView('notes/test.md', 0, 0);
+			const app = appWithViews({ activeView, indexed: false });
+
+			insertFileLinks(['Recordings/recording.webm'], null, app);
+
+			expect(activeView.editor.replaceSelection).toHaveBeenCalledWith(
+				'![[Recordings/recording.webm]]',
 			);
 		});
 
@@ -375,51 +474,34 @@ describe('NoteInserter', () => {
 	});
 
 	describe('insertTextAtCursor', () => {
-		const context: InsertionContext = {
-			filePath: 'notes/daily.md',
-			line: 1,
-			ch: 0,
-		};
-
-		it("inserts at the captured note's cursor as it stands now, even when another note is active", () => {
-			// The user may have gone on typing, or switched notes, while the
-			// dictation was being transcribed: the text follows the cursor of
-			// the note it was dictated into.
-			const dictatedInto = createMockView('notes/daily.md', 9, 2);
-			const active = createMockView('notes/other.md', 0, 0);
-			const app = appWithViews({
-				activeView: active,
-				leaves: [{ view: active }, { view: dictatedInto }],
-			});
-
-			const path = insertTextAtCursor(app, 'dictated', context);
-
-			expect(path).toBe('notes/daily.md');
-			expect(dictatedInto.editor.replaceSelection).toHaveBeenCalledWith(
-				'dictated',
-			);
-			expect(active.editor.replaceSelection).not.toHaveBeenCalled();
-		});
-
-		it('falls back to the active note when the captured one was closed', () => {
+		it("inserts at the active note's cursor", () => {
 			const active = createMockView('notes/other.md', 0, 0);
 			const app = appWithViews({
 				activeView: active,
 				leaves: [{ view: active }],
 			});
 
-			expect(insertTextAtCursor(app, 'dictated', context)).toBe(
-				'notes/other.md',
-			);
+			expect(insertTextAtCursor(app, 'dictated')).toBe('notes/other.md');
 			expect(active.editor.replaceSelection).toHaveBeenCalledWith(
 				'dictated',
 			);
 		});
 
+		it('names no note for an active view that shows no file', () => {
+			const unsaved = createMockView(null, 0, 0);
+			const app = appWithViews({
+				activeView: unsaved,
+				leaves: [{ view: unsaved }],
+			});
+
+			expect(insertTextAtCursor(app, 'dictated')).toBeNull();
+			expect(unsaved.editor.replaceSelection).toHaveBeenCalledWith(
+				'dictated',
+			);
+		});
+
 		it('reports that no note took the text when none is open', () => {
-			expect(
-				insertTextAtCursor(appWithViews(), 'dictated', context),
-			).toBeNull();
+			expect(insertTextAtCursor(appWithViews(), 'dictated')).toBeNull();
 		});
 	});
 
@@ -432,6 +514,7 @@ describe('NoteInserter', () => {
 			embeds?: Array<{ link: string; original: string }>;
 			resolves?: Record<string, string>;
 			content: string;
+			indexed?: boolean;
 		}): { app: App; getContent: () => string } {
 			const note =
 				opts.noteActive === false
@@ -454,7 +537,8 @@ describe('NoteInserter', () => {
 					},
 				},
 				vault: {
-					getFileByPath: (path: string): TFile => createFile(path),
+					getFileByPath: (path: string): TFile | null =>
+						opts.indexed === false ? null : createFile(path),
 					process: (
 						_note: unknown,
 						fn: (current: string) => string,
@@ -513,6 +597,71 @@ describe('NoteInserter', () => {
 			expect(getContent()).toBe(
 				'intro\n![[recording.mp4]]\n![[recording-clean.wav]]\noutro',
 			);
+		});
+
+		it('names the full vault path of a processed file the vault does not index', async () => {
+			const { app, getContent } = buildEmbedApp({
+				embeds: [
+					{ link: 'recording.mp4', original: '![[recording.mp4]]' },
+				],
+				resolves: { 'recording.mp4': 'Audio/recording.mp4' },
+				content: 'intro\n![[recording.mp4]]\noutro',
+				indexed: false,
+			});
+
+			await insertProcessedAudioEmbed(
+				app,
+				source(),
+				'Audio/recording-clean.wav',
+				true,
+			);
+
+			expect(getContent()).toBe(
+				'intro\n![[Audio/recording-clean.wav]]\noutro',
+			);
+		});
+
+		it('writes into the note it is given rather than the active one', async () => {
+			const { app, getContent } = buildEmbedApp({
+				noteActive: false,
+				embeds: [
+					{ link: 'recording.mp4', original: '![[recording.mp4]]' },
+				],
+				resolves: { 'recording.mp4': 'Audio/recording.mp4' },
+				content: '![[recording.mp4]]',
+			});
+
+			const notePath = await insertProcessedAudioEmbed(
+				app,
+				source(),
+				'Audio/recording-clean.wav',
+				false,
+				createFile('Meetings/standup.md'),
+			);
+
+			expect(notePath).toBe('Meetings/standup.md');
+			expect(getContent()).toBe(
+				'![[recording.mp4]]\n![[recording-clean.wav]]',
+			);
+		});
+
+		it('leaves the note as it is when the embed left it since it was read', async () => {
+			const { app, getContent } = buildEmbedApp({
+				embeds: [
+					{ link: 'recording.mp4', original: '![[recording.mp4]]' },
+				],
+				resolves: { 'recording.mp4': 'Audio/recording.mp4' },
+				content: 'intro\noutro',
+			});
+
+			await insertProcessedAudioEmbed(
+				app,
+				source(),
+				'Audio/recording-clean.wav',
+				false,
+			);
+
+			expect(getContent()).toBe('intro\noutro');
 		});
 
 		it('returns null when the active note does not embed the source', async () => {

@@ -19,6 +19,7 @@ import { LlmTask } from '../transcription/llmPostProcess';
 import type { LlmProviderId, TranscriptionProviderId } from './settingsSchema';
 import {
 	ConversionLinkAction,
+	RecordingBannerAnchor,
 	TrackProcessingMode,
 	TrackSourceKind,
 } from './settingsSchema';
@@ -44,6 +45,19 @@ export const TRANSCRIPT_DESTINATION_LABELS: Record<
 	[TranscriptDestination.File]: 'Save to file',
 	[TranscriptDestination.Both]: 'Note and file',
 	[TranscriptDestination.Link]: 'Save to file and link it in the note',
+};
+
+/** Display labels for each mobile recording banner anchor (single source for UI). */
+export const RECORDING_BANNER_ANCHOR_LABELS: Record<
+	RecordingBannerAnchor,
+	string
+> = {
+	[RecordingBannerAnchor.TopLeft]: 'Top left',
+	[RecordingBannerAnchor.TopCenter]: 'Top center',
+	[RecordingBannerAnchor.TopRight]: 'Top right',
+	[RecordingBannerAnchor.BottomLeft]: 'Bottom left',
+	[RecordingBannerAnchor.BottomCenter]: 'Bottom center',
+	[RecordingBannerAnchor.BottomRight]: 'Bottom right',
 };
 
 /** Display labels for each transcript file format (single source for UI). */
@@ -116,8 +130,8 @@ export const LLM_PROVIDER_PRICING_URLS: Record<LlmProviderId, string> =
 	) as Record<LlmProviderId, string>;
 
 /** A value/label pair for a dropdown control (single source for the UI). */
-export interface LabeledOption {
-	value: string;
+export interface LabeledOption<K extends string = string> {
+	value: K;
 	label: string;
 	/** Render the option visible but unselectable (blocked on this device). */
 	disabled?: boolean;
@@ -132,7 +146,7 @@ export interface LabeledOption {
  */
 function optionsFromLabels<K extends string>(
 	labels: Record<K, string>,
-): LabeledOption[] {
+): LabeledOption<K>[] {
 	return (Object.keys(labels) as K[]).map((value) => ({
 		value,
 		label: labels[value],

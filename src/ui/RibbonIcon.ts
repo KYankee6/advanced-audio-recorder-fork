@@ -18,7 +18,7 @@ import { RecordingStatus } from '../types';
  */
 export const ICON_MIC = 'mic-vocal';
 /** Icon name for saving state */
-const ICON_SAVING = 'save';
+export const ICON_SAVING = 'save';
 
 /**
  * Icon name of the quick note button.
@@ -96,12 +96,4 @@ export function updateRibbonIcon(
 			ribbonIconEl.classList.remove('is-saving');
 			break;
 	}
-}
-
-/**
- * Initializes the ribbon icon to idle state.
- * @param ribbonIconEl - The ribbon icon HTML element
- */
-export function initializeRibbonIcon(ribbonIconEl: HTMLElement | null): void {
-	updateRibbonIcon(ribbonIconEl, RecordingStatus.Idle);
 }

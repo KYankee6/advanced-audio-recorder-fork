@@ -18,9 +18,9 @@ import type { Setting } from 'obsidian';
 
 /**
  * Marks a row whose whole body is drawn by hand: the documentation callout and
- * the credential blocks. From 1.13 on, the row of a render definition is the
- * only DOM that definition owns, so the stylesheet strips that row's own flex
- * layout, padding, background, and divider to let the body inside it read as an
+ * the credential blocks. The row of a render definition is the only DOM that
+ * definition owns, so the stylesheet strips that row's own flex layout,
+ * padding, background, and divider to let the body inside it read as an
  * ordinary settings column rather than as one setting's control.
  */
 export const SETTINGS_ROOT_CLASS = 'aar-settings-root';
@@ -63,12 +63,14 @@ export const STACKED_TEXT_CLASS = 'aar-stacked-text';
 export const SETTINGS_SECTION_CLASS = 'aar-settings-section';
 
 /**
- * Marks the tab's own container. On 1.13 the blocks carry their own class and
- * the stylesheet finds them there, but the Obsidian below it renders the same
- * tree as a flat list of rows with no group element at all, and its only block
- * boundaries are the heading rows. This is what scopes that half to this tab.
+ * Marks a list declared without a heading that has entries, and so shows its
+ * filter. On the desktop Obsidian still builds the list a header row to hold
+ * its add button, and the stylesheet moves that button onto the filter's line
+ * so the list opens with one row of controls. An empty list shows no filter,
+ * so it does not carry the class and keeps Obsidian's layout. The tree is
+ * rebuilt when an entry is added or removed, so the class follows the count.
  */
-export const SETTINGS_TAB_CLASS = 'aar-settings-tab';
+export const FILTER_LINE_LIST_CLASS = 'aar-filter-line-list';
 
 /**
  * Marks the block whose rows repeat the same pair of pickers. Sized to its own
@@ -101,17 +103,12 @@ export interface DeviceOptions {
 }
 
 /**
- * What the transcription sections need from the tab: the two credential blocks
+ * What the transcription sections need from the tab: the local engine's paths,
  * rendered by hand into the row their section keeps for them, and the edits
- * behind the add and delete affordances of the two model lists, which the
+ * behind the add and delete affordances of the model lists, which the
  * framework draws but the tab owns.
  */
 export interface TranscriptionBlocks {
-	/**
-	 * A provider's API key, which is a password field rather than a plain one,
-	 * so no control type covers it.
-	 */
-	readonly renderProviderKey: (host: HTMLElement, engineId: EngineId) => void;
 	/** The local engine's binary and model paths, which are file pickers. */
 	readonly renderLocalWhisperFields: (host: HTMLElement) => void;
 	/**
@@ -241,11 +238,6 @@ export interface SettingsDefinitionContext {
 	 * needs no branch here.
 	 */
 	readonly profiles: readonly ProfileCatalogue[];
-	/**
-	 * Whether a list in this tree needs a labelled add row of its own. False
-	 * wherever the renderer already draws one, which the render mode answers.
-	 */
-	readonly declareListAddRow: boolean;
 	/** Capture sample rates this device offers. */
 	readonly sampleRates: readonly number[];
 	/** The two output-format rows the declarative controls cannot express. */

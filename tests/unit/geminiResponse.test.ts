@@ -1,12 +1,13 @@
 /**
  * Tests for the Gemini response mapper: structured JSON carried in the
  * candidate text part, speaker gating by the diarize flag, numeric and
- * "HH:MM:SS"/"MM:SS" timecode parsing, empty-segment skipping, and tolerance
- * of malformed bodies.
+ * "HH:MM:SS"/"MM:SS" timecode parsing, empty-segment skipping, tolerance
+ * of malformed bodies, and the single text a rewrite request answers with.
  */
 
 import {
 	mapGeminiResponse,
+	mapGeminiRewrite,
 	timecodeToSeconds,
 } from 'src/transcription/providers/geminiResponse';
 import { at } from '../helpers/assertions';
@@ -55,6 +56,37 @@ describe('mapGeminiResponse', () => {
 		expect(at(result.segments, 0).text).toBe('Hello there.');
 		expect(at(result.segments, 0).speaker).toBe('Speaker 1');
 		expect(at(result.segments, 1).speaker).toBe('Speaker 2');
+	});
+
+	it('keeps the language of each segment and names the prevailing one', () => {
+		// A Polish lesson with a Ukrainian explanation: the top-level field the
+		// model filled names the start of the recording, and the transcript's
+		// language follows the text instead.
+		const result = mapGeminiResponse(
+			geminiBody({
+				language: 'uk',
+				segments: [
+					{ start: 0, text: 'Добрий день.', language: 'uk' },
+					{
+						start: 2,
+						text: 'Jestem młodym Białorusinem.',
+						language: ' pl ',
+					},
+					{
+						start: 6,
+						text: 'Mieszkam i pracuję w Warszawie.',
+						language: 'pl',
+					},
+				],
+			}),
+			false,
+		);
+		expect(result.segments.map((s) => s.language)).toEqual([
+			'uk',
+			'pl',
+			'pl',
+		]);
+		expect(result.language).toBe('pl');
 	});
 
 	it('omits speaker labels when diarization is off', () => {
@@ -165,6 +197,41 @@ describe('mapGeminiResponse', () => {
 		);
 		expect(mapGeminiResponse(null, false).segments).toEqual([]);
 		expect(warnSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe('mapGeminiRewrite', () => {
+	it('keeps the line breaks of the rewritten text and returns no segments', () => {
+		const result = mapGeminiRewrite(
+			geminiBody({ text: '- milk\n- bread\n' }),
+		);
+
+		expect(result.rewritten).toBe('- milk\n- bread');
+		expect(result.segments).toEqual([]);
+	});
+
+	it.each([
+		{ name: 'an empty candidate', body: { candidates: [] }, warns: 0 },
+		{
+			name: 'JSON without text',
+			body: geminiBody({ segments: [] }),
+			warns: 0,
+		},
+		{ name: 'non-JSON text', body: geminiTextBody('not json'), warns: 1 },
+	])('answers an empty text for $name', ({ body, warns }) => {
+		expect(mapGeminiRewrite(body).rewritten).toBe('');
+		expect(warnSpy).toHaveBeenCalledTimes(warns);
+	});
+
+	it('reports the usage the rewrite was billed for', () => {
+		const result = mapGeminiRewrite({
+			...(geminiBody({ text: 'done' }) as Record<string, unknown>),
+			usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 5 },
+		});
+
+		expect(result.usage).toEqual(
+			expect.objectContaining({ inputTokens: 50, outputTokens: 5 }),
+		);
 	});
 });
 

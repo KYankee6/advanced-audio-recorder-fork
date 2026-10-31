@@ -1,17 +1,21 @@
 /**
- * Transcription via Google Gemini. Uploads one audio payload with the File API,
- * then asks `generateContent` for a structured JSON transcript with timecodes
+ * Transcription via Google Gemini. Sends one audio payload inline when it fits
+ * an inline request and through the File API otherwise, then asks
+ * `generateContent` for a structured JSON transcript with timecodes
  * and optional speaker labels. The orchestrator sends a short recording whole
  * (one payload, so speaker numbering stays consistent across it) and splits a
- * recording too long for one request into parts. Containers Gemini does not
- * accept (e.g. webm) are decoded to 16 kHz mono WAV before upload.
+ * recording too long for one request into parts. A container Gemini does not
+ * read (e.g. webm) arrives already decoded to 16 kHz mono WAV: the service
+ * converts it once per run, so this provider uploads the bytes it is lent and
+ * nothing else.
  * @module transcription/providers/GeminiProvider
  */
 
+import { arrayBufferToBase64 } from 'obsidian';
 import {
 	GEMINI_API_KEY_HEADER,
-	GEMINI_AUDIO_MIME_TYPES,
 	GEMINI_GENERATE_MIN_TIMEOUT_MS,
+	GEMINI_INLINE_MAX_BYTES,
 	TRANSCRIPTION_PROVIDER_IDS,
 } from '../../constants';
 import { EngineLabel } from '../../providers/providers';
@@ -24,8 +28,7 @@ import {
 	uploadFile,
 	waitUntilActive,
 } from './geminiFileApi';
-import { mapGeminiResponse } from './geminiResponse';
-import { uploadContainer } from './uploadContainer';
+import { mapGeminiResponse, mapGeminiRewrite } from './geminiResponse';
 import {
 	assertGeminiNotBlocked,
 	assertGeminiNotTruncated,
@@ -33,6 +36,7 @@ import {
 	geminiGenerationControls,
 } from './geminiShared';
 import type { WhisperResult } from './whisperResponse';
+import { OTHER_SEGMENT_LANGUAGE } from '../TranscriptTypes';
 import type {
 	AudioPayload,
 	ProviderCapabilities,
@@ -57,43 +61,90 @@ export interface GeminiConfig {
 }
 
 /**
- * The containers the File API reads, in the refusal's own words, so a user
- * told to convert is told what to convert to.
+ * System instruction; the response schema enforces the output shape.
+ *
+ * Timecodes are asked for as MM:SS, the format Google's audio guide uses
+ * (https://ai.google.dev/gemini-api/docs/audio). Measured on a 24-minute
+ * lesson cut into two 12-minute parts with gemini-3.8-flash, five runs each:
+ * asked for seconds, 7 of 10 parts came back with lines past the part or
+ * stopping minutes early, and a phrase spoken at 14:27 landed up to 80 s
+ * late; asked for MM:SS, all 10 parts fitted and the phrase landed within a
+ * second of where it is spoken.
  */
-const GEMINI_ACCEPTED_CONTAINERS = 'mp3, aac, ogg, flac, aiff or wav';
-
-/** System instruction; the response schema enforces the output shape. */
 const SYSTEM_PROMPT =
 	'You are a professional meeting transcription assistant. Transcribe the ' +
 	'audio verbatim. Write each segment in the language actually spoken; do ' +
 	'not translate, and keep technology names as spoken. Provide a start (and ' +
-	'when possible an end) timecode in seconds for every segment.';
+	'when possible an end) timecode for every segment, formatted as MM:SS.';
+
+/** Fields every transcript segment the schema describes must carry. */
+const SEGMENT_REQUIRED_FIELDS = ['start', 'text'];
 
 /**
  * Structured-output schema (Gemini uses UPPERCASE OpenAPI type names): an
  * object with optional detected `language` and an array of `segments`, each a
- * start/end in seconds, an optional speaker label, and the spoken text.
+ * start/end as an MM:SS string (see {@link SYSTEM_PROMPT} for why not
+ * seconds), an optional speaker label, and the spoken text.
+ *
+ * A recording configured with several languages asks every segment for its
+ * own, limited to the configured codes plus {@link OTHER_SEGMENT_LANGUAGE}.
+ * A free-form field was the other choice, and it leaves the model free to
+ * answer "Polish" where a code is read. Without the extra value a third
+ * language spoken in passing has to be tagged with a code it is not in.
+ * @param languages - The configured languages, when more than one
+ * @returns The response schema for the request
  */
-const TRANSCRIPT_SCHEMA = {
-	type: 'OBJECT',
-	properties: {
-		language: { type: 'STRING' },
-		segments: {
-			type: 'ARRAY',
-			items: {
-				type: 'OBJECT',
-				properties: {
-					start: { type: 'NUMBER' },
-					end: { type: 'NUMBER' },
-					speaker: { type: 'STRING' },
-					text: { type: 'STRING' },
+function transcriptSchema(languages: readonly string[] | undefined): object {
+	const segmentProperties: Record<string, object> = {
+		start: { type: 'STRING' },
+		end: { type: 'STRING' },
+		speaker: { type: 'STRING' },
+		text: { type: 'STRING' },
+	};
+	const required = [...SEGMENT_REQUIRED_FIELDS];
+	if (languages) {
+		segmentProperties.language = {
+			type: 'STRING',
+			enum: [...languages, OTHER_SEGMENT_LANGUAGE],
+		};
+		required.push('language');
+	}
+	return {
+		type: 'OBJECT',
+		properties: {
+			language: { type: 'STRING' },
+			segments: {
+				type: 'ARRAY',
+				items: {
+					type: 'OBJECT',
+					properties: segmentProperties,
+					required,
 				},
-				required: ['start', 'text'],
 			},
 		},
-	},
-	required: ['segments'],
-};
+		required: ['segments'],
+	};
+}
+
+/**
+ * The instruction for a recording that switches between the configured
+ * languages. It names no language of its own: the list is the user's, and the
+ * rules hold for any pair. Script and spelling are named because a model that
+ * settles on one language writes the other in its orthography, which is how a
+ * Ukrainian passage came back as Polish-looking Latin text.
+ * @param languages - The configured languages, more than one
+ * @returns The sentences that replace the single-language line
+ */
+function languageListInstruction(languages: readonly string[]): string {
+	return (
+		`The recording switches between these languages: ${languages.join(', ')}. ` +
+		'Speakers may change language between sentences or inside one sentence. ' +
+		"Write every segment in the language actually spoken, in that language's own script and spelling, " +
+		"never respell one language in another's orthography, and never translate. " +
+		"Start a new segment wherever the language changes, and set each segment's language to the code of the language it is written in, " +
+		`or to "${OTHER_SEGMENT_LANGUAGE}" when it is in none of the listed languages.`
+	);
+}
 
 /**
  * Task-specific remedy appended to the truncation error. Unlike the LLM path,
@@ -104,13 +155,34 @@ const TRUNCATION_REMEDY =
 	'Use a shorter recording, split it into parts, or choose a model with a ' +
 	'larger output limit.';
 
-/** Builds the per-run instruction text sent alongside the audio. */
+/**
+ * Schema of a request that carries a rewrite instruction: the rewritten text
+ * alone, since nothing downstream reads the verbatim segments of such a run.
+ */
+const REWRITE_SCHEMA = {
+	type: 'OBJECT',
+	properties: { text: { type: 'STRING' } },
+	required: ['text'],
+};
+
+/**
+ * Builds the per-run instruction text sent alongside the audio. A rewrite
+ * instruction turns the task into hearing the audio and answering with the
+ * rewritten text; the user's instruction is quoted last and verbatim, so it
+ * controls every directive about the result, while the system prompt keeps
+ * the transcription rules.
+ */
 function buildInstruction(options: TranscribeOptions): string {
+	const { rewrite } = options;
 	const lines = [
-		'Transcribe the attached audio into ordered segments.',
-		options.language
-			? `The primary language is "${options.language}", but transcribe each segment in the language actually spoken.`
-			: 'Detect the spoken language(s) and transcribe each segment in the language actually spoken.',
+		rewrite === undefined
+			? 'Transcribe the attached audio into ordered segments.'
+			: 'Transcribe the attached audio, then rewrite the transcription as the instruction below asks, and return only the rewritten text in the text field.',
+		options.languages
+			? languageListInstruction(options.languages)
+			: options.language
+				? `The primary language is "${options.language}", but transcribe each segment in the language actually spoken.`
+				: 'Detect the spoken language(s) and transcribe each segment in the language actually spoken.',
 		options.diarize
 			? 'Identify distinct speakers and label each segment (e.g. "Speaker 1", "Speaker 2"); use real names when clearly stated.'
 			: 'Do not include speaker labels.',
@@ -131,8 +203,24 @@ function buildInstruction(options: TranscribeOptions): string {
 			`Context about this recording (topic, speaker names, domain terms, and canonical acronym spellings heard in it): ${biasPrompt}`,
 		);
 	}
+	if (rewrite !== undefined) {
+		// Without this a model asked to rewrite silence writes something.
+		lines.push(
+			'When no speech is heard, return an empty text.',
+			`Instruction: ${rewrite}`,
+		);
+	}
 	return lines.join(' ');
 }
+
+/**
+ * The audio part of a `generateContent` request, in the shape of the official
+ * client's `Part`: `inlineData` is its `Blob` (`data` a base64 string,
+ * `mimeType`), `fileData` its `FileData` (`fileUri`, `mimeType`).
+ */
+type GeminiAudioPart =
+	| { inlineData: { mimeType: string; data: string } }
+	| { fileData: { mimeType: string; fileUri: string } };
 
 /** Google Gemini multimodal transcription provider. */
 export class GeminiProvider implements TranscriptionProvider {
@@ -147,25 +235,25 @@ export class GeminiProvider implements TranscriptionProvider {
 		payload: AudioPayload,
 		options: TranscribeOptions,
 	): Promise<WhisperResult> {
-		// The File API reads only certain audio containers; anything else
-		// (e.g. webm) is decoded to 16 kHz mono WAV first, under the shared
-		// rule that also refuses a file too large for this platform to decode.
-		const audio = await uploadContainer(payload, {
-			// Asked by MIME type, the unit the File API documents its list in.
-			accepts: ({ contentType }) =>
-				GEMINI_AUDIO_MIME_TYPES.has(contentType),
-			engineLabel: this.label,
-			acceptedContainers: GEMINI_ACCEPTED_CONTAINERS,
-			maxRequestBytes: this.capabilities.maxRequestBytes,
-			maxRequestSeconds: this.capabilities.maxRequestSeconds,
-		});
-
+		// Already in a container Gemini reads (see the capability's
+		// originalContainers), and only read here: the same payload is sent
+		// again when the service waits out a refusal.
+		if (payload.data.byteLength <= GEMINI_INLINE_MAX_BYTES) {
+			// One request instead of four: no upload session to open, no file
+			// to poll until ACTIVE and none to delete afterwards.
+			return this.generate(payload, options, {
+				inlineData: {
+					mimeType: payload.contentType,
+					data: arrayBufferToBase64(payload.data),
+				},
+			});
+		}
 		const file = await uploadFile(
 			this.config.baseUrl,
 			this.config.apiKey,
-			audio.data,
-			audio.contentType,
-			audio.filename,
+			payload.data,
+			payload.contentType,
+			payload.filename,
 			this.config.requestTimeoutMs,
 			options.signal,
 		);
@@ -174,60 +262,12 @@ export class GeminiProvider implements TranscriptionProvider {
 				this.config.baseUrl,
 				this.config.apiKey,
 				file.name,
-				fileProcessingWaitMs(audio.data.byteLength),
+				fileProcessingWaitMs(payload.data.byteLength),
 				options.signal,
 			);
-			const url = geminiGenerateContentUrl(
-				this.config.baseUrl,
-				this.config.model,
-			);
-			// Transcription is deterministic, so the request asks for as
-			// little reasoning as this model's generation allows and for the
-			// temperature that generation is tuned for. Both follow from the
-			// generation, so both are answered in one place.
-			const controls = geminiGenerationControls(
-				this.config.model,
-				DETERMINISTIC_TEMPERATURE,
-			);
-			const json = await requestJson({
-				url,
-				method: 'POST',
-				headers: authHeader(GEMINI_API_KEY_HEADER, this.config.apiKey),
-				contentType: 'application/json',
-				body: JSON.stringify({
-					contents: [
-						{
-							parts: [
-								{
-									fileData: {
-										mimeType: audio.contentType,
-										fileUri: file.uri,
-									},
-								},
-								{ text: buildInstruction(options) },
-							],
-						},
-					],
-					systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-					generationConfig: {
-						responseMimeType: 'application/json',
-						responseSchema: TRANSCRIPT_SCHEMA,
-						...controls,
-					},
-				}),
-				timeoutMs: inferenceTimeoutMs(
-					audio.data.byteLength,
-					GEMINI_GENERATE_MIN_TIMEOUT_MS,
-					this.config.requestTimeoutMs,
-				),
-				signal: options.signal,
+			return await this.generate(payload, options, {
+				fileData: { mimeType: payload.contentType, fileUri: file.uri },
 			});
-			// A truncated (MAX_TOKENS) response yields invalid JSON, and a
-			// safety/policy block yields no candidate; both would otherwise map
-			// to an empty transcript with no explanation.
-			assertGeminiNotTruncated(json, TRUNCATION_REMEDY);
-			assertGeminiNotBlocked(json);
-			return mapGeminiResponse(json, options.diarize);
 		} finally {
 			// Best-effort cleanup; a left-over file expires on Google's side.
 			try {
@@ -240,5 +280,64 @@ export class GeminiProvider implements TranscriptionProvider {
 				// Ignore cleanup failures.
 			}
 		}
+	}
+
+	/**
+	 * Asks `generateContent` for the structured transcript of the audio part.
+	 * @param payload - The audio, for the size the timeout scales with
+	 * @param options - The run's options
+	 * @param audio - The audio part: inline bytes or an uploaded file
+	 * @returns The mapped transcript
+	 */
+	private async generate(
+		payload: AudioPayload,
+		options: TranscribeOptions,
+		audio: GeminiAudioPart,
+	): Promise<WhisperResult> {
+		// Transcription is deterministic, so the request asks for as little
+		// reasoning as this model's generation allows and for the temperature
+		// that generation is tuned for. Both follow from the generation, so
+		// both are answered in one place.
+		const controls = geminiGenerationControls(
+			this.config.model,
+			DETERMINISTIC_TEMPERATURE,
+		);
+		const json = await requestJson({
+			url: geminiGenerateContentUrl(
+				this.config.baseUrl,
+				this.config.model,
+			),
+			method: 'POST',
+			headers: authHeader(GEMINI_API_KEY_HEADER, this.config.apiKey),
+			contentType: 'application/json',
+			body: JSON.stringify({
+				contents: [
+					{ parts: [audio, { text: buildInstruction(options) }] },
+				],
+				systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+				generationConfig: {
+					responseMimeType: 'application/json',
+					responseSchema:
+						options.rewrite === undefined
+							? transcriptSchema(options.languages)
+							: REWRITE_SCHEMA,
+					...controls,
+				},
+			}),
+			timeoutMs: inferenceTimeoutMs(
+				payload.data.byteLength,
+				GEMINI_GENERATE_MIN_TIMEOUT_MS,
+				this.config.requestTimeoutMs,
+			),
+			signal: options.signal,
+		});
+		// A truncated (MAX_TOKENS) response yields invalid JSON, and a
+		// safety/policy block yields no candidate; both would otherwise map
+		// to an empty transcript with no explanation.
+		assertGeminiNotTruncated(json, TRUNCATION_REMEDY);
+		assertGeminiNotBlocked(json);
+		return options.rewrite === undefined
+			? mapGeminiResponse(json, options.diarize)
+			: mapGeminiRewrite(json);
 	}
 }

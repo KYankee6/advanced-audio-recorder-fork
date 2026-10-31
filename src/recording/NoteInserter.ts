@@ -44,9 +44,51 @@ export function captureInsertionContext(
 }
 
 /**
- * Inserts Obsidian embed links for the given file paths into a note.
- * Uses the captured insertion context if available, otherwise falls
- * back to the currently active editor.
+ * Builds the embed of a vault file for a note, in the link format the user
+ * chose under Files and links. `generateMarkdownLink` decides the format
+ * (wikilink or Markdown link), the path it needs to stay unambiguous when
+ * two files share a name, and the encoding of a Markdown target; whether it
+ * also prefixes the `!` depends on the file type, so its marker is dropped
+ * and the embed marker applied here, the way the vault-wide link rewrite
+ * does it.
+ *
+ * A path the vault does not index has no TFile to hand over. Every caller
+ * writes the file through the vault before linking it, which indexes it at
+ * once, so this is a file removed in between; the embed then names the full
+ * vault path, which is the one form that cannot resolve to another file of
+ * the same name.
+ * @param app - Obsidian App instance
+ * @param path - Vault path of the file to embed
+ * @param sourcePath - Path of the note the embed is written into
+ * @returns The embed, ready to insert
+ */
+function embedLinkForPath(app: App, path: string, sourcePath: string): string {
+	const file = app.vault.getFileByPath(path);
+	if (!file) {
+		return `![[${path}]]`;
+	}
+	const link = app.fileManager.generateMarkdownLink(file, sourcePath);
+	return `!${link.startsWith('!') ? link.slice(1) : link}`;
+}
+
+/**
+ * Builds the embeds of the given files for a note, one per line.
+ * @param app - Obsidian App instance
+ * @param paths - Vault paths of the files to embed
+ * @param sourcePath - Path of the note the embeds are written into
+ * @returns The embeds joined with newlines
+ */
+function embedLinksFor(app: App, paths: string[], sourcePath: string): string {
+	return paths
+		.map((path) => embedLinkForPath(app, path, sourcePath))
+		.join('\n');
+}
+
+/**
+ * Inserts embeds of the given files into a note. Uses the captured
+ * insertion context if available, otherwise falls back to the currently
+ * active editor. The embeds are built for the note they land in, since a
+ * relative or shortest-path link is only correct from there.
  * @param fileLinks - Array of saved file paths
  * @param insertionContext - Previously captured cursor context
  * @param app - Obsidian App instance
@@ -58,23 +100,19 @@ export function insertFileLinks(
 	insertionContext: InsertionContext | null,
 	app: App,
 ): string | null {
-	const links = fileLinks
-		.map((path) => {
-			const fileName = path.split('/').pop() ?? path;
-			return `![[${fileName}]]`;
-		})
-		.join('\n');
-
 	if (insertionContext) {
 		const leafView = findNoteView(app, insertionContext.filePath);
 		if (leafView) {
-			const editor = leafView.editor;
+			const notePath = leafView.file?.path ?? insertionContext.filePath;
 			const pos = {
 				line: insertionContext.line + 1,
 				ch: 0,
 			};
-			editor.replaceRange(links + '\n', pos);
-			return leafView.file?.path ?? insertionContext.filePath;
+			leafView.editor.replaceRange(
+				embedLinksFor(app, fileLinks, notePath) + '\n',
+				pos,
+			);
+			return notePath;
 		}
 	}
 
@@ -82,40 +120,46 @@ export function insertFileLinks(
 	const activeView = app.workspace.getActiveViewOfType(MarkdownView);
 	const editor = activeView?.editor;
 	if (editor) {
-		editor.replaceSelection(links);
-		return activeView?.file?.path ?? null;
+		const notePath = activeView.file?.path ?? null;
+		editor.replaceSelection(embedLinksFor(app, fileLinks, notePath ?? ''));
+		return notePath;
 	}
 	return null;
 }
 
 /**
- * Inserts text at the cursor of the note a dictation was started in.
- *
- * The note is the one active when the dictation began, because that is the
- * note the user was writing in when they asked for it, and the position is
- * that editor's cursor as it stands now: a user who went on typing while the
- * dictation was transcribed wants it where they are, not where they were.
- * When that note is no longer open, the active note takes it instead.
+ * Inserts text at the cursor of the active note, for a dictation started where
+ * no note was active to anchor it.
  * @param app - Obsidian App instance
  * @param text - The text to insert, verbatim
- * @param insertionContext - The note captured when the dictation began
  * @returns The path of the note the text went into, or null when no note was
  *   open to take it
  */
-export function insertTextAtCursor(
-	app: App,
-	text: string,
-	insertionContext: InsertionContext | null,
-): string | null {
-	const view =
-		(insertionContext
-			? findNoteView(app, insertionContext.filePath)
-			: null) ?? app.workspace.getActiveViewOfType(MarkdownView);
+export function insertTextAtCursor(app: App, text: string): string | null {
+	const view = app.workspace.getActiveViewOfType(MarkdownView);
 	if (!view) {
 		return null;
 	}
 	view.editor.replaceSelection(text);
-	return view.file?.path ?? insertionContext?.filePath ?? null;
+	return view.file?.path ?? null;
+}
+
+/**
+ * The embeds of a file in a note, as the metadata cache reports them: the
+ * places a processed copy can take the file's place in.
+ * @param app - Obsidian App
+ * @param note - The Markdown note
+ * @param file - The embedded file
+ * @returns The embeds, in the note's order
+ */
+export function embedsOf(app: App, note: TFile, file: TFile): EmbedCache[] {
+	return (app.metadataCache.getFileCache(note)?.embeds ?? []).filter(
+		(embed) =>
+			app.metadataCache.getFirstLinkpathDest(
+				getLinkpath(embed.link),
+				note.path,
+			)?.path === file.path,
+	);
 }
 
 /**
@@ -133,6 +177,8 @@ export function insertTextAtCursor(
  * @param sourceFile - The original audio file that was processed
  * @param processedPath - Vault path of the processed output
  * @param replaceSource - Replace the source embeds instead of inserting after
+ * @param note - The note to link into, when the caller knows which one the
+ *   recording was reached through; the active note otherwise
  * @returns The note path the embed was inserted into, or null when none matched
  */
 export async function insertProcessedAudioEmbed(
@@ -140,28 +186,17 @@ export async function insertProcessedAudioEmbed(
 	sourceFile: TFile,
 	processedPath: string,
 	replaceSource: boolean,
+	note: TFile | null = app.workspace.getActiveFile(),
 ): Promise<string | null> {
-	const note = app.workspace.getActiveFile();
 	if (!note || note.extension !== 'md') {
 		return null;
 	}
-	const embeds = app.metadataCache.getFileCache(note)?.embeds ?? [];
-	const matches = embeds.filter(
-		(embed) =>
-			app.metadataCache.getFirstLinkpathDest(
-				getLinkpath(embed.link),
-				note.path,
-			)?.path === sourceFile.path,
-	);
+	const matches = embedsOf(app, note, sourceFile);
 	const firstMatch = matches[0];
 	if (!firstMatch) {
 		return null;
 	}
-	const processedFile = app.vault.getFileByPath(processedPath);
-	const link = processedFile
-		? app.fileManager.generateMarkdownLink(processedFile, note.path)
-		: `[[${processedPath.split('/').pop() ?? processedPath}]]`;
-	const newEmbed = `!${link}`;
+	const newEmbed = embedLinkForPath(app, processedPath, note.path);
 	await app.vault.process(note, (content) =>
 		replaceSource
 			? replaceSourceEmbeds(content, matches, newEmbed)

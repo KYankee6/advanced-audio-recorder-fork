@@ -48,6 +48,9 @@ import {
 	DEFAULT_LLM_SUMMARY_PROFILE_ID,
 	DEFAULT_LLM_CUSTOM_PROFILE_ID,
 	DEFAULT_PROFILE_NAME,
+	LANGUAGE_LESSON_CLEANUP_PROFILE_ID,
+	LANGUAGE_LESSON_CLEANUP_PROFILE_NAME,
+	LANGUAGE_LESSON_CLEANUP_PROMPT,
 	DEFAULT_CLEANUP_HIGHPASS_HZ,
 	DEFAULT_CLEANUP_GATE_THRESHOLD_DB,
 	DEFAULT_CLEANUP_LEVELING_MAKEUP_DB,
@@ -152,6 +155,44 @@ export function normalizeTrackSourceKind(value: unknown): TrackSourceKind {
 }
 
 /**
+ * Where the mobile recording banner rests: an edge of the screen and a third
+ * of its width. Dragging the banner snaps it to the nearest of these, so a
+ * position is a name rather than pixels and survives a rotation, a resized
+ * window and a vault synced to a screen of another size.
+ *
+ * Stored in data.json, so a value is renamed only with a migration. The keys
+ * are declared in the order the dropdown offers them.
+ */
+export const RecordingBannerAnchor = {
+	TopLeft: 'top-left',
+	/** Below the view header, where the banner sat before it could be moved. */
+	TopCenter: 'top-center',
+	TopRight: 'top-right',
+	BottomLeft: 'bottom-left',
+	BottomCenter: 'bottom-center',
+	BottomRight: 'bottom-right',
+} as const;
+
+/** One banner anchor (derived from {@link RecordingBannerAnchor}). */
+export type RecordingBannerAnchor =
+	(typeof RecordingBannerAnchor)[keyof typeof RecordingBannerAnchor];
+
+/**
+ * Coerces an untrusted value to a banner anchor, falling back to the place the
+ * banner had before it could be moved.
+ * @param value - Candidate value
+ */
+export function normalizeRecordingBannerAnchor(
+	value: unknown,
+): RecordingBannerAnchor {
+	return (
+		Object.values(RecordingBannerAnchor).find(
+			(anchor) => anchor === value,
+		) ?? RecordingBannerAnchor.TopCenter
+	);
+}
+
+/**
  * Track audio sources mapping (track number -> device ID).
  */
 export interface AudioSource {
@@ -219,6 +260,27 @@ export type TrackAudioSourcesRecord = Record<
 			kind?: unknown;
 	  }
 >;
+
+/**
+ * An API key moved into Obsidian's keychain whose secret no later start of
+ * the device that wrote it has found there yet (see settings/apiKeySecrets).
+ */
+export interface UnconfirmedApiKeySecret {
+	/** ID of the secret the key was written under. */
+	readonly id: string;
+	/**
+	 * The key itself, kept in data.json until the move is confirmed, so a
+	 * keychain write lost on the way to disk costs no key. Held here rather
+	 * than in the account's key field, which another device resolves from
+	 * its own keychain and would write back in place of this copy.
+	 */
+	readonly key: string;
+	/**
+	 * The device that wrote the secret. The keychain is per device, so only
+	 * a start of that device proves the write reached its disk.
+	 */
+	readonly device: string;
+}
 
 /**
  * Settings bound to the hardware of one platform. Device ids are
@@ -498,26 +560,51 @@ export interface AudioRecorderSettings {
 	 * one, so it gets a limit of its own.
 	 */
 	localWhisperTimeoutMinutes: number;
+	/**
+	 * Keys a migration wrote into Obsidian's keychain that no later start of
+	 * the writing device has found there yet, by account id. Each entry
+	 * carries the key, so a keychain write lost on the way to disk loses no
+	 * key (see settings/apiKeySecrets).
+	 */
+	unconfirmedApiKeySecrets: Readonly<Record<string, UnconfirmedApiKeySecret>>;
 	/** Whisper API base URL (OpenAI-compatible) */
 	whisperApiBaseUrl: string;
-	/** Whisper API key. Shared with the OpenAI LLM provider as the OpenAI vendor key. */
+	/**
+	 * Whisper API key. Shared with the OpenAI LLM provider as the OpenAI vendor
+	 * key. A runtime value: it is resolved from Obsidian's keychain through
+	 * {@link AudioRecorderSettings.whisperApiKeySecret} and written to disk only
+	 * while no secret is linked (see settings/apiKeySecrets).
+	 */
 	whisperApiKey: string;
+	/**
+	 * ID of the keychain secret holding the OpenAI key, or '' when none is
+	 * linked. The ID is what data.json stores and syncs; the value stays in
+	 * the keychain of each device.
+	 */
+	whisperApiKeySecret: string;
 	/** Whisper API model id (the selected one) */
 	whisperApiModel: string;
 	/** Known Whisper API model ids offered in the picker (user-editable) */
 	whisperApiModels: string[];
 	/** Deepgram API base URL */
 	deepgramBaseUrl: string;
-	/** Deepgram API key */
+	/** Deepgram API key (runtime value, resolved from the keychain) */
 	deepgramApiKey: string;
+	/** ID of the keychain secret holding the Deepgram key, or '' */
+	deepgramApiKeySecret: string;
 	/** Deepgram model id (the selected one) */
 	deepgramModel: string;
 	/** Known Deepgram model ids offered in the picker (user-editable) */
 	deepgramModels: string[];
 	/** Gemini API base URL */
 	geminiBaseUrl: string;
-	/** Gemini API key. Shared between Gemini transcription and the Gemini LLM provider. */
+	/**
+	 * Gemini API key. Shared between Gemini transcription and the Gemini LLM
+	 * provider. Runtime value, resolved from the keychain.
+	 */
 	geminiApiKey: string;
+	/** ID of the keychain secret holding the Gemini key, or '' */
+	geminiApiKeySecret: string;
 	/** Gemini model id (the selected one) */
 	geminiModel: string;
 	/** Known Gemini model ids offered in the picker (user-editable) */
@@ -529,9 +616,13 @@ export interface AudioRecorderSettings {
 	 */
 	mistralBaseUrl: string;
 	mistralApiKey: string;
+	/** ID of the keychain secret holding the Mistral key, or '' */
+	mistralApiKeySecret: string;
 	/** DeepSeek endpoint and key, read by its one chat catalogue. */
 	deepSeekBaseUrl: string;
 	deepSeekApiKey: string;
+	/** ID of the keychain secret holding the DeepSeek key, or '' */
+	deepSeekApiKeySecret: string;
 	/** Voxtral transcription model id (the selected one) */
 	voxtralModel: string;
 	/** Known Voxtral model ids offered in the picker (user-editable) */
@@ -580,6 +671,12 @@ export interface AudioRecorderSettings {
 	 */
 	profiles: Profile[];
 	/**
+	 * Ids of the profiles shipped after this plugin's first release that this
+	 * configuration has already been given (see {@link shippedProfiles}). A
+	 * shipped profile is added once, so one the user deleted stays deleted.
+	 */
+	shippedProfileIds: string[];
+	/**
 	 * The profile each kind applies, by kind; '' means none. An id naming a
 	 * profile that was removed reads as none, so nothing has to be cleaned up
 	 * here when a profile is deleted.
@@ -611,6 +708,8 @@ export interface AudioRecorderSettings {
 	 */
 	anthropicBaseUrl: string;
 	anthropicApiKey: string;
+	/** ID of the keychain secret holding the Anthropic key, or '' */
+	anthropicApiKeySecret: string;
 	/** Selected OpenAI LLM model id */
 	llmOpenAiModel: string;
 	/** Known OpenAI LLM model ids offered in the picker (user-editable) */
@@ -661,6 +760,8 @@ export interface AudioRecorderSettings {
 	showRecordingStats: boolean;
 	/** Show a prominent recording banner on mobile */
 	mobileRecordingBanner: boolean;
+	/** Where the mobile recording banner rests, set by dragging it */
+	mobileRecordingBannerPosition: RecordingBannerAnchor;
 	/** Default: enable the high-pass (low-rumble removal) stage */
 	cleanupHighPassEnabled: boolean;
 	/** High-pass filter cutoff in Hz */
@@ -686,9 +787,7 @@ export interface AudioRecorderSettings {
  */
 export type PrimitiveSettingKey = {
 	[K in keyof AudioRecorderSettings]: AudioRecorderSettings[K] extends
-		| string
-		| number
-		| boolean
+		string | number | boolean
 		? K
 		: never;
 }[keyof AudioRecorderSettings];
@@ -870,6 +969,24 @@ function seededProfiles(): Profile[] {
 			name: DEFAULT_PROFILE_NAME,
 			body: DEFAULT_LLM_CUSTOM_INSTRUCTION,
 		},
+		...shippedProfiles(),
+	];
+}
+
+/**
+ * The profiles a release added after the first one: a fresh install starts
+ * with them, and an existing one is given each of them once when it loads.
+ * None of them is put in use, so adding one never changes what a run does.
+ * @returns The shipped profiles, in the order their catalogues show them
+ */
+export function shippedProfiles(): Profile[] {
+	return [
+		{
+			id: LANGUAGE_LESSON_CLEANUP_PROFILE_ID,
+			kind: ProfileKindId.LlmCleanup,
+			name: LANGUAGE_LESSON_CLEANUP_PROFILE_NAME,
+			body: LANGUAGE_LESSON_CLEANUP_PROMPT,
+		},
 	];
 }
 
@@ -930,22 +1047,28 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	quickNoteTranscriptionProvider: TRANSCRIPTION_PROVIDER_IDS.WHISPER_API,
 	transcriptionChunkMb: DEFAULT_TRANSCRIBE_CHUNK_MB,
 	transcriptionTimeoutMinutes: DEFAULT_TRANSCRIPTION_TIMEOUT_MINUTES,
+	unconfirmedApiKeySecrets: {},
 	whisperApiBaseUrl: DEFAULT_OPENAI_BASE_URL,
 	whisperApiKey: '',
+	whisperApiKeySecret: '',
 	whisperApiModel: DEFAULT_WHISPER_API_MODEL,
 	whisperApiModels: [...WHISPER_API_MODEL_SUGGESTIONS],
 	deepgramBaseUrl: DEFAULT_DEEPGRAM_BASE_URL,
 	deepgramApiKey: '',
+	deepgramApiKeySecret: '',
 	deepgramModel: DEFAULT_DEEPGRAM_MODEL,
 	deepgramModels: [...DEEPGRAM_MODEL_SUGGESTIONS],
 	geminiBaseUrl: DEFAULT_GEMINI_BASE_URL,
 	geminiApiKey: '',
+	geminiApiKeySecret: '',
 	geminiModel: DEFAULT_GEMINI_MODEL,
 	geminiModels: [...GEMINI_MODEL_SUGGESTIONS],
 	mistralBaseUrl: DEFAULT_MISTRAL_BASE_URL,
 	mistralApiKey: '',
+	mistralApiKeySecret: '',
 	deepSeekBaseUrl: DEFAULT_DEEPSEEK_BASE_URL,
 	deepSeekApiKey: '',
+	deepSeekApiKeySecret: '',
 	voxtralModel: DEFAULT_VOXTRAL_MODEL,
 	voxtralModels: [...VOXTRAL_MODEL_SUGGESTIONS],
 	localWhisperBinaryPath: '',
@@ -971,6 +1094,7 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	llmPostProcessTask: LlmTask.Cleanup,
 	llmTranslateTargetLanguage: '',
 	profiles: seededProfiles(),
+	shippedProfileIds: shippedProfiles().map((profile) => profile.id),
 	selectedProfileIds: {
 		...noSelectedProfiles(),
 		[ProfileKindId.ChapterPrompt]: DEFAULT_CHAPTER_PROMPT_PROFILE_ID,
@@ -984,6 +1108,7 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	quickNoteLlmProvider: LLM_PROVIDER_IDS.OPENAI_COMPATIBLE,
 	anthropicBaseUrl: DEFAULT_ANTHROPIC_BASE_URL,
 	anthropicApiKey: '',
+	anthropicApiKeySecret: '',
 	llmOpenAiModel: DEFAULT_LLM_OPENAI_MODEL,
 	llmOpenAiModels: [...LLM_OPENAI_MODEL_SUGGESTIONS],
 	llmAnthropicModel: DEFAULT_LLM_ANTHROPIC_MODEL,
@@ -1005,6 +1130,7 @@ export const DEFAULT_SETTINGS: AudioRecorderSettings = {
 	detectSilentChannelOnSave: true,
 	showRecordingStats: true,
 	mobileRecordingBanner: true,
+	mobileRecordingBannerPosition: RecordingBannerAnchor.TopCenter,
 	cleanupHighPassEnabled: true,
 	cleanupHighPassHz: DEFAULT_CLEANUP_HIGHPASS_HZ,
 	cleanupNoiseGateEnabled: false,

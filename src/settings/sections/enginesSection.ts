@@ -2,9 +2,9 @@
  * The Engines page: one sub-page per engine, its account, and its model
  * catalogue.
  *
- * An engine's credentials are a password field and its local paths are file
- * pickers, neither of which the control set has a type for, so those rows come
- * through the context as render callbacks.
+ * An engine's key is a secret control, which Obsidian renders as its own
+ * keychain picker. The local engine's paths are file pickers the control set
+ * has no type for, so that row comes through the context as a render callback.
  * @module settings/sections/enginesSection
  */
 
@@ -31,14 +31,10 @@ import {
 	type PageStatus,
 } from '../settingsAttention';
 import type { AudioRecorderSettings } from '../settingsSchema';
+import type { SettingsDefinitionContext, TranscriptionBlocks } from './context';
 import {
-	SETTINGS_SECTION_CLASS,
-	type SettingsDefinitionContext,
-	type TranscriptionBlocks,
-} from './context';
-import {
-	addItemRow,
 	imperativeBlockRow,
+	listClass,
 	nameFilter,
 	sectionItems,
 	transcriptionPageActive,
@@ -170,14 +166,12 @@ function modelPickerRow(
  * @param engine - The engine whose catalogue this is
  * @param models - The catalogue's own settings fields and copy
  * @param blocks - The list edits, which the tab owns
- * @param declareAddRow - Whether the tree owes the list a labelled add row
  */
 function modelCataloguePage(
 	settings: AudioRecorderSettings,
 	engine: EngineId,
 	models: ProviderModels,
 	blocks: TranscriptionBlocks,
-	declareAddRow: boolean,
 ): SettingGroupItem {
 	const saved = models.models(settings);
 	const add = (): void => {
@@ -198,7 +192,7 @@ function modelCataloguePage(
 		items: [
 			{
 				type: 'list',
-				cls: SETTINGS_SECTION_CLASS,
+				cls: listClass(saved.length),
 				emptyState:
 					'No models saved yet. Add the model id your endpoint serves.',
 				search: nameFilter('Filter models'),
@@ -209,32 +203,21 @@ function modelCataloguePage(
 						blocks.removeModel(engine, id);
 					}
 				},
-				items: saved.map(
-					(id): SettingGroupItem => ({
-						name: id,
-						// The row is the choice: tapping an id puts it to work,
-						// and the one in use says so. A row's description is a
-						// string the framework renders, not a predicate it
-						// re-evaluates, so this is the selection as the tree was
-						// built - which is what a rebuild is for.
-						...(id === models.model(settings)
-							? { desc: 'In use' }
-							: {}),
-						action: (): void => {
-							blocks.selectModel(engine, id);
-						},
-					}),
-				),
+				items: saved.map((id): SettingGroupItem => ({
+					name: id,
+					// The row is the choice: tapping an id puts it to work,
+					// and the one in use says so. A row's description is a
+					// string the framework renders, not a predicate it
+					// re-evaluates, so this is the selection as the tree was
+					// built - which is what a rebuild is for.
+					...(id === models.model(settings)
+						? { desc: 'In use' }
+						: {}),
+					action: (): void => {
+						blocks.selectModel(engine, id);
+					},
+				})),
 			},
-			...(declareAddRow
-				? [
-						addItemRow(
-							'Add model',
-							'Saves another model id for this provider.',
-							add,
-						),
-					]
-				: []),
 		],
 	};
 }
@@ -250,14 +233,12 @@ function modelCataloguePage(
  * endpoint and its key, which is why the key is entered once.
  * @param settings - Live settings, read for the entry's value
  * @param engine - The engine being declared
- * @param blocks - The password field and the list edits, which the tab owns
- * @param declareAddRow - Whether the tree owes a list a labelled add row
+ * @param blocks - The local paths and the list edits, which the tab owns
  */
 function enginePage(
 	settings: AudioRecorderSettings,
 	engine: EngineDescriptor,
 	blocks: TranscriptionBlocks,
-	declareAddRow: boolean,
 ): SettingGroupItem {
 	const connection = accountOf(engine);
 	const rows: SettingGroupItem[] = [];
@@ -268,15 +249,15 @@ function enginePage(
 			desc: connection.baseUrlFieldDesc,
 			control: { type: 'text', key: connection.baseUrlKey },
 		});
-		rows.push(
-			imperativeBlockRow({
-				name: connection.keyFieldName,
-				aliases: ['api key', 'token', 'credentials'],
-				render: (host) => {
-					blocks.renderProviderKey(host, engine.id);
-				},
-			}),
-		);
+		// Bound to the ID of a keychain secret, not to the key: Obsidian draws
+		// its own picker, which links a stored secret or creates one, and only
+		// the ID reaches data.json. The key is resolved from the keychain.
+		rows.push({
+			name: connection.keyFieldName,
+			aliases: ['api key', 'token', 'credentials', 'secret', 'keychain'],
+			desc: connection.keyFieldDesc,
+			control: { type: 'secret', key: connection.apiKeySecretKey },
+		});
 	}
 	const models = engine.models;
 	if (models) {
@@ -286,13 +267,7 @@ function enginePage(
 		// question a dropdown answers in place.
 		rows.push(
 			modelPickerRow(settings, models),
-			modelCataloguePage(
-				settings,
-				engine.id,
-				models,
-				blocks,
-				declareAddRow,
-			),
+			modelCataloguePage(settings, engine.id, models, blocks),
 		);
 	}
 	if (engine.maxTokens) {
@@ -363,12 +338,7 @@ export function enginesPage(ctx: SettingsDefinitionContext): SettingGroupItem {
 		visible: (): boolean => transcriptionPageActive(ctx.settings),
 		items: sectionItems(
 			ENGINE_ORDER.map((id) =>
-				enginePage(
-					ctx.settings,
-					ENGINES[id],
-					ctx.transcriptionBlocks,
-					ctx.declareListAddRow,
-				),
+				enginePage(ctx.settings, ENGINES[id], ctx.transcriptionBlocks),
 			),
 		),
 	};

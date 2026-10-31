@@ -19,7 +19,10 @@ import {
 	type RenderDefinition,
 	type RowDefinition,
 } from '../helpers/declarativeSettings';
-import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
+import {
+	RecordingBannerAnchor,
+	type AudioRecorderSettings,
+} from 'src/settings/settingsSchema';
 import type { ProfileSection } from 'src/settings/profileKinds';
 import {
 	CHANNEL_MODE_LABELS,
@@ -27,12 +30,17 @@ import {
 	PCM_SAMPLE_FORMAT_LABELS,
 	LLM_PROVIDER_LABELS,
 	LLM_TASK_LABELS,
+	RECORDING_BANNER_ANCHOR_LABELS,
 	TRANSCRIPTION_PROVIDER_LABELS,
 	TRANSCRIPT_DESTINATION_LABELS,
 	TRANSCRIPT_FILE_FORMAT_LABELS,
 } from 'src/settings/labels';
 import {
+	ACCOUNTS,
+	ENGINES,
 	ENGINE_IDS,
+	ENGINE_ORDER,
+	accountOf,
 	type EngineId,
 	EngineLabel,
 } from 'src/providers/providers';
@@ -47,23 +55,25 @@ import {
 	WHISPER_API_MODELS_DOC_URL,
 } from 'src/constants';
 import {
+	FILTER_LINE_LIST_CLASS,
 	SETTINGS_BLOCK_ROW_CLASS,
 	SETTINGS_ROOT_CLASS,
 	SETTINGS_SECTION_CLASS,
 	STACKED_TEXT_CLASS,
 	buildSettingsDefinitions,
 	collectDebouncedControlKeys,
-	numberControlRejection,
 	type DiagnosticsActions,
 	type ProfileCatalogue,
 	type SettingsDefinitionContext,
 } from 'src/settings/settingsDefinitions';
+import { numberControlRejection } from '../mocks/settingsFramework';
 import {
 	setPlatform,
 	useDesktopPlatform,
 	useMobilePlatform,
 } from '../helpers/platform';
 import { maybeEl } from '../helpers/dom';
+import { usePlatform } from '../helpers/hostProcess';
 import {
 	installDisplayMediaHost,
 	type DisplayMediaHost,
@@ -91,11 +101,9 @@ describe('settings definitions', () => {
 	let profileReadsNote: boolean;
 	let profileEntries: ReturnType<ProfileCatalogue['entries']>;
 	let selectedProfileId: string;
-	let declareListAddRow: boolean;
 	let removeModel: jest.Mock;
 	let selectModel: jest.Mock;
 	let renderSummaryRow: jest.Mock;
-	let renderTranscriptionRest: jest.Mock;
 	let diagnostics: { [K in keyof DiagnosticsActions]: jest.Mock };
 
 	beforeEach(() => {
@@ -130,13 +138,9 @@ describe('settings definitions', () => {
 			},
 		];
 		selectedProfileId = 'b';
-		declareListAddRow = false;
 		removeModel = jest.fn();
 		selectModel = jest.fn();
 		renderSummaryRow = jest.fn();
-		renderTranscriptionRest = jest.fn((host: HTMLElement) => {
-			host.createDiv({ cls: 'aar-transcription-rest' });
-		});
 		diagnostics = {
 			startTestRecording: jest.fn(),
 			releaseTestRecording: jest.fn(),
@@ -173,11 +177,7 @@ describe('settings definitions', () => {
 			catalogue('transcription', 'Participant profiles', 'Participants'),
 			catalogue('quickNotes', 'Quick note profiles', 'Instruction'),
 		],
-		declareListAddRow,
 		transcriptionBlocks: {
-			renderProviderKey: renderTranscriptionRest as (
-				host: HTMLElement,
-			) => void,
 			renderLocalWhisperFields: jest.fn(),
 			addModel: addModel as (engine: EngineId) => void,
 			removeModel: removeModel as (
@@ -346,10 +346,19 @@ describe('settings definitions', () => {
 			expect(aliasesOf('Loudness leveling')).toContain('normalize');
 		});
 
+		it('lets the settings search find a key row by "API key" and by the keychain', () => {
+			// The row is named for its service, so a search for the generic
+			// term or for where the key now lives reaches every one of them.
+			for (const account of Object.values(ACCOUNTS)) {
+				expect(aliasesOf(account.keyFieldName)).toEqual(
+					expect.arrayContaining(['api key', 'token', 'keychain']),
+				);
+			}
+		});
+
 		it('makes the fields inside a hand-rendered block findable', () => {
-			// The search indexes definitions, and a key block is one
-			// definition, so the password field has no row of its own to match.
-			expect(aliasesOf('Deepgram API key')).toContain('token');
+			// The search indexes definitions, and the paths block is one
+			// definition, so its fields have no rows of their own to match.
 			expect(aliasesOf('Binary and model paths')).toContain('offline');
 		});
 
@@ -439,6 +448,17 @@ describe('settings definitions', () => {
 			settings.whisperApiModel = '';
 
 			expect(displayValue(EngineLabel.WhisperApi)).toBe('No model');
+		});
+
+		it('says an engine has no key before anything about its model', () => {
+			settings.transcriptionEnabled = true;
+			settings.deepgramApiKey = '';
+
+			// Without a key the engine cannot be reached at all, so its model
+			// is beside the point until one is entered.
+			expect(entryValueOf(pageOf(build(), EngineLabel.Deepgram))).toBe(
+				'No key',
+			);
 		});
 
 		it('counts a configured engine by its account, not by its engines', () => {
@@ -665,9 +685,14 @@ describe('settings definitions', () => {
 			expect(validate('auto')).toBeUndefined();
 			// Empty means "detect", which is what the placeholder says.
 			expect(validate('  ')).toBeUndefined();
-			expect(validate('English please')).toBe(
-				'Use an ISO code such as en or ru, or "auto".',
-			);
+			// Several codes describe a recording that switches language.
+			expect(validate('pl, uk')).toBeUndefined();
+			expect(validate('pl,uk,be')).toBeUndefined();
+			const refusal =
+				'Use "auto", an ISO code such as en, or several codes separated by commas, such as pl, uk.';
+			expect(validate('auto, pl')).toBe(refusal);
+			expect(validate('pl uk')).toBe(refusal);
+			expect(validate('English please')).toBe(refusal);
 		});
 
 		it('keeps the language row editable on an engine that ignores it', () => {
@@ -742,14 +767,44 @@ describe('settings definitions', () => {
 		});
 
 		it('hosts a provider key on that provider\u2019s page', () => {
-			// A password field is the one row no control type covers, and it
-			// belongs to the service rather than to either use of it.
+			// The key belongs to the service rather than to either use of it.
 			expect(pageEntryNames(EngineLabel.Deepgram)).toEqual([
 				'Base URL',
 				'Deepgram API key',
 				'Model',
 				'Model catalogue',
 			]);
+		});
+
+		it.each(
+			ENGINE_ORDER.flatMap((id) => {
+				const account = accountOf(ENGINES[id]);
+				return account ? [{ label: ENGINES[id].label, account }] : [];
+			}),
+		)(
+			'binds the key row of $label to the ID of a keychain secret',
+			({ label, account }) => {
+				// Never to the key: a secret control stores the ID, which is
+				// safe in a synced data.json, and the key stays in the keychain.
+				const row = rowOf(build(), label, account.keyFieldName);
+
+				expect(row.control).toEqual({
+					type: 'secret',
+					key: account.apiKeySecretKey,
+				});
+			},
+		);
+
+		it('says where a key is kept, how far it reaches, and that a local endpoint needs none', () => {
+			const row = rowOf(
+				build(),
+				EngineLabel.Deepgram,
+				'Deepgram API key',
+			);
+
+			expect(row.desc).toMatch(/keychain, not synced/);
+			expect(row.desc).toMatch(/once per vault/);
+			expect(row.desc).toMatch(/unlinked when .* local endpoint/);
 		});
 
 		it('picks the model in place and keeps the list behind an entry', () => {
@@ -927,7 +982,69 @@ describe('settings definitions', () => {
 			).not.toMatch(/unavailable on this build/);
 			expect(
 				rowOf(definitions, 'Audio input', 'Include system audio').desc,
-			).not.toMatch(/Windows only/);
+			).not.toMatch(/is refused here/);
+		});
+
+		// A Mac hands its output only to an app the user allowed, so the row
+		// offering it says where that is allowed before the first recording
+		// is stopped by it.
+		it('names the macOS permission on the source row of a Mac', () => {
+			withGrantingHost({ platform: 'darwin' });
+			settings.enableMultiTrack = true;
+
+			const desc = rowOf(build(), MULTI, 'Track 1 source').desc;
+
+			expect(desc).toMatch(/this computer's own output/);
+			expect(desc).toMatch(
+				/System Settings > Privacy & Security > Screen & System Audio Recording/,
+			);
+		});
+
+		// The row says the reason a recording would be refused with, so a
+		// user on an old Mac reads which version is short rather than a
+		// platform list their machine seems to belong to.
+		it('says which version a Mac falls short on', () => {
+			withGrantingHost({
+				platform: 'darwin',
+				mac: { system: '13.6.7', electron: '43.7.7' },
+			});
+			settings.enableMultiTrack = true;
+
+			const desc = rowOf(build(), MULTI, 'Track 1 source').desc;
+
+			expect(desc).toMatch(/unavailable on this build/);
+			expect(desc).toMatch(
+				/needs macOS 14\.2 or later, and this Mac runs macOS 13\.6\.7/,
+			);
+		});
+
+		// The same answer as the track source row, read from the same probe,
+		// so the switch tells a Mac user what to allow before the pairing is
+		// first used and still says how multi-track overrides it.
+		it('names the macOS permission on the audio-input switch of a Mac', () => {
+			withGrantingHost({ platform: 'darwin' });
+
+			const desc = rowOf(
+				build(),
+				'Audio input',
+				'Include system audio',
+			).desc;
+
+			expect(desc).toMatch(
+				/macOS hands its output only to an app allowed to record it\. Allow Obsidian under System Settings/,
+			);
+			expect(desc).toMatch(/Multi-track recording overrides it/);
+		});
+
+		// Windows asks for nothing beyond the click that starts a recording,
+		// so its row carries no permission step meant for a Mac.
+		it('names no permission on the source row of a Windows build', () => {
+			withGrantingHost();
+			settings.enableMultiTrack = true;
+
+			const desc = rowOf(build(), MULTI, 'Track 1 source').desc;
+
+			expect(desc).not.toMatch(/System Settings/);
 		});
 
 		it('offers the source row for every track it offers an input for', () => {
@@ -1075,9 +1192,13 @@ describe('settings definitions', () => {
 		// that can record the system output has to show the setting it carries
 		// on one that cannot, or it cannot be turned off there either.
 		it('says where this build cannot be granted the system output', () => {
+			usePlatform('linux');
+
 			const row = rowOf(build(), INPUT, SWITCH);
 
-			expect(row.desc).toMatch(/Windows only/);
+			expect(row.desc).toMatch(
+				/A recording started with it on is refused here\. Recording the system output directly is granted on Windows and on macOS only\./,
+			);
 			expect(disabledOf(row.control)).toBe(false);
 		});
 	});
@@ -1198,6 +1319,23 @@ describe('settings definitions', () => {
 			expect(modelList().emptyState).toContain('No models saved yet');
 		});
 
+		it('puts the add button on the filter line only while there are models to filter', () => {
+			// An empty list shows no filter, so its add button stays where
+			// Obsidian puts it.
+			const classes = (): string[] =>
+				((modelList() as { cls?: string }).cls ?? '').split(' ');
+			seedModels();
+
+			expect(classes()).toEqual([
+				SETTINGS_SECTION_CLASS,
+				FILTER_LINE_LIST_CLASS,
+			]);
+
+			settings.whisperApiModels = [];
+
+			expect(classes()).toEqual([SETTINGS_SECTION_CLASS]);
+		});
+
 		it('declares no catalogue for the local engine, which serves none', () => {
 			// It runs a binary against a file on disk: there is no list of
 			// served ids to keep, so its page holds the paths instead.
@@ -1241,6 +1379,23 @@ describe('settings definitions', () => {
 			for (const item of list.items) {
 				expect((item as { type?: string }).type).toBe('page');
 			}
+		});
+
+		it('puts the add button on the filter line only while there are profiles to filter', () => {
+			const classes = (): string[] =>
+				(
+					(listOf('Dictionary profiles') as { cls?: string }).cls ??
+					''
+				).split(' ');
+
+			expect(classes()).toEqual([
+				SETTINGS_SECTION_CLASS,
+				FILTER_LINE_LIST_CLASS,
+			]);
+
+			profileEntries = [];
+
+			expect(classes()).toEqual([SETTINGS_SECTION_CLASS]);
 		});
 
 		it('leaves the list without a per-row delete affordance', () => {
@@ -1418,27 +1573,6 @@ describe('settings definitions', () => {
 			listOf('Chapter guidance profiles').addItem?.action(createDiv());
 
 			expect(addProfile).toHaveBeenCalledTimes(1);
-		});
-
-		/** Whether a page declares a row of its own under a name. */
-		const hasRow = (page: GroupDefinition, name: string): boolean =>
-			page.items.some((item) => !('type' in item) && item.name === name);
-
-		it('declares a labelled add row only where the renderer draws none', () => {
-			expect(
-				hasRow(pageOf(build(), 'Dictionary profiles'), 'Add profile'),
-			).toBe(false);
-
-			declareListAddRow = true;
-			const page = pageOf(build(), 'Dictionary profiles');
-			rowIn(page, 'Add profile').action?.(createDiv(), 0);
-
-			expect(addProfile).toHaveBeenCalledTimes(1);
-			// Beside the list, not in it: a row inside would be filtered away
-			// by the list's own search exactly when nothing matches.
-			expect(listIn(page).items.map((item) => item.name)).not.toContain(
-				'Add profile',
-			);
 		});
 	});
 
@@ -1823,6 +1957,7 @@ describe('settings definitions', () => {
 			'Audio player',
 			'Audio processing & feedback',
 			'Audio cleanup defaults',
+			'Mobile',
 			'Diagnostics',
 		])('declares %s behind an entry rather than inline', (name) => {
 			// Sections nobody reads on the way to something else: inline they
@@ -1880,11 +2015,22 @@ describe('settings definitions', () => {
 			settings.showInputLevelMeter = false;
 			settings.showRecordingStats = false;
 			settings.detectSilentChannelOnSave = false;
+
+			// Six independent switches have no single value, so the entry
+			// reports how many of them are on.
+			expect(readValue('Audio processing & feedback')).toBe('2 of 6 on');
+		});
+
+		it('names on the mobile entry where the banner rests, or that it is off', () => {
+			settings.mobileRecordingBanner = true;
+			settings.mobileRecordingBannerPosition =
+				RecordingBannerAnchor.BottomRight;
+
+			expect(readValue('Mobile')).toBe('Bottom right');
+
 			settings.mobileRecordingBanner = false;
 
-			// Seven independent switches have no single value, so the entry
-			// reports how many of them are on.
-			expect(readValue('Audio processing & feedback')).toBe('2 of 7 on');
+			expect(readValue('Mobile')).toBe('Off');
 		});
 
 		it('names the stages the cleanup dialog would open with', () => {
@@ -2057,11 +2203,53 @@ describe('settings definitions', () => {
 					'Detect silent channel after recording',
 					{ type: 'toggle', key: 'detectSilentChannelOnSave' },
 				],
+			]);
+		});
+	});
+
+	describe('the mobile page', () => {
+		const MOBILE = 'Mobile';
+
+		it('holds the banner switch and its position in a block of their own', () => {
+			expect(groupOf(build(), 'Recording banner').heading).toBe(
+				'Recording banner',
+			);
+			expect(
+				rowNamesIn(groupOf(build(), MOBILE)).map((name) => [
+					name,
+					rowOf(build(), MOBILE, name).control,
+				]),
+			).toEqual([
 				[
-					'Mobile recording banner',
+					'Show recording banner',
 					{ type: 'toggle', key: 'mobileRecordingBanner' },
 				],
+				[
+					'Banner position',
+					{
+						type: 'dropdown',
+						key: 'mobileRecordingBannerPosition',
+						options: RECORDING_BANNER_ANCHOR_LABELS,
+					},
+				],
 			]);
+		});
+
+		it('offers every banner anchor', () => {
+			expect(Object.keys(RECORDING_BANNER_ANCHOR_LABELS)).toEqual(
+				Object.values(RecordingBannerAnchor),
+			);
+		});
+
+		it('shows the position only while the banner is on', () => {
+			const visible = rowOf(build(), MOBILE, 'Banner position').visible;
+			settings.mobileRecordingBanner = false;
+
+			expect(typeof visible === 'function' && visible()).toBe(false);
+
+			settings.mobileRecordingBanner = true;
+
+			expect(typeof visible === 'function' && visible()).toBe(true);
 		});
 	});
 

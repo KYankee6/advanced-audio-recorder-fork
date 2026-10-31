@@ -31,6 +31,35 @@ export const conversionInit = jest.fn();
  */
 export const getPrimaryAudioTrack = jest.fn();
 
+/** What a track double states about itself. */
+interface AudioTrackLayout {
+	codec?: string;
+	sampleRate?: number;
+	numberOfChannels?: number;
+}
+
+/**
+ * An audio track double for `getPrimaryAudioTrack` to resolve with: Opus,
+ * stereo, at 48 kHz unless told otherwise, which is what a recorder's
+ * intermediate file holds. Named once, because every conversion suite needs
+ * one and each copy had to learn the same new question when the pipeline
+ * started asking it.
+ * @param layout - What differs from the default track
+ * @returns The track double
+ */
+export function audioTrack({
+	codec = 'opus',
+	sampleRate = 48000,
+	numberOfChannels = 2,
+}: AudioTrackLayout = {}): object {
+	return {
+		getCodec: jest.fn().mockResolvedValue(codec),
+		isAudioTrack: (): boolean => true,
+		getSampleRate: jest.fn().mockResolvedValue(sampleRate),
+		getNumberOfChannels: jest.fn().mockResolvedValue(numberOfChannels),
+	};
+}
+
 /** `Input.computeDuration`; resolve it with the length the container carries. */
 export const computeDuration = jest.fn();
 
@@ -38,14 +67,28 @@ export const computeDuration = jest.fn();
 export const inputDispose = jest.fn();
 
 /**
- * Each input remembers its own disposal and hands itself to the track spy, so
- * a suite can answer a read the way mediabunny does once the input is gone.
+ * `Input.getMimeType`; resolve it with the full type the container reports,
+ * codec parameters included, as mediabunny does.
+ */
+export const getMimeType = jest.fn();
+
+/**
+ * `Input.getVideoTracks`; resolve it with the list the container carries, an
+ * empty one for an audio-only file. Handed the input, like the audio spy.
+ */
+export const getVideoTracks = jest.fn();
+
+/**
+ * Each input remembers its own disposal and hands itself to the track spies,
+ * so a suite can answer a read the way mediabunny does once the input is gone.
  */
 export const Input = jest.fn().mockImplementation(() => {
 	const input = {
 		disposed: false,
 		getPrimaryAudioTrack: (): unknown => getPrimaryAudioTrack(input),
+		getVideoTracks: (): unknown => getVideoTracks(input),
 		computeDuration: (): unknown => computeDuration(),
+		getMimeType: (): unknown => getMimeType(),
 		dispose: (): void => {
 			input.disposed = true;
 			inputDispose();
@@ -62,6 +105,23 @@ export const BlobSource = jest.fn();
 export const BufferSource = jest.fn();
 export const UrlSource = jest.fn();
 
+/** The options of a `UrlSource` a suite reads back. */
+export interface UrlSourceOptionsDouble {
+	getRetryDelay?: (previousAttempts: number) => number | null;
+	handleUnhandledError?: (error: unknown) => unknown;
+}
+
+/**
+ * The options the first `UrlSource` was built with, which say how the reader
+ * asked for its bytes: mediabunny keeps them private, so the call is the only
+ * place they can be read.
+ * @returns The options, or an empty object when none were passed
+ */
+export function firstUrlSourceOptions(): UrlSourceOptionsDouble {
+	const [call] = UrlSource.mock.calls as [string, UrlSourceOptionsDouble?][];
+	return call?.[1] ?? {};
+}
+
 export const BufferTarget = jest.fn().mockImplementation(() => ({
 	buffer: convertedBuffer,
 }));
@@ -74,6 +134,7 @@ export const ALL_FORMATS: unknown[] = [];
  * to exist, and a suite that pulls the registry in gets them for free rather
  * than repeating the list.
  */
+export const AdtsOutputFormat = jest.fn();
 export const Mp4OutputFormat = jest.fn();
 export const WebMOutputFormat = jest.fn();
 export const OggOutputFormat = jest.fn();
@@ -96,8 +157,8 @@ export const Quality = jest
  * default, which is what jsdom really reports, and a suite about which
  * parameters an encoder accepts scripts it.
  */
-export const canEncodeAudio = jest.fn(
-	(): Promise<boolean> => Promise.resolve(false),
+export const canEncodeAudio = jest.fn((): Promise<boolean> =>
+	Promise.resolve(false),
 );
 
 /**

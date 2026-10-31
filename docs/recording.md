@@ -11,6 +11,7 @@ Recording is the core of Advanced Audio Recorder: start a capture from the ribbo
 - [Pausing and resuming](#pausing-and-resuming)
 - [Stopping and saving](#stopping-and-saving)
 - [Losing the input device](#losing-the-input-device)
+- [How the link is written](#how-the-link-is-written)
 - [Insert at original position](#insert-at-original-position)
 - [Crash recovery](#crash-recovery)
 - [Recording on mobile](#recording-on-mobile)
@@ -46,26 +47,20 @@ If recording does not work, run **Test recording** from settings and check **Sys
 
 ## From the command line
 
-On Obsidian 1.12.2 and later, the desktop app takes commands from a terminal, and the plugin answers four of them. Nothing here exists on mobile, or on an older desktop build.
+The desktop app takes commands from a terminal. `advanced-audio-recorder` reports what the recorder is doing, `advanced-audio-recorder:record` starts a recording, `advanced-audio-recorder:stop` stops and saves it, and every other action of the plugin - transcribing, converting, marking, the queue - is a command too. Each answers with what it did, or why it did nothing. A session that records this computer's own output cannot be started from a terminal, because the host grants that capture only in answer to a click in Obsidian. Nothing here exists on mobile.
 
-| Command                                            | What it does                                                                            |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `advanced-audio-recorder`                          | Reports what the recorder is doing, and the format a recording started now would use.   |
-| `advanced-audio-recorder:record`                   | Starts a recording with the configured input and format.                                |
-| `advanced-audio-recorder:stop`                     | Stops the recording in progress and saves it.                                           |
-| `advanced-audio-recorder:transcribe --file <path>` | Transcribes an audio file in the vault, named by its vault path.                        |
+```bash
+obsidian advanced-audio-recorder:record
+obsidian advanced-audio-recorder:stop
+```
 
-Each command answers with one line: the state it left behind, or why it did nothing - a recording that could not start answers with the same reason the app would have shown as a notice (`Microphone access denied...`), and a transcription that could not run answers with what is missing (`Transcription is switched off in settings.`, `Set the OpenAI API key in settings.`, `No audio file at "..." in this vault.`).
-
-Transcription is a paid job, so the command opens the transcribe dialog in Obsidian and starts it there, where it reports progress and can be cancelled - the same thing [transcribe on save](transcription.md) does. The answer says the run was started, not that it finished.
-
-One session the command cannot start is one that records this computer's own output, whether that is **Include system audio** under [Audio input](settings-reference.md#audio-input) or a track whose **Track N source** is **System audio (this computer)**. The host grants that capture only in answer to a user action in a focused Obsidian window, and a command typed in a terminal is neither, so `advanced-audio-recorder:record` answers with the reason and starts nothing. Start such a recording from the ribbon icon, the command palette or a hotkey. A track recording a loopback **input device** has no such restriction and records from the command line like any microphone - see [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
+Every command, its parameters and its answers are on the [Command line](command-line.md) page. Nothing here exists on mobile, or on an older desktop build.
 
 ---
 
 ## Switching the input device
 
-You do not have to open the settings tab to change which microphone records. Run the **Select audio input device** command from the command palette (`Ctrl/Cmd + P`) and a quick-pick modal opens, listing every input the plugin detected. Choose one and it is saved to your settings **immediately** - a confirmation notice reports the device that is now selected, and the next recording uses it.
+You do not have to open the settings tab to change which microphone records. Run the **Select audio input device** command from the command palette (`Ctrl/Cmd + P`) and a quick-pick list opens with every input the plugin detected, the one in use marked **(current)**. Type to narrow it, choose one, and it is saved to your settings **immediately** - a confirmation notice reports the device that is now selected, and the next recording uses it.
 
 This is the quickest way to switch mics between recordings - for example, moving from a laptop's built-in microphone to a headset before a meeting. The same choice is also available, alongside the sample rate, under [Audio input settings](settings-reference.md#audio-input).
 
@@ -73,13 +68,13 @@ This is the quickest way to switch mics between recordings - for example, moving
 
 A recording that has to carry the other side of a call needs more than a microphone, and there are two ways to ask for it.
 
-The short one is **Include system audio**, the switch under [Audio input](settings-reference.md#audio-input) beside the input device. With it on, a recording captures two tracks - the microphone exactly as the rows around that switch describe it, and this computer's own output - and mixes them into one file, written as `<file prefix>-multitrack-<timestamp>.<ext>` the way any merged session is. Nothing else is configured: the second track has no device to pick, no filtering to choose and no place in the mix to set, because those answers are what the switch decides. Two mixed tracks are one file to write at the end, so automatic splitting has nothing to rotate and is skipped for such a session, with a notice saying so. Electron grants the machine's output on Windows only, and the switch says so where the build cannot; it is off on mobile, which cannot open two captures at once, and it stands down while multi-track recording is on.
+The short one is **Include system audio**, the switch under [Audio input](settings-reference.md#audio-input) beside the input device. With it on, a recording captures two tracks - the microphone exactly as the rows around that switch describe it, and this computer's own output - and mixes them into one file, written as `<file prefix>-multitrack-<timestamp>.<ext>` the way any merged session is. Nothing else is configured: the second track has no device to pick, no filtering to choose and no place in the mix to set, because those answers are what the switch decides. Two mixed tracks are one file to write at the end, so automatic splitting has nothing to rotate and is skipped for such a session, with a notice saying so. Electron grants the machine's output on Windows, and on macOS 14.2 or later in an Obsidian installer built on Electron 39.6 or later; where the build cannot be granted it, the switch says so and names the reason. On a Mac, macOS also needs a permission once: allow **Obsidian** under **System Settings > Privacy & Security > Screen & System Audio Recording** (**Screen Recording** on macOS 14), adding it with the **+** button if it is not listed, then quit and reopen Obsidian. macOS may never prompt for it, so set it before the first call. The switch is off on mobile, which cannot open two captures at once, and it stands down while multi-track recording is on.
 
 ![The Include system audio switch turned on under Audio input, above the description of what the paired session records and of the platforms that grant the system output](images/settings-include-system-audio.png)
 
 The long one is a track of your own, through **Track N source**, which is where to go when the pairing's fixed answers are not the wanted ones: a session of three tracks rather than two, one file per track rather than a mix, or a level correction on the remote side. See [Multi-track recording](multi-track-recording.md).
 
-Either way this is the direct capture, which Electron grants on Windows alone. An input that carries the machine's output, such as a Stereo Mix device or a virtual cable, is marked `(system audio)` in both dropdowns on every platform, so it can be told apart from a microphone. Such an input exists only where the operating system or an installed virtual cable publishes one, and recording it is how a call's remote participants reach a recording everywhere else. See [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
+Either way this is the direct capture, which Electron grants on Windows and on a recent enough Mac alone. When it is refused, the notice names the reason, and [This computer's output is not recorded](troubleshooting.md#this-computers-output-is-not-recorded) says what to do about each one. An input that carries the machine's output, such as a Stereo Mix device or a virtual cable, is marked `(system audio)` in both dropdowns on every platform, so it can be told apart from a microphone. Such an input exists only where the operating system or an installed virtual cable publishes one, and recording it is how a call's remote participants reach a recording everywhere else. See [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
 
 ---
 
@@ -114,7 +109,7 @@ The active recording duration is checked before the file is read, so long sessio
 
 ## The status bar while recording
 
-Once a session is active, the ribbon microphone turns red and pulses, and the **status bar** (bottom-right of the Obsidian window) shows the live recording controls.
+Once a session is active, the ribbon microphone turns red and pulses, and the **status bar** (bottom-right of the Obsidian window) shows the live recording controls. When your system is set to reduce motion, the icon turns red without pulsing, and the progress bars fill without sliding.
 
 ![Status bar showing Recording with Add marker, Pause, and Stop buttons](images/status-bar-recording.png)
 
@@ -128,7 +123,7 @@ The status bar shows a label and a row of icon buttons:
 | **Pause**          | While recording (becomes **Resume** while paused) | Pauses the recording.                             |
 | **Stop**           | Always, while recording or paused                 | Stops and saves the recording.                    |
 
-The **Add marker** button only renders when the **Markers and chapters** option of the [enhanced player](audio-player.md) is enabled; otherwise the row shows just **Pause** and **Stop**. All three buttons are clickable and keyboard-focusable.
+The **Add marker** button only renders when the **Markers and chapters** option of the [enhanced player](audio-player.md) is enabled; otherwise the row shows just **Pause** and **Stop**. All three are Obsidian's own icon buttons: they take the keyboard focus, Enter or Space presses them, a screen reader announces each by its name, and hovering one shows that name as a tooltip.
 
 ---
 
@@ -136,7 +131,7 @@ The **Add marker** button only renders when the **Markers and chapters** option 
 
 Alongside the control buttons, the status bar shows live indicators that confirm the microphone is working and the recording is growing. Both are configurable under **Settings > Audio processing & feedback**.
 
-- **Input level meter** - a live VU meter that fills in response to the microphone signal, so you can see at a glance that sound is actually being picked up. Controlled by **Input level meter** (default On).
+- **Input level meter** - a live VU meter that fills in response to the microphone signal, so you can see at a glance that sound is actually being picked up. A screen reader reads it as an input level meter with the current level as a percentage. Controlled by **Input level meter** (default On).
 - **Recording stats** - two figures that update continuously:
     - **Elapsed time** in `m:ss` (or `h:mm:ss` for long sessions). This counts _active_ recording time only; paused intervals are excluded.
     - **Total recorded size**, shown as it grows. For multi-track or multi-part sessions this is the sum across all tracks and parts.
@@ -191,7 +186,7 @@ Click the ribbon icon again, run **Start/stop recording**, or click the **Stop**
 2. **Flush** any audio still buffered in memory to disk.
 3. **Assemble** the buffered segments into the final audio file.
 4. **Write** the file to the configured save location.
-5. **Insert an embed link** (`![[filename.ext]]`) into the active note.
+5. **Insert an embed link** into the active note, written the way your vault writes links (see [How the link is written](#how-the-link-is-written)).
 6. **Clean up** the temporary segment files.
 
 A `Recording stopped` notice confirms completion.
@@ -209,7 +204,7 @@ For longer recordings the save can take a noticeable moment. The status bar show
 | 80%      | `Cleaning up...`      |
 | 100%     | `Saved`               |
 
-While saving is in progress the ribbon icon switches to a **save** icon, then returns to the microphone, no longer red, once the file is written.
+While saving is in progress the ribbon icon switches to a **save** icon, then returns to the microphone, no longer red, once the file is written. The microphone itself is released as soon as step 1 is done, before the file is assembled, so the system's microphone indicator goes off while the save is still running. A new recording starts only once the save has finished: pressing the button, or running the command, while it is running shows `The last recording is still being saved.`
 
 A recording that is slow to save is expected behaviour for long captures, not an error. For multi-part recordings, see [Automatic splitting](#automatic-splitting); for the full list of output formats and how each is encoded, see [Formats](formats.md).
 
@@ -224,6 +219,12 @@ A single-track session, or a multi-track one that has just lost its last live in
 While the save that follows a disconnection runs, the status bar reads `Input lost` in front of every stage listed under [Save progress in the status bar](#save-progress-in-the-status-bar), where a stop you pressed shows the stage on its own. The reason holds for as long as the save does, so it stays in front of each stage rather than being replaced by the first one. The ribbon icon switches to the same save icon an ordinary stop uses, and the recorder returns to idle once the file is written.
 
 An input pulled out while a stop you pressed is still writing its file is not treated as a disconnection: the capture had already ended, so the save runs to completion as an ordinary one.
+
+---
+
+## How the link is written
+
+The embed follows the link settings under **Settings > Files and links**, exactly as a link you insert yourself does. With **Use [[Wikilinks]]** on (the default) it reads `![[filename.ext]]`; with it off it is a Markdown embed, the path in parentheses after the `![...]`, with any space in it written as `%20`. **New link format** decides how much of the path is spelled out, and Obsidian adds the folder on its own whenever the bare file name would also match another file in the vault, so the embed always points at the recording that was just saved and never at an older file of the same name.
 
 ---
 
@@ -275,7 +276,13 @@ Recording works in the Obsidian mobile app, with platform limits the plugin appl
 
 ## Mobile recording banner
 
-The **Mobile recording banner** option (under **Settings > Audio processing & feedback**, default On) governs a floating on-screen banner shown on mobile, where there is no ribbon icon to show that a recording is in progress. When shown, the banner displays a recording indicator, the elapsed time, and a stop button so the session is always visible and stoppable.
+The **Show recording banner** option (under **Settings > Mobile**, default On) governs a floating on-screen banner shown on mobile, where there is no ribbon icon to show that a recording is in progress. When shown, the banner displays a recording indicator, the elapsed time, and a stop button, so the session stays visible and can be stopped from the banner. By default the banner floats just below the note header, away from the top edge of the screen, and its stop button is a full-size touch target. The elapsed time follows the text size you set for your phone or tablet, the stop button can also be pressed from a connected keyboard, and with reduced motion turned on in the system the red dot stays lit without pulsing.
+
+![The mobile recording banner with a pulsing dot, the elapsed time 1:23 and a stop button, floating below the note header on a phone](images/mobile-recording-banner.png)
+
+When the banner covers something you need, drag it with a finger to another part of the screen. On release it snaps to the nearest of six places: the top or the bottom edge, at the left, in the centre or at the right. The banner rests there for every later recording and keeps that place when the screen rotates. A bottom place stays above the navigation bar, and above the editing toolbar while the keyboard is open. The drag can start anywhere on the banner, the stop button included, and a drag never stops the recording, because only a tap on the stop button does. The same six places are offered by the **Banner position** setting under **Settings > Mobile**, and choosing **Top center** there puts the banner back where it started. The position is stored with the other settings, so a vault synced to another phone or a tablet brings it along.
+
+![The mobile recording banner resting at the bottom right of a phone screen, above the navigation bar](images/mobile-recording-banner-bottom-right.png)
 
 On the desktop app the ribbon indicator and the status bar already make the recording obvious, so the banner is not shown there.
 
@@ -316,7 +323,8 @@ These settings shape the recording workflow. See the [settings reference](settin
 | **Markers and chapters**             | Enables the **Add marker** control while recording and the marker list in the player (default On).      | [Audio player](settings-reference.md#audio-player)                              |
 | **Input level meter**                | Shows the live VU meter in the status bar (default On).                                                 | [Audio processing & feedback](settings-reference.md#audio-processing--feedback) |
 | **Recording stats**                  | Shows live elapsed time and recorded size in the status bar (default On).                               | [Audio processing & feedback](settings-reference.md#audio-processing--feedback) |
-| **Mobile recording banner**          | Shows the floating recording banner where the ribbon is unavailable (default On).                       | [Audio processing & feedback](settings-reference.md#audio-processing--feedback) |
+| **Show recording banner**            | Shows the floating recording banner where the ribbon is unavailable (default On).                       | [Mobile](settings-reference.md#mobile)                                          |
+| **Banner position**                  | Where the mobile banner rests, also set by dragging it (default Top center).                            | [Mobile](settings-reference.md#mobile)                                          |
 | **Noise suppression**                | Applies the browser's noise suppression to the input stream (default On).                               | [Audio processing & feedback](settings-reference.md#audio-processing--feedback) |
 | **Echo cancellation**                | Applies the browser's echo cancellation to the input stream (default On).                               | [Audio processing & feedback](settings-reference.md#audio-processing--feedback) |
 | **Automatic gain control**           | Applies the browser's automatic gain control to the input stream (default On).                          | [Audio processing & feedback](settings-reference.md#audio-processing--feedback) |

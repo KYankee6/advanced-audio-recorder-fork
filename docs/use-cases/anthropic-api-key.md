@@ -26,7 +26,7 @@ LLM post-processing is an optional, second pass that runs **after** transcriptio
 - **Translate** - write the transcript in the language named in **Translate into**, one line per spoken segment, keeping the original beside it.
 - **Custom** - send your own verbatim instruction (e.g. "rewrite as meeting notes").
 
-The default Claude model is **`claude-opus-4-8`**. Requests use Anthropic's Messages API at `https://api.anthropic.com/v1`.
+The default Claude model is **`claude-opus-5-5`**. Requests use Anthropic's Messages API at `https://api.anthropic.com/v1`. Every request asks Claude for the lowest reasoning effort, because cleanup, summaries and chapter titles gain nothing from reasoning while it spends the same output budget the answer needs; a model that does not take the effort control, or that refuses the fixed temperature the context agents send, has that field dropped after its first refusal and the request is sent again without it.
 
 > Anthropic charges per token. The plugin makes one request per transcript (long transcripts may be split into several requests), so cost depends on the length of your recordings and how often you transcribe. Start with a small credit and watch your usage.
 
@@ -65,7 +65,7 @@ The API requires prepaid credit or a billing method before it will answer reques
 3. **Copy the key now.** Anthropic shows the full key only once. Keys typically start with `sk-ant-`.
 4. Store it somewhere safe. If you lose it, delete it and create a new one.
 
-> Treat the key like a password. Anyone who has it can spend your credit. Never paste it into a note, commit it to a repository, or share it. The plugin stores it locally in `data.json` (see [Settings summary](#settings-summary)).
+> Treat the key like a password. Anyone who has it can spend your credit. Never paste it into a note, commit it to a repository, or share it. The plugin keeps it in Obsidian's keychain on this device (see [Settings summary](#settings-summary)).
 
 ## Step 4: Configure the plugin
 
@@ -75,7 +75,7 @@ The API requires prepaid credit or a billing method before it will answer reques
 4. Set its **Post-processing engine** to **Anthropic (Claude)**.
 5. Open **Engines** and then the **Anthropic (Claude)** page, where everything about the service itself lives.
 6. Confirm the **Base URL** reads `https://api.anthropic.com/v1`; only change it if you front Anthropic with a proxy, and the value you type stays put whichever job later calls the engine.
-7. Paste your key into the **Anthropic API key** field. This is Anthropic's **own** field - it is not shared with any transcription key.
+7. On the **Anthropic API key** row, click **Link...**. In Obsidian's secret picker choose **Add secret...** (it opens straight away while the keychain is empty), enter an ID such as `anthropic-api-key`, paste your key as the secret, and save. The key is kept in Obsidian's keychain on this device; the plugin stores only the ID. This is Anthropic's **own** row - it is not shared with any transcription key.
 8. Pick a **Model** (see [Choosing a model](#choosing-a-model)).
 9. Optionally adjust **Max output tokens** (default `4096`, range `512`-`200000`), which bounds every job that calls this engine. The field guards against a typo rather than stating any limit of Anthropic's: how long a reply may be is the model's own maximum, it differs between models, and a budget above it is refused by the service, which names the maximum it accepts.
 10. Back in **LLM post-processing**, pick a **Task** and review its prompt (see [Choosing a task](#choosing-a-task)).
@@ -86,12 +86,12 @@ The API requires prepaid credit or a billing method before it will answer reques
 
 The **Model** row on the Anthropic page is a dropdown over the saved ids, seeded with the current Claude family, and the **Model catalogue** entry below it is where the list is edited: the add button takes a newer id and the button on a row drops one. The link at the end of the **Model** row's description opens Anthropic's own model list.
 
-| Model              | Notes                                                                                  |
-| ------------------ | -------------------------------------------------------------------------------------- |
-| `claude-opus-4-8`  | **Default.** The recommended flagship; best for nuanced cleanup and quality summaries. |
-| `claude-sonnet-5`  | Balanced quality and cost; a strong everyday choice for cleanup.                       |
-| `claude-haiku-4-5` | Fastest and cheapest; good for short transcripts and bulk processing.                  |
-| `claude-fable-5`   | The most capable current model, priced above Opus; for the hardest material.           |
+| Model               | Notes                                                                                   |
+| ------------------- | --------------------------------------------------------------------------------------- |
+| `claude-opus-5-5`   | **Default.** The recommended flagship; best for nuanced cleanup and quality summaries.  |
+| `claude-sonnet-5-5` | Balanced quality and cost at half the Opus price; a strong everyday choice for cleanup. |
+| `claude-haiku-5-5`  | Fastest and cheapest; good for short transcripts and bulk processing.                   |
+| `claude-fable-5-1`  | The most capable current model, priced above Opus; for the hardest material.            |
 
 - **Catalogue:** the authoritative, current Claude model list is at `https://platform.claude.com/docs/en/about-claude/models/overview`.
 - Model ids change over time. If a seeded id is retired, add the new one exactly as Anthropic publishes it.
@@ -124,18 +124,18 @@ For a deeper explanation of the tasks and prompts, see [LLM post-processing](../
 
 ## Settings summary
 
-| Setting                        | Value for Anthropic                                                                     |
-| ------------------------------ | --------------------------------------------------------------------------------------- |
-| **Enable transcription**       | On (post-processing runs inside transcription)                                          |
-| **Enable LLM post-processing** | On                                                                                      |
-| **Post-processing engine**     | `Anthropic (Claude)`                                                                    |
-| **Base URL** (Engines page)    | `https://api.anthropic.com/v1` (shipped default)                                        |
-| **Anthropic API key**          | Your `sk-ant-…` key (Anthropic's own field; not shared)                                 |
-| **Model**                      | `claude-opus-4-8` (default) / `claude-sonnet-5` / `claude-haiku-4-5` / `claude-fable-5` |
-| **Task**                       | `Clean up` (default) / `Summarize` / `Translate` / `Custom`                             |
-| **Max output tokens**          | `4096` default; range `512`-`200000`                                                    |
+| Setting                        | Value for Anthropic                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| **Enable transcription**       | On (post-processing runs inside transcription)                                              |
+| **Enable LLM post-processing** | On                                                                                          |
+| **Post-processing engine**     | `Anthropic (Claude)`                                                                        |
+| **Base URL** (Engines page)    | `https://api.anthropic.com/v1` (shipped default)                                            |
+| **Anthropic API key**          | Your `sk-ant-…` key (Anthropic's own field; not shared)                                     |
+| **Model**                      | `claude-opus-5-5` (default) / `claude-sonnet-5-5` / `claude-haiku-5-5` / `claude-fable-5-1` |
+| **Task**                       | `Clean up` (default) / `Summarize` / `Translate` / `Custom`                                 |
+| **Max output tokens**          | `4096` default; range `512`-`200000`                                                        |
 
-> **Where the key is stored.** The key lives in the plugin's `data.json` on this device. It is never written into the **System info** diagnostics report. Avoid syncing `data.json` to untrusted locations. Only the transcript **text** is sent to Anthropic - your audio never leaves your machine for the LLM step.
+> **Where the key is stored.** The key lives in Obsidian's keychain (**Settings > Keychain**) on this device, not in the plugin's `data.json`, and it is never written into the **System info** diagnostics report. The keychain does not sync, so on another device link the key once more under the same ID. Only the transcript **text** is sent to Anthropic - your audio never leaves your machine for the LLM step.
 
 ## Troubleshooting
 

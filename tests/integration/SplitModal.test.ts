@@ -31,6 +31,12 @@ jest.mock('src/audio/AudioCapabilityDetector', () =>
 	require('../mocks/modules/audioCapabilityDetector'),
 );
 
+// The dialog's compressed sources take the decode-everything path: this
+// device cannot stream them, which is what the double answers by default.
+jest.mock('src/audio/streamingSplit', () =>
+	require('../mocks/modules/streamingSplit'),
+);
+
 // Mock the decoder: the compressed path decodes once via this function
 jest.mock('src/audio/AudioFormatConverter', () => ({
 	...require('../mocks/modules/audioFormatConverter'),
@@ -187,8 +193,8 @@ describe('SplitModal', () => {
 
 		mockApp = createMockApp({
 			vault: {
+				readBinary: jest.fn(),
 				adapter: {
-					readBinary: jest.fn(),
 					exists: jest.fn().mockResolvedValue(false),
 					remove: jest.fn().mockResolvedValue(undefined),
 				},
@@ -267,7 +273,7 @@ describe('SplitModal', () => {
 	});
 
 	it('clears the progress text when aborting on a collision', async () => {
-		(mockApp.vault.adapter.readBinary as jest.Mock).mockResolvedValue(
+		(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
 			buildTestWav(1, 1000, 250000),
 		);
 		(mockApp.vault.adapter.exists as jest.Mock).mockResolvedValue(true);
@@ -283,7 +289,7 @@ describe('SplitModal', () => {
 
 	it('keeps reporting progress in a notice when the modal closes mid-split', async () => {
 		let resolveRead!: (bytes: ArrayBuffer) => void;
-		(mockApp.vault.adapter.readBinary as jest.Mock).mockReturnValue(
+		(mockApp.vault.readBinary as jest.Mock).mockReturnValue(
 			new Promise<ArrayBuffer>((resolve) => {
 				resolveRead = resolve;
 			}),
@@ -297,16 +303,54 @@ describe('SplitModal', () => {
 		resolveRead(buildTestWav(1, 1000, 250000));
 		await split;
 
-		const background = noticeInstances.filter((notice) =>
-			noticeInitialText(notice).includes('continues in the background'),
+		// The one notice that carries the split's Cancel
+		const background = noticeInstances.filter(
+			(notice) =>
+				notice.initialMessage instanceof DocumentFragment &&
+				notice.initialMessage.querySelector(MODAL.noticeAction) !==
+					null,
 		);
 		expect(background).toHaveLength(1);
 		// The notice mirrors pipeline progress and is hidden at the end
 		const notice = at(background, 0);
-		expect(notice.setMessage).toHaveBeenCalledWith(
-			expect.stringContaining('Writing part'),
+		expect(noticeInitialText(notice)).toMatch(
+			/^Splitting "recording\.wav": Updating links\.\.\. Cancel$/,
 		);
 		expect(notice.hide).toHaveBeenCalled();
+	});
+
+	it('trashes the parts written so far when the notice of a closed dialog cancels the split', async () => {
+		(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
+			buildTestWav(1, 1000, 250000),
+		);
+		const modal = new SplitModal(mockApp, mockFile, () => mockSettings);
+		// Pulled once the first part is on disk, from the notice the closed
+		// dialog left behind.
+		(mockApp.vault.createBinary as jest.Mock).mockImplementation(
+			(path: string) => {
+				const notice = at(noticeInstances, 0);
+				el(
+					notice.initialMessage as DocumentFragment,
+					MODAL.noticeAction,
+				).click();
+				return Promise.resolve(makePartFile(path));
+			},
+		);
+
+		const split = internals(modal).runSplit(progressEl);
+		modal.onClose();
+		await split;
+
+		expect(mockApp.vault.createBinary).toHaveBeenCalledTimes(1);
+		expect(mockApp.fileManager.trashFile).toHaveBeenCalledWith(
+			expect.objectContaining({ path: 'Recordings/recording-part1.wav' }),
+		);
+		// The source stays, and so do the notes that link it.
+		expect(mockApp.fileManager.trashFile).toHaveBeenCalledTimes(1);
+		expect(updateLinksInVault).not.toHaveBeenCalled();
+		expect(noticeInstances.slice(1).map(noticeInitialText)).toEqual([
+			'Cancelled splitting "recording.wav".',
+		]);
 	});
 
 	it.each([
@@ -400,15 +444,20 @@ describe('SplitModal', () => {
 		expect((modal as unknown as { bitrate: number }).bitrate).toBe(192000);
 	});
 
-	it('runs the split when the split button is clicked', async () => {
-		(mockApp.vault.adapter.readBinary as jest.Mock).mockResolvedValue(
+	// A second press mid-run would start a second split over the parts the
+	// first is writing. The disabled button is what a mouse meets, but a
+	// press can still arrive, from the keyboard or a click queued before the
+	// repaint, so the dialog frame's exclusive run is what guarantees one.
+	it('runs the split when the split button is clicked, once however often it is pressed', async () => {
+		(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
 			buildTestWav(1, 1000, 250000),
 		);
 		const modal = new SplitModal(mockApp, mockFile, () => mockSettings);
 		modal.onOpen();
 
 		const button = at(allButtons(), 0);
-		button.click();
+		void button.click();
+		void button.click();
 		// The click handler runs the async pipeline in the background and
 		// re-enables the button in its finally block, so wait for that rather
 		// than a fixed delay (slow under coverage instrumentation).
@@ -420,15 +469,55 @@ describe('SplitModal', () => {
 			{ timeout: 2000, message: 'the Split button was never re-enabled' },
 		);
 
+		expect(mockApp.vault.readBinary).toHaveBeenCalledTimes(1);
 		expect(mockApp.vault.createBinary).toHaveBeenCalledTimes(3);
 		expect(button.setDisabled).toHaveBeenCalledWith(true);
 		expect(button.setDisabled).toHaveBeenLastCalledWith(false);
 	});
 
+	it('stops the split from its own Cancel button and offers it only while it runs', async () => {
+		(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
+			buildTestWav(1, 1000, 250000),
+		);
+		const modal = new SplitModal(mockApp, mockFile, () => mockSettings);
+		modal.onOpen();
+		const split = defined(
+			allButtons().find((button) => button.label === 'Split'),
+		);
+		const cancel = defined(
+			allButtons().find((button) => button.label === 'Cancel'),
+		);
+		const cancelEl = defined(cancel.buttonEl);
+		expect(cancelEl.style.display).toBe('none');
+		// Pressed once the first part is on disk
+		(mockApp.vault.createBinary as jest.Mock).mockImplementation(
+			(path: string) => {
+				expect(cancelEl.style.display).not.toBe('none');
+				void cancel.click();
+				return Promise.resolve(makePartFile(path));
+			},
+		);
+
+		split.click();
+		await waitFor(() => cancelEl.style.display === 'none', {
+			timeout: 2000,
+			message: 'the Cancel button was never hidden again',
+		});
+
+		expect(cancel.disabled).toBe(true);
+		expect(mockApp.vault.createBinary).toHaveBeenCalledTimes(1);
+		expect(mockApp.fileManager.trashFile).toHaveBeenCalledWith(
+			expect.objectContaining({ path: 'Recordings/recording-part1.wav' }),
+		);
+		expect(noticeInstances.map(noticeInitialText)).toEqual([
+			'Cancelled splitting "recording.wav".',
+		]);
+	});
+
 	describe('WAV fast path', () => {
 		beforeEach(() => {
 			// 1000 Hz mono 16-bit: byteRate 2000 B/s; 1-minute part = 120000 B
-			(mockApp.vault.adapter.readBinary as jest.Mock).mockResolvedValue(
+			(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
 				buildTestWav(1, 1000, 250000),
 			);
 		});
@@ -552,7 +641,7 @@ describe('SplitModal', () => {
 			expect(Notice).toHaveBeenCalledWith(
 				'Part suffix may contain only letters, digits, hyphens, and underscores.',
 			);
-			expect(mockApp.vault.adapter.readBinary).not.toHaveBeenCalled();
+			expect(mockApp.vault.readBinary).not.toHaveBeenCalled();
 			expect(mockApp.vault.createBinary).not.toHaveBeenCalled();
 		});
 
@@ -585,7 +674,7 @@ describe('SplitModal', () => {
 
 		it('clamps an oversized part duration down to 180 minutes', async () => {
 			// 10 Hz mono 16-bit: byteRate 20 B/s; a 180-minute part = 216000 B
-			(mockApp.vault.adapter.readBinary as jest.Mock).mockResolvedValue(
+			(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
 				buildTestWav(1, 10, 250000),
 			);
 			const modal = new SplitModal(mockApp, mockFile, () => mockSettings);
@@ -617,7 +706,7 @@ describe('SplitModal', () => {
 		});
 
 		it('aborts when the file is shorter than one part', async () => {
-			(mockApp.vault.adapter.readBinary as jest.Mock).mockResolvedValue(
+			(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
 				buildTestWav(1, 1000, 60000),
 			);
 			const modal = new SplitModal(mockApp, mockFile, () => mockSettings);
@@ -664,7 +753,7 @@ describe('SplitModal', () => {
 		});
 
 		it('stringifies non-Error failures', async () => {
-			(mockApp.vault.adapter.readBinary as jest.Mock).mockRejectedValue(
+			(mockApp.vault.readBinary as jest.Mock).mockRejectedValue(
 				'raw failure',
 			);
 			const modal = new SplitModal(mockApp, mockFile, () => mockSettings);
@@ -815,7 +904,7 @@ describe('SplitModal', () => {
 	describe('compressed path', () => {
 		beforeEach(() => {
 			configureFile('recording.webm', 'webm');
-			(mockApp.vault.adapter.readBinary as jest.Mock).mockResolvedValue(
+			(mockApp.vault.readBinary as jest.Mock).mockResolvedValue(
 				new ArrayBuffer(100),
 			);
 			// 150 s at 44100 Hz with 1-minute parts -> 3 parts
@@ -850,6 +939,9 @@ describe('SplitModal', () => {
 			expect(encodeAudioBuffer).toHaveBeenCalledWith(
 				expect.objectContaining({ length: 60 * 44100 }),
 				{ format: 'webm', bitrate: 128000 },
+				undefined,
+				// The dialog's cancellation, which stops a part mid-encode.
+				expect.objectContaining({ signal: expect.any(AbortSignal) }),
 			);
 			const paths = (
 				mockApp.vault.createBinary as jest.Mock
@@ -899,6 +991,8 @@ describe('SplitModal', () => {
 			expect(encodeAudioBuffer).toHaveBeenCalledWith(
 				expect.anything(),
 				expect.objectContaining({ format: 'wav' }),
+				undefined,
+				expect.objectContaining({ signal: expect.any(AbortSignal) }),
 			);
 			const paths = (
 				mockApp.vault.createBinary as jest.Mock
@@ -1038,6 +1132,7 @@ describe('SplitModal', () => {
 					],
 				}),
 				expect.any(Function),
+				expect.objectContaining({ signal: expect.any(AbortSignal) }),
 			);
 			split.mockRestore();
 		});
@@ -1056,6 +1151,7 @@ describe('SplitModal', () => {
 			expect(split).toHaveBeenCalledWith(
 				expect.not.objectContaining({ cuts: expect.anything() }),
 				expect.any(Function),
+				expect.objectContaining({ signal: expect.any(AbortSignal) }),
 			);
 			split.mockRestore();
 		});

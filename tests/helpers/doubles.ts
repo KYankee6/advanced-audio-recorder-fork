@@ -77,20 +77,34 @@ export function silenceConsole(channel: 'warn' | 'error'): jest.SpyInstance {
  * copies of the same thing.
  * @returns The queue port, with both calls recorded
  */
-export function queueServicesDouble(): {
+export function queueServicesDouble(): ActionServices['transcriptionQueue'] & {
 	queueFolder: jest.Mock;
 	open: jest.Mock;
+	enqueueFolder: jest.Mock;
+	status: jest.Mock;
+	start: jest.Mock;
+	pause: jest.Mock;
+	clear: jest.Mock;
+	remove: jest.Mock;
 } {
 	return {
 		queueFolder: jest.fn().mockResolvedValue(undefined),
 		open: jest.fn(),
+		enqueueFolder: jest.fn().mockResolvedValue({ found: 0, added: 0 }),
+		status: jest
+			.fn()
+			.mockResolvedValue({ entries: [], paused: false, running: false }),
+		start: jest.fn(),
+		pause: jest.fn(),
+		clear: jest.fn(),
+		remove: jest.fn().mockReturnValue(false),
 	};
 }
 
 /**
  * The parts of an action-services double no harness varies: the settings
  * writer, the dialog options, the enhancement primer, the worker accessor,
- * and the chapter generator.
+ * the chapter generator, the queue, and the marker refresh.
  *
  * Two harnesses spelled these out identically, which is ten lines of nothing
  * either of them is about. Named here, each says only what it varies: the
@@ -103,8 +117,9 @@ export function commonActionServices(): {
 	primeForEnhancement: () => void;
 	getWorkerClient: () => null;
 	autoChapters: ActionServices['autoChapters'];
-	transcriptionQueue: { queueFolder: jest.Mock; open: jest.Mock };
+	transcriptionQueue: ReturnType<typeof queueServicesDouble>;
 	recordingSidecar: ActionServices['recordingSidecar'];
+	onMarkersChanged: jest.Mock;
 } {
 	return {
 		saveSettings: () => Promise.resolve(),
@@ -122,5 +137,21 @@ export function commonActionServices(): {
 			getMarkers: jest.fn().mockResolvedValue([]),
 			getTranscript: jest.fn().mockResolvedValue(null),
 		}),
+		onMarkersChanged: jest.fn(),
 	};
 }
+
+/**
+ * The two ways an action's run can fail, for a test that checks a failure is
+ * logged whichever it is: a promise that rejects, and a synchronous throw
+ * before anything is returned - the one `Promise.resolve(run())` misses.
+ */
+export const FAILING_RUNS: readonly [string, () => void | Promise<void>][] = [
+	['rejects', (): Promise<void> => Promise.reject(new Error('boom'))],
+	[
+		'throws before it returns anything',
+		(): void => {
+			throw new Error('sync boom');
+		},
+	],
+];

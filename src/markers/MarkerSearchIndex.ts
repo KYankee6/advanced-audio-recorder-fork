@@ -11,6 +11,7 @@ import { PLUGIN_LOG_PREFIX } from '../constants';
 import type { RecordingSidecarStore } from '../sidecar/RecordingSidecarStore';
 import type { MarkerKind, PlayerMarker } from './markerModel';
 import { sortMarkers } from './markerModel';
+import { fileStemOf } from '../utils/paths';
 
 /** One marker, with the recording it belongs to. */
 export interface MarkerHit {
@@ -28,17 +29,6 @@ export interface MarkerHit {
 	kind: MarkerKind;
 	/** The note written on the marker, or '' when it has none. */
 	note: string;
-}
-
-/**
- * The recording's own name, without its folder or extension.
- * @param path - Vault-relative recording path
- * @returns The file name with no directory and no extension
- */
-function recordingName(path: string): string {
-	const name = path.slice(path.lastIndexOf('/') + 1);
-	const dot = name.lastIndexOf('.');
-	return dot > 0 ? name.slice(0, dot) : name;
 }
 
 /**
@@ -167,7 +157,7 @@ export class MarkerSearchIndex {
 			this.byRecording.delete(path);
 			return;
 		}
-		const name = recordingName(path);
+		const name = fileStemOf(path);
 		this.byRecording.set(
 			path,
 			sortMarkers(markers).map((marker) => ({

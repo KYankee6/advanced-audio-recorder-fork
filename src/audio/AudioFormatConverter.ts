@@ -6,7 +6,10 @@
 
 import type { RecordingTarget } from '../types';
 import { encodeAudioBuffer, isOfflineEncodingSupported } from './AudioEncoder';
-import { runStreamingConversion } from './streamingConversion';
+import {
+	runStreamingConversion,
+	type ConvertedAudio,
+} from './streamingConversion';
 import { ChannelMode, downmixAudioBuffer } from './downmix';
 import { autoClosing } from '../utils/disposables';
 import {
@@ -28,6 +31,11 @@ import {
 	directRecordingMimeType,
 } from './AudioCapabilityDetector';
 import type { EncodingWorkerClient } from './EncodingWorkerClient';
+import {
+	NEVER_CANCELLED,
+	throwIfCancelled,
+	type CancellationToken,
+} from '../utils/cancellation';
 
 /**
  * Progress callback receiving percentage (0-100).
@@ -159,7 +167,15 @@ export async function convertBlobToWav(
 	recordedBlob: Blob,
 	options: BlobConversionOptions = {},
 ): Promise<Blob> {
-	return convertBlobToFormat(recordedBlob, FORMAT_WAV, 0, undefined, options);
+	// PCM keeps the source's rate, so there is no change to hand on.
+	const { data } = await convertBlobToFormat(
+		recordedBlob,
+		FORMAT_WAV,
+		0,
+		undefined,
+		options,
+	);
+	return data;
 }
 
 /**
@@ -174,13 +190,15 @@ export async function convertBlobToWavBuffer(
 	recordedBlob: Blob,
 	options: BlobConversionOptions = {},
 ): Promise<ArrayBuffer> {
-	return convertBlobToFormatBuffer(
+	// PCM keeps the source's rate, so there is no change to hand on.
+	const { data } = await convertBlobToFormatBuffer(
 		recordedBlob,
 		FORMAT_WAV,
 		0,
 		undefined,
 		options,
 	);
+	return data;
 }
 
 /**
@@ -240,19 +258,19 @@ const deviceSampleRates = new WeakMap<typeof AudioContext, number>();
  * A merged multi-track file is rendered through an OfflineAudioContext at the
  * default AudioContext rate, and a single track re-encoded to an offline-only
  * format arrives from a recorder whose container already carries the rate it
- * encoded at, 48 kHz for Opus whatever was requested, or is decoded through an
- * AudioContext on the last rung of the conversion ladder, which resamples to
- * the same default. An encoder question asked at the requested rate therefore
- * describes a file that is never written: at 22.05 kHz it asked Chromium for
- * HE-AAC and got a refusal, while the 48 kHz mix it really encodes is AAC-LC
- * and fine. Answers with the requested rate only where there is no
- * AudioContext to ask, which is also where no offline encode can run, and
- * where the cap this reading is memoised against has already been reached:
- * the constructor refuses once a document holds its maximum of live hardware
- * contexts, and that refusal reaches the settings tab, whose renderer runs a
- * row's callback unguarded, so an unhandled throw takes down every setting
- * rather than one row. The refusal is not memoised, so the next call reads
- * the device again once a slot frees.
+ * encoded at, 48 kHz for Opus whatever was requested, or is decoded through
+ * an AudioContext on the last rung of the conversion ladder, which resamples
+ * to the same default. An encoder question asked at the requested rate
+ * therefore describes a file that is never written: at 22.05 kHz it asked an
+ * AAC encoder about a rate Chromium's takes on no platform and got a refusal,
+ * while the 48 kHz mix it really encodes is fine. Answers with the requested
+ * rate only where there is no AudioContext to ask, which is also where no
+ * offline encode can run, and where the cap this reading is memoised against
+ * has already been reached: the constructor refuses once a document holds its
+ * maximum of live hardware contexts, and that refusal reaches the settings
+ * tab, whose renderer runs a row's callback unguarded, so an unhandled throw
+ * takes down every setting rather than one row. The refusal is not memoised,
+ * so the next call reads the device again once a slot frees.
  * @param requested - The sample rate the settings ask for
  * @returns The rate the encoder will be handed
  */
@@ -312,13 +330,20 @@ export interface BlobConversionOptions {
 	 * execution path - worker, streaming, and decode fallback.
 	 */
 	channelMode?: ChannelMode;
+	/**
+	 * Cancels the conversion on whichever step is running it: inside the
+	 * worker, inside mediabunny on the main thread, or between the decode
+	 * and the encode of the last step. A cancelled step is never answered
+	 * by the next one down, which would turn the cancel into a fallback.
+	 */
+	cancellation?: CancellationToken;
 }
 
 /**
  * How a ladder step's result reaches the caller.
  *
- * The three steps do not agree on a shape: the worker and the decode fallback
- * hand back a Blob, while the streaming step hands back the bytes it muxed.
+ * The three steps do not agree on a shape: the worker and the streaming step
+ * hand back the bytes they muxed, while the decode fallback hands back a Blob.
  * Whichever shape a caller wants, one of the two has to be converted, and
  * naming both conversions here is what lets the ladder be written once. It also
  * keeps each conversion off the path that never needed it, so the caller that
@@ -358,13 +383,23 @@ const AS_BUFFER: LadderResult<ArrayBuffer> = {
  * loop off the UI thread, and streaming keeps memory bounded - so a step is
  * only abandoned when it throws, and it says in the log why. The last step
  * throws to the caller: by then there is nothing left to fall back to.
+ *
+ * The rate change comes back from the step that wrote the file, so a worker
+ * that chose a rate and then failed says nothing about a file the next step
+ * wrote.
+ *
+ * A cancel is not a step failing. Whatever a cancelled step throws reaches
+ * the caller as it is, because the token, and not the error, says the user
+ * asked to stop, and the next step down would only redo the work the user
+ * stopped.
  * @param recordedBlob - Intermediate compressed blob
  * @param targetFormat - Desired output format
  * @param bitrate - Bitrate in bits per second
  * @param onProgress - Optional encoding progress callback (0-100)
  * @param options - Conversion behavior options
  * @param deliver - How each step's result reaches the caller
- * @returns The converted audio in the shape `deliver` produces
+ * @returns The converted audio in the shape `deliver` produces, with the
+ *   rate change of the step that wrote it
  */
 async function runConversionLadder<T>(
 	recordedBlob: Blob,
@@ -373,9 +408,10 @@ async function runConversionLadder<T>(
 	onProgress: FormatProgressCallback | undefined,
 	options: BlobConversionOptions,
 	deliver: LadderResult<T>,
-): Promise<T> {
+): Promise<ConvertedAudio<T>> {
 	const channelMode = options.channelMode ?? ChannelMode.Source;
 	const allowRemux = options.allowRemux ?? false;
+	const token = options.cancellation ?? NEVER_CANCELLED;
 	const workerClient =
 		options.workerClient && options.workerClient.isAvailable()
 			? options.workerClient
@@ -383,17 +419,23 @@ async function runConversionLadder<T>(
 
 	if (workerClient) {
 		try {
-			return await deliver.fromBlob(
-				await workerClient.convertBlob(
-					recordedBlob,
-					targetFormat,
-					bitrate,
-					allowRemux,
-					channelMode,
-					onProgress,
-				),
+			const { data, sampleRateChange } = await workerClient.convertBlob(
+				recordedBlob,
+				targetFormat,
+				bitrate,
+				allowRemux,
+				channelMode,
+				onProgress,
+				token,
 			);
+			return {
+				data: await deliver.fromBuffer(data, targetFormat),
+				sampleRateChange,
+			};
 		} catch (error) {
+			if (token.isCancelled()) {
+				throw error;
+			}
 			console.warn(
 				`${PLUGIN_LOG_PREFIX} Worker conversion failed, falling back to the main thread:`,
 				error,
@@ -402,18 +444,23 @@ async function runConversionLadder<T>(
 	}
 
 	try {
-		return await deliver.fromBuffer(
-			await runStreamingConversion(
-				recordedBlob,
-				targetFormat,
-				bitrate,
-				allowRemux,
-				onProgress,
-				channelMode,
-			),
+		const { data, sampleRateChange } = await runStreamingConversion(
+			recordedBlob,
 			targetFormat,
+			bitrate,
+			allowRemux,
+			onProgress,
+			channelMode,
+			token,
 		);
+		return {
+			data: await deliver.fromBuffer(data, targetFormat),
+			sampleRateChange,
+		};
 	} catch (error) {
+		if (token.isCancelled()) {
+			throw error;
+		}
 		console.warn(
 			`${PLUGIN_LOG_PREFIX} Streaming conversion failed, falling back to decode and re-encode:`,
 			error,
@@ -422,13 +469,22 @@ async function runConversionLadder<T>(
 
 	const arrayBuffer = await recordedBlob.arrayBuffer();
 	const decodedBuffer = await decodeAudioBlob(arrayBuffer, 'convert');
-	return deliver.fromBlob(
-		await encodeAudioBuffer(
-			downmixAudioBuffer(decodedBuffer, channelMode),
-			{ format: targetFormat, bitrate },
-			onProgress,
+	// The decode cannot be interrupted, so its end is where a cancel that
+	// arrived during it is noticed, before an encode of the whole file.
+	throwIfCancelled(token);
+	return {
+		data: await deliver.fromBlob(
+			await encodeAudioBuffer(
+				downmixAudioBuffer(decodedBuffer, channelMode),
+				{ format: targetFormat, bitrate },
+				onProgress,
+				token,
+			),
 		),
-	);
+		// The decode resamples to the device's rate without learning the
+		// source's, so there is no change it could name.
+		sampleRateChange: null,
+	};
 }
 
 /**
@@ -438,7 +494,8 @@ async function runConversionLadder<T>(
  * @param bitrate - Bitrate in bits per second
  * @param onProgress - Optional encoding progress callback (0-100)
  * @param options - Conversion behavior options
- * @returns Re-encoded blob in the target format
+ * @returns Re-encoded blob in the target format, with the rate it was
+ *   written at when the encoder refused the source's
  */
 export function convertBlobToFormat(
 	recordedBlob: Blob,
@@ -446,7 +503,7 @@ export function convertBlobToFormat(
 	bitrate: number,
 	onProgress?: FormatProgressCallback,
 	options: BlobConversionOptions = {},
-): Promise<Blob> {
+): Promise<ConvertedAudio<Blob>> {
 	return runConversionLadder(
 		recordedBlob,
 		targetFormat,
@@ -467,7 +524,8 @@ export function convertBlobToFormat(
  * @param bitrate - Bitrate in bits per second
  * @param onProgress - Optional encoding progress callback (0-100)
  * @param options - Conversion behavior options
- * @returns Re-encoded bytes in the target format
+ * @returns Re-encoded bytes in the target format, with the rate they were
+ *   written at when the encoder refused the source's
  */
 export function convertBlobToFormatBuffer(
 	recordedBlob: Blob,
@@ -475,7 +533,7 @@ export function convertBlobToFormatBuffer(
 	bitrate: number,
 	onProgress?: FormatProgressCallback,
 	options: BlobConversionOptions = {},
-): Promise<ArrayBuffer> {
+): Promise<ConvertedAudio<ArrayBuffer>> {
 	return runConversionLadder(
 		recordedBlob,
 		targetFormat,

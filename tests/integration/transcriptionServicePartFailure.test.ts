@@ -31,10 +31,10 @@ import {
 } from 'src/constants';
 import { HttpError } from 'src/transcription/httpClient';
 import { CancellationSource } from 'src/utils/cancellation';
-import { partial } from '../helpers/doubles';
+import { partial, silenceConsole } from '../helpers/doubles';
 import { createMockApp } from '../helpers/createApp';
 import { fakeProvider, NO_DIARIZATION } from '../helpers/providerFixtures';
-import { outcomeOf } from '../helpers/async';
+import { outcomeOf, settleAcross } from '../helpers/async';
 import { completed } from '../helpers/llmDoubles';
 import { EngineLabel } from 'src/providers/providers';
 
@@ -345,9 +345,12 @@ describe('TranscriptionService multi-part salvage', () => {
 			audioInputTokens: 120000,
 			outputTokens: 2100,
 		});
-		// Priced at the default gemini-3.5-flash: 120k audio input at $1.5/M
-		// plus 2.1k output at $9/M.
-		expect(result.cost.usd).toBeCloseTo(0.18 + (2100 * 9) / 1_000_000, 10);
+		// Priced at the default gemini-3.8-flash: 120k audio input at $0.75/M
+		// plus 2.1k output at $3.75/M.
+		expect(result.cost.usd).toBeCloseTo(
+			0.09 + (2100 * 3.75) / 1_000_000,
+			10,
+		);
 	});
 
 	it('fails, naming the timeline span, when every subdivision still truncates', async () => {
@@ -455,6 +458,29 @@ describe('TranscriptionService multi-part salvage', () => {
 			expect.stringContaining('the 7:30-15:00 segment'),
 		);
 	});
+
+	// Only an engine whose timecodes the model writes is second-guessed; one
+	// that measures them on the audio is taken at its word and billed once.
+	it('takes the timecodes of an engine that measures them as they come', async () => {
+		prepareTwoPartsWithSpans();
+		const transcribe = jest
+			.fn()
+			.mockResolvedValueOnce({
+				segments: [{ start: 0, end: 100, text: 'first part' }],
+			})
+			.mockResolvedValueOnce({
+				segments: [{ start: 400, end: 500, text: 'second part' }],
+			});
+		const service = serviceOver(transcribe);
+
+		const result = await runToCompletion(service);
+
+		expect(transcribe).toHaveBeenCalledTimes(2);
+		expect(result.missingParts).toEqual([]);
+		expect(result.transcript.segments.map((s) => s.end)).toEqual([
+			100, 950,
+		]);
+	});
 });
 
 describe('what the user is told about the parts that went missing', () => {
@@ -486,7 +512,7 @@ describe('what the user is told about the parts that went missing', () => {
 		const result = await runToCompletion(service);
 
 		expect(result.markdown).toContain(
-			'part 2 of 3, part 3 of 3 could not be transcribed and are missing',
+			'part 2 of 3, part 3 of 3 are missing from the transcript',
 		);
 	});
 
@@ -501,7 +527,55 @@ describe('what the user is told about the parts that went missing', () => {
 		const result = await runToCompletion(service);
 
 		expect(result.markdown).toContain(
-			'part 2 of 2 could not be transcribed and is missing',
+			'part 2 of 2 is missing from the transcript',
+		);
+	});
+
+	// The notice carrying the reason closes after a few seconds, so the
+	// callout is what still says why once it has.
+	it('writes the reason of every missing part under the warning', async () => {
+		prepareThreeParts();
+		const transcribe = jest
+			.fn()
+			.mockResolvedValueOnce(oneSegment('kept'))
+			.mockRejectedValueOnce(new Error('second failed'))
+			.mockRejectedValueOnce(new Error('third failed'));
+		const service = serviceOver(transcribe);
+
+		const result = await runToCompletion(service);
+
+		expect(result.markdown).toContain(
+			'in whole or in part.\n> - Part 2 of 3: second failed\n> - Part 3 of 3: third failed\n\n',
+		);
+	});
+
+	it('keeps a reason of several lines inside the callout', async () => {
+		prepareTwoParts();
+		const transcribe = jest
+			.fn()
+			.mockResolvedValueOnce(oneSegment('kept'))
+			.mockRejectedValueOnce(new Error('HTTP 500\n\n  upstream reset'));
+		const service = serviceOver(transcribe);
+
+		const result = await runToCompletion(service);
+
+		expect(result.markdown).toContain(
+			'> - Part 2 of 2: HTTP 500 upstream reset\n',
+		);
+	});
+
+	it('says so when the engine gave no reason', async () => {
+		prepareTwoParts();
+		const transcribe = jest
+			.fn()
+			.mockResolvedValueOnce(oneSegment('kept'))
+			.mockRejectedValueOnce(new Error(''));
+		const service = serviceOver(transcribe);
+
+		const result = await runToCompletion(service);
+
+		expect(result.markdown).toContain(
+			'> - Part 2 of 2: The engine gave no reason.\n',
 		);
 	});
 });
@@ -883,6 +957,9 @@ describe('a part the provider refused for now', () => {
 	beforeEach(() => {
 		jest.useFakeTimers();
 		prepareTwoParts();
+		// Every refusal the run waits out is logged with its cause, which is
+		// what these cases provoke on purpose.
+		silenceConsole('warn');
 	});
 
 	afterEach(() => {
@@ -904,16 +981,13 @@ describe('a part the provider refused for now', () => {
 	 * elapse.
 	 * @param service - The service under test
 	 */
-	async function runPastThePauses(
+	function runPastThePauses(
 		service: TranscriptionService,
 	): ReturnType<TranscriptionService['run']> {
-		const settled = outcomeOf(runToCompletion(service));
-		await jest.advanceTimersByTimeAsync(TRANSCRIBE_RETRY_MAX_DELAY_MS * 4);
-		const outcome = await settled;
-		if ('error' in outcome) {
-			throw outcome.error;
-		}
-		return outcome.value;
+		return settleAcross(
+			runToCompletion(service),
+			TRANSCRIBE_RETRY_MAX_DELAY_MS * 4,
+		);
 	}
 
 	it('sends the part again and keeps the whole transcript', async () => {

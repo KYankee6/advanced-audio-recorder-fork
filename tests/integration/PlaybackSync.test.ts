@@ -15,7 +15,8 @@ import { menuInstances } from '../mocks/obsidian';
 import { at } from '../helpers/assertions';
 import { allEls, clickControl, control, el } from '../helpers/dom';
 import { MARKER, PLAYBACK, PLAYER } from '../helpers/selectors';
-import { PLAYBACK_ACTIONS } from 'src/actions/playbackActions';
+import { playbackActionFamily } from 'src/actions/playbackActions';
+import { positionActionFamily } from 'src/actions/positionActions';
 import { renderPlaybackStatusBar } from 'src/ui/StatusBar';
 import { registerActionCommands } from 'src/actions/registerActionCommands';
 import { AudioPlayer } from 'src/player/AudioPlayer';
@@ -43,7 +44,20 @@ import {
 	installMediaSession,
 	type MediaSessionDouble,
 } from '../helpers/mediaSession';
-import { asMockPlugin, mockPluginHost } from '../helpers/obsidianMock';
+import {
+	asMockPlugin,
+	fileAt,
+	mockPluginHost,
+	partialPlugin,
+} from '../helpers/obsidianMock';
+import type { Component } from 'obsidian';
+import { ContextMenu } from 'src/ui/ContextMenu';
+import { registeredMenus } from '../helpers/menuFamilies';
+import { makePopoutWindow } from '../helpers/popoutHarness';
+import { partial } from '../helpers/doubles';
+import { createMockApp } from '../helpers/createApp';
+import type { ActionServices } from 'src/actions/PluginAction';
+import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
 
 const app = makePlayerApp();
 
@@ -157,13 +171,19 @@ function sharedAudio(): ReturnType<typeof installSharedAudio> {
 
 /**
  * Registers the real playback commands the way the plugin does at load: they
- * pull the live playback from the registry on every check. A subscriber
- * records what the status bar is pushed alongside, so a case can assert that
- * the two agree instead of assuming it.
+ * pull the live playback from the registry on every check. The marker
+ * commands are position actions over the same playback, writing the store
+ * the players read and telling them to read it again, as the plugin wires
+ * them. A subscriber records what the status bar is pushed alongside, so a
+ * case can assert that the two agree instead of assuming it.
  * @param registry - The registry publishing the active playback
+ * @param store - The sidecar the marker commands write
  * @returns The plugin holding the commands and a reader for what was pushed
  */
-function withPlaybackCommands(registry: AudioPlayerRegistry): {
+function withPlaybackCommands(
+	registry: AudioPlayerRegistry,
+	store: RecordingSidecarStore = makeMarkerStore(),
+): {
 	plugin: ReturnType<typeof asMockPlugin>;
 	snapshot: () => PlaybackControlsState | null;
 } {
@@ -172,8 +192,29 @@ function withPlaybackCommands(registry: AudioPlayerRegistry): {
 	registry.subscribePlayback((state) => {
 		latest = state;
 	});
-	registerActionCommands(plugin, PLAYBACK_ACTIONS, () =>
-		registry.currentPlaybackState(),
+	const playback = (): PlaybackControlsState | null =>
+		registry.currentPlaybackState();
+	const pickNothing = jest.fn();
+	registerActionCommands(plugin, playbackActionFamily(playback), pickNothing);
+	registerActionCommands(
+		plugin,
+		positionActionFamily(
+			partial<ActionServices>({
+				app: createMockApp({
+					vault: { getFileByPath: () => makePlayerFile() },
+				}).app,
+				getSettings: () =>
+					partial<AudioRecorderSettings>({
+						playerEnableMarkers: true,
+					}),
+				recordingSidecar: store,
+				onMarkersChanged: (path: string) => {
+					registry.reloadMarkers(path, null);
+				},
+			}),
+			playback,
+		),
+		pickNothing,
 	);
 	return { plugin: asMockPlugin(plugin), snapshot: () => latest };
 }
@@ -200,6 +241,22 @@ async function playingEmbed(
 	await tick();
 	startPlaybackAt(registry, shared.audio, 30);
 	return { container, plugin, registry, snapshot };
+}
+
+/**
+ * Renders every playback the registry publishes into a status bar, as the
+ * plugin does, from the moment of the call on.
+ * @param registry - The registry publishing the active playback
+ * @returns The status bar element
+ */
+function mountStatusBar(registry: AudioPlayerRegistry): HTMLElement {
+	const statusBarItem = makePlayerContainer();
+	registry.subscribePlayback((state) => {
+		if (state) {
+			renderPlaybackStatusBar(statusBarItem, state);
+		}
+	});
+	return statusBarItem;
 }
 
 /** Starts the shared playback and parks it at a known position. */
@@ -296,12 +353,7 @@ describe('the volume set in the embed', () => {
 	it('fills the status-bar volume track up to the level set in the embed', async () => {
 		const shared = sharedAudio();
 		const registry = new AudioPlayerRegistry();
-		const statusBarItem = makePlayerContainer();
-		registry.subscribePlayback((state) => {
-			if (state) {
-				renderPlaybackStatusBar(statusBarItem, state);
-			}
-		});
+		const statusBarItem = mountStatusBar(registry);
 		const container = mountPlayer(registry);
 		await tick();
 		startPlaybackAt(registry, shared.audio, 30);
@@ -315,6 +367,39 @@ describe('the volume set in the embed', () => {
 		expect(barVolume.style.getPropertyValue('--slider-fill-ratio')).toBe(
 			'0.3',
 		);
+	});
+
+	it('stays muted when the status bar first shows a lowered volume', async () => {
+		// The strip builds its slider at full volume and then shows the level
+		// of the playback. Obsidian's slider reports a value set from code as
+		// if it had been dragged, and a drag to an audible level unmutes, so
+		// a strip that heard its own update back would unmute the recording
+		// the moment it appeared.
+		const shared = sharedAudio();
+		const registry = new AudioPlayerRegistry();
+		const container = mountPlayer(registry);
+		await tick();
+		const embedVolume = el<HTMLInputElement>(container, PLAYER.volume);
+		embedVolume.value = '0.4';
+		embedVolume.dispatchEvent(new Event('input', { bubbles: true }));
+		clickControl(container, 'Mute / unmute');
+		expect(shared.audio.muted).toBe(true);
+		const statusBarItem = mountStatusBar(registry);
+
+		startPlaybackAt(registry, shared.audio, 30);
+
+		expect(shared.audio.muted).toBe(true);
+		expect(el<HTMLInputElement>(statusBarItem, PLAYBACK.volume).value).toBe(
+			'0.4',
+		);
+		expect(
+			control(statusBarItem, 'Mute / unmute').getAttribute(
+				'aria-pressed',
+			),
+		).toBe('true');
+		expect(
+			control(container, 'Mute / unmute').getAttribute('aria-pressed'),
+		).toBe('true');
 	});
 });
 
@@ -522,9 +607,10 @@ describe('playback commands drive the same playback as the controls', () => {
 
 		const ids = plugin.registeredCommands.map((command) => command.id);
 
-		// Every playback command is registered, and every one of them reports
+		// Every playback command is registered - the transport, and the three
+		// that act at the playing position - and every one of them reports
 		// itself unavailable, so none reaches the palette or fires a hotkey
-		expect(ids).toHaveLength(12);
+		expect(ids).toHaveLength(13);
 		expect(ids.filter((id) => plugin.invokeCommand(id))).toEqual([]);
 	});
 
@@ -644,8 +730,8 @@ describe('playback commands drive the same playback as the controls', () => {
 		const shared = installSharedAudio();
 		try {
 			const registry = new AudioPlayerRegistry();
-			const { plugin } = withPlaybackCommands(registry);
 			const store = makeMarkerStore();
+			const { plugin } = withPlaybackCommands(registry, store);
 			// Reading view container (not inside a CodeMirror editor)
 			mountMarkerPlayer(registry, store, makePlayerContainer());
 			await tick();
@@ -668,8 +754,8 @@ describe('playback commands drive the same playback as the controls', () => {
 		const shared = installSharedAudio();
 		try {
 			const registry = new AudioPlayerRegistry();
-			const { plugin } = withPlaybackCommands(registry);
 			const store = makeMarkerStore();
+			const { plugin } = withPlaybackCommands(registry, store);
 			// Live Preview container (inside a CodeMirror editor)
 			const container = makeEditableContainer();
 			mountMarkerPlayer(registry, store, container);
@@ -1029,5 +1115,162 @@ describe('driving playback from the system media controls', () => {
 			title: 'rec',
 			album: 'Intro',
 		});
+	});
+});
+
+// Dragging a note's tab into a pop-out moves its rendered embed there while the
+// recording keeps playing, and the player renders itself again in the new
+// window. The rebuilt pass has to come back on the same shared element, or the
+// pop-out shows 0:00 while the status bar reports the real position.
+describe('a playing embed moved into a pop-out', () => {
+	it('shows the playing position in the pop-out, as the status bar does', async () => {
+		const shared = installSharedAudio();
+		try {
+			const { container, snapshot } = await playingEmbed(shared);
+
+			makePopoutWindow().document.body.appendChild(container);
+			await tick();
+
+			expect(timeText(container)).toBe('0:30 / 10:00');
+			expect(shared.audio.paused).toBe(false);
+			expect(snapshot()?.currentTime).toBe(30);
+			expect(snapshot()?.paused).toBe(false);
+		} finally {
+			shared.restore();
+		}
+	});
+
+	it('follows a command run after the move in the pop-out display', async () => {
+		const shared = installSharedAudio();
+		try {
+			const { container, plugin, snapshot } = await playingEmbed(shared);
+			makePopoutWindow().document.body.appendChild(container);
+			await tick();
+
+			expect(plugin.invokeCommand('skip-playback-forward')).toBe(true);
+
+			expect(timeText(container)).toBe('0:40 / 10:00');
+			expect(snapshot()?.currentTime).toBe(40);
+		} finally {
+			shared.restore();
+		}
+	});
+});
+
+describe('the player menu acts at the point it was opened on', () => {
+	/**
+	 * Mounts a real player as the embed Obsidian renders, and the real
+	 * context menu over the same registry and store, wired the way the
+	 * plugin wires them: a marker written from the menu tells the players of
+	 * the recording to read their markers again.
+	 * @param registry - The registry the player binds through
+	 * @param store - The sidecar the player reads and the menu writes
+	 * @param editable - Whether the embed sits in an editor, as in Live Preview
+	 * @returns The embed the player rendered into
+	 */
+	function playerWithMenu(
+		registry: AudioPlayerRegistry,
+		store: RecordingSidecarStore,
+		editable: boolean,
+	): HTMLElement {
+		const host = makePlayerContainer();
+		if (editable) {
+			host.addClass('cm-editor');
+		}
+		const embed = host.createDiv({
+			cls: 'internal-embed',
+			attr: { src: 'rec.mp4' },
+		});
+		mountMarkerPlayer(registry, store, embed);
+		const recording = fileAt('rec.mp4');
+		const menuApp = createMockApp({
+			metadataCache: { getFirstLinkpathDest: () => recording },
+		}).app;
+		const services = partial<ActionServices>({
+			app: menuApp,
+			getSettings: () =>
+				partial<AudioRecorderSettings>({ playerEnableMarkers: true }),
+			recordingSidecar: store,
+			onMarkersChanged: (path: string) => {
+				registry.reloadMarkers(path, null);
+			},
+		});
+		// The menu listens on every window through child components, which
+		// load as soon as they are added, as under a loaded plugin.
+		const plugin = partialPlugin({
+			app: menuApp,
+			registerEvent: jest.fn(),
+			addChild: <T extends Component>(child: T): T => {
+				child.load();
+				return child;
+			},
+		});
+		const { registry: actions, families } = registeredMenus(services);
+		new ContextMenu(plugin, services, actions, families).register();
+		return embed;
+	}
+
+	/**
+	 * Right-clicks the seek bar at a fraction of its width, the way a user
+	 * points at a moment of the recording.
+	 * @param embed - The embed the player rendered into
+	 * @param fraction - Where along the bar, from 0 to 1
+	 * @returns The menu the click opened
+	 */
+	function rightClickSeekBar(
+		embed: HTMLElement,
+		fraction: number,
+	): (typeof menuInstances)[number] {
+		const seek = el(embed, PLAYER.seek);
+		seek.getBoundingClientRect = (): DOMRect =>
+			({ left: 0, width: 100, top: 0, height: 10 }) as DOMRect;
+		const before = menuInstances.length;
+		seek.dispatchEvent(
+			new MouseEvent('contextmenu', {
+				bubbles: true,
+				cancelable: true,
+				clientX: fraction * 100,
+			}),
+		);
+		expect(menuInstances.length).toBeGreaterThan(before);
+		return at(menuInstances, menuInstances.length - 1);
+	}
+
+	it('adds a marker the embed shows at the point right-clicked in Live Preview', async () => {
+		const shared = sharedAudio();
+		const registry = new AudioPlayerRegistry();
+		const store = makeMarkerStore();
+		const embed = playerWithMenu(registry, store, true);
+		await tick();
+		startPlaybackAt(registry, shared.audio, 42);
+
+		// Half way along a 600 s recording, nowhere near where it plays.
+		rightClickSeekBar(embed, 0.5)
+			.items.find((item) => item.title === 'Add marker here')
+			?.click();
+		await tick();
+
+		expect(store.updateMarkers).toHaveBeenCalledWith(
+			'rec.mp4',
+			expect.any(Function),
+		);
+		expect(embed).toHaveMarkerAt(300);
+	});
+
+	it('offers no marker over a read-only player in Reading view', async () => {
+		const shared = sharedAudio();
+		const registry = new AudioPlayerRegistry();
+		const store = makeMarkerStore();
+		const embed = playerWithMenu(registry, store, false);
+		await tick();
+		startPlaybackAt(registry, shared.audio, 42);
+
+		const titles = rightClickSeekBar(embed, 0.5).items.map(
+			(item) => item.title,
+		);
+
+		expect(titles).not.toContain('Add marker here');
+		expect(titles).toContain('Copy timestamp link here');
+		expect(store.updateMarkers).not.toHaveBeenCalled();
 	});
 });

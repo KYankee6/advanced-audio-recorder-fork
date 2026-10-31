@@ -45,7 +45,10 @@ jest.mock('src/audio/AudioFormatConverter', () => ({
 		.fn()
 		.mockResolvedValue(new Blob(['merged'], { type: 'audio/wav' })),
 	convertBlobToWavBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(8)),
-	convertBlobToFormatBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(8)),
+	convertBlobToFormatBuffer: jest.fn().mockResolvedValue({
+		data: new ArrayBuffer(8),
+		sampleRateChange: null,
+	}),
 	getRecorderMediaType: jest.fn((format: string) => `audio/${format}`),
 	isOfflineOnlyFormat: jest.fn(
 		(format: string, recorderFormat: string) =>
@@ -160,9 +163,9 @@ describe('RecordingFinalizer', () => {
 				'final.webm',
 			);
 
-			expect(result).toBe('/final.webm');
+			expect(result).toBe('final.webm');
 			expect(mockApp.vault.createBinary).toHaveBeenCalledWith(
-				'/final.webm',
+				'final.webm',
 				expect.any(ArrayBuffer),
 			);
 			expect(mockApp.vault.adapter.remove).toHaveBeenCalledTimes(2);
@@ -238,7 +241,7 @@ describe('RecordingFinalizer', () => {
 				'final.webm',
 			);
 
-			expect(result).toBe('/final.webm');
+			expect(result).toBe('final.webm');
 			expect(
 				getNotices().some((message) =>
 					message.includes('temporary files could not be removed'),

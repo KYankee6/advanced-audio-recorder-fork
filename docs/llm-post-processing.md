@@ -87,18 +87,24 @@ Your **Custom instruction** is sent to the model **verbatim** as the system prom
 
 Each task has its own catalogue of named prompts, shown below the **Task** dropdown. The catalogue that appears is the one belonging to the selected task:
 
-| Task          | Catalogue shown                 | Language handling                                                                                   |
-| ------------- | ------------------------------- | --------------------------------------------------------------------------------------------------- |
-| **Clean up**  | **Cleanup prompt profiles**     | The transcript language is **appended automatically** at request time - you do not add it yourself. |
-| **Summarize** | **Summary prompt profiles**     | The transcript language is **appended automatically** at request time - you do not add it yourself. |
-| **Translate** | **Translation prompt profiles** | The **Translate into** language is **appended automatically** at request time.                      |
-| **Custom**    | **Custom instruction profiles** | **Not** appended - sent verbatim. Include your own language directive.                              |
+| Task          | Catalogue shown                 | Language handling                                                                                                                                            |
+| ------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Clean up**  | **Cleanup prompt profiles**     | The transcript language is **appended automatically** at request time, or every language of a transcript that switches language. You do not add it yourself. |
+| **Summarize** | **Summary prompt profiles**     | The transcript language is **appended automatically** at request time - you do not add it yourself.                                                          |
+| **Translate** | **Translation prompt profiles** | The **Translate into** language is **appended automatically** at request time.                                                                               |
+| **Custom**    | **Custom instruction profiles** | **Not** appended - sent verbatim. Include your own language directive.                                                                                       |
 
-A profile is a named prompt on a page of its own, with the prompt text, a switch named after the task that makes it the profile in use, and rename and delete - the same catalogue the dictionary, participant, and chapter guidance profiles use. Every task starts with one **Default** profile holding the built-in prompt shown below, and an upgrade from an earlier version moves whatever you had in the single prompt field into that profile, still in use. Add profiles for the cases you actually run: a cleanup for interviews and another for lectures, a summary for standups and another for client calls, and pick the one you want before a run.
+A profile is a named prompt on a page of its own, with the prompt text, a switch named after the task that makes it the profile in use, and rename and delete - the same catalogue the dictionary, participant, and chapter guidance profiles use. Every task starts with one **Default** profile holding the built-in prompt shown below, and **Clean up** also ships a **Language lesson** profile for a recorded lesson that moves between two languages, not in use until you pick it. An upgrade from an earlier version moves whatever you had in the single prompt field into that profile, still in use. Add profiles for the cases you actually run: a cleanup for interviews and another for lectures, a summary for standups and another for client calls, and pick the one you want before a run.
 
 A prompt profile can also be read from a note. Set the profile's **Source** row to **Note**, and the page replaces the prompt field with a **Note** row; once a note is picked there, an **Open note** action joins it. The prompt then becomes the note's text below its frontmatter, sent verbatim with its Markdown intact and read again as each run starts, from its editor when the note is open, so an edit made a moment before the run applies to it. The description under **Source** names the text the profile applies, such as `Uses the text of Prompts/Cleanup.md.` The profile follows the note through renames and moves inside Obsidian. When the note goes missing, the profile keeps the last text read from it, its entry says **Note missing** (after **In use** when it is the profile in use), and the run names the note in a notice. A note that cannot be read is handled the same way, and the notice says that it could not be read. The same mechanism serves every kind of profile, as described under [Biasing recognition toward your own terms](transcription.md#biasing-recognition-toward-your-own-terms).
 
 Setting a **Clean up**, **Summarize**, or **Translate** catalogue to **None** falls back to that task's built-in default, so the pass always has a real prompt to run with. **Custom** ships no default of its own: with None (or an empty profile) the model is only told `Process the following transcript as instructed.`, which is rarely what you want - keep a profile selected there. For **Clean up** and **Summarize**, the plugin appends a sentence telling the model to respond in the transcript's language (using the detected/declared language when known, e.g. `Respond in the same language as the transcript.` or `The transcript language is en; respond in that same language.`). **Translate** has its target language appended the same way, taken from **Translate into** or from English when that field is empty. That is why those three base prompts carry no language directive - adding one yourself would duplicate it.
+
+A transcript whose segments carry languages of their own, as Google Gemini returns them when **Language** lists several codes (see [Several languages in one recording](transcription.md#several-languages-in-one-recording)), is not told to answer in one language. The cleanup prompt gets this sentence instead, naming the languages in the order the recording first speaks them:
+
+```text
+The transcript mixes uk, pl. Keep every line in the language it is written in, and do not translate any of it.
+```
 
 For **Custom**, nothing is added: the instruction in the selected profile is the entire system prompt. A profile with an empty body, like None, leaves only the generic instruction above - write a real one.
 
@@ -115,6 +121,32 @@ These ship with the plugin as the **Default** profile of each task, and are used
 **Default Clean up prompt:**
 
 > You are an expert transcription editor. You are given a raw, machine-generated transcript. Correct punctuation, capitalization, and obvious speech-to-text errors; insert sensible paragraph breaks; and remove filler artifacts only when they add no meaning. Do NOT summarize, translate, paraphrase, add, or omit content - preserve the speaker's exact wording and meaning. Preserve any speaker labels and timestamps exactly as they appear, keeping each on its original line. Return only the corrected transcript with no preamble.
+
+**Language lesson Clean up prompt**, shipped as a second cleanup profile and used only once you pick it. It names no language, because the clause above names the ones the transcript holds. The [language lesson guide](use-cases/language-lesson.md) walks through the whole setup.
+
+```text
+You are an expert multilingual transcription editor. The transcript is a recording of a language lesson: a student learning a language talks with a tutor, and both switch between the language being learned and a language they share, between sentences or inside one sentence.
+
+Languages
+- Keep every phrase in the language it was spoken in, written in that language's own script and spelling.
+- Never translate, and never respell a phrase of one language in another language's orthography.
+- A word of one language quoted inside a sentence in the other stays as it was spoken.
+
+Corrections
+- Correct punctuation, capitalization, and clear speech-recognition errors.
+- Do not rebuild a phrase from what a fluent speaker would probably have said, and never add words that were not spoken. When a passage cannot be corrected with confidence, leave it as it is.
+
+The student's mistakes
+- The student's mistakes are the record of the lesson. Keep their grammar, word choice, endings, and word order exactly as spoken, together with hesitations, self-corrections, and unfinished attempts.
+- When the tutor corrects the student, keep both the student's version and the tutor's correction.
+- Keep dictation, repeated words, and spelled-out letters as they were said.
+
+Structure
+- Keep every timestamp, audio link, and speaker label exactly as it appears, each line in its place and in its order.
+- Do not merge, split, reorder, or omit lines, and add no headings, summaries, notes, language tags, or comments.
+
+Return only the cleaned transcript, with no preamble and no code fence.
+```
 
 **Default Summarize prompt:**
 
@@ -142,35 +174,35 @@ Each provider has its own default model and its own user-editable model list.
 
 | Provider               | Dropdown label       | Default model           | Model catalogue                                                                      |
 | ---------------------- | -------------------- | ----------------------- | ------------------------------------------------------------------------------------ |
-| **OpenAI**             | `OpenAI`             | `gpt-5.6-sol`           | [OpenAI models](https://developers.openai.com/api/docs/models)                       |
-| **Anthropic (Claude)** | `Anthropic (Claude)` | `claude-opus-4-8`       | [Anthropic models](https://platform.claude.com/docs/en/about-claude/models/overview) |
-| **Google Gemini**      | `Google Gemini`      | `gemini-3.5-flash`      | [Gemini models](https://ai.google.dev/gemini-api/docs/models)                        |
+| **OpenAI**             | `OpenAI`             | `gpt-6.1-sol`           | [OpenAI models](https://developers.openai.com/api/docs/models)                       |
+| **Anthropic (Claude)** | `Anthropic (Claude)` | `claude-opus-5-5`       | [Anthropic models](https://platform.claude.com/docs/en/about-claude/models/overview) |
+| **Google Gemini**      | `Google Gemini`      | `gemini-3.8-flash`      | [Gemini models](https://ai.google.dev/gemini-api/docs/models)                        |
 | **Mistral**            | `Mistral`            | `mistral-medium-latest` | [Mistral models](https://docs.mistral.ai/getting-started/models/models_overview)     |
 | **DeepSeek**           | `DeepSeek`           | `deepseek-flash`        | [DeepSeek models](https://api-docs.deepseek.com/quick_start/pricing)                 |
 
 The **Model** row on the engine's page is the same control used for transcription models: pick an id from its dropdown, add one with the button on the **Model catalogue** entry below it, delete one with the button on a catalogue row, and follow the link at the end of the **Model** row's description to the provider's model list. The list is seeded with common models for the provider:
 
-| Provider      | Seeded model ids                                                                                                                                   |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **OpenAI**    | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                                                                                                     |
-| **Anthropic** | `claude-opus-4-8`, `claude-sonnet-5`, `claude-haiku-4-5`, `claude-fable-5`                                                                         |
-| **Gemini**    | `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.5-flash-lite`, `gemini-2.0-flash` |
-| **Mistral**   | `mistral-medium-latest`, `mistral-small-latest`, `mistral-large-latest`                                                                            |
-| **DeepSeek**  | `deepseek-flash`, `deepseek-v4-pro`                                                                                                                |
+| Provider      | Seeded model ids                                                                  |
+| ------------- | --------------------------------------------------------------------------------- |
+| **OpenAI**    | `gpt-6.1-sol`, `gpt-6-astra`, `gpt-6-luna`                                        |
+| **Anthropic** | `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`    |
+| **Gemini**    | `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon` |
+| **Mistral**   | `mistral-medium-latest`, `mistral-small-latest`, `mistral-large-latest`           |
+| **DeepSeek**  | `deepseek-flash`, `deepseek-v4-pro`                                               |
 
 The model list belongs to the provider rather than to the job, so each provider's page keeps its own picker contents and its own selected model, and your OpenAI choice is remembered separately from your Anthropic, Gemini, Mistral, and DeepSeek choices whichever job calls them.
 
 DeepSeek serves the OpenAI chat format, and its catalogue holds two current models: `deepseek-flash` for everyday cleanup and summaries, and `deepseek-v4-pro` for harder prompts at about four times the price. The older ids `deepseek-chat`, `deepseek-reasoner`, and `deepseek-v4-flash` are retired by the vendor and are not seeded, because a request naming one fails. DeepSeek bills by time of day: the cost estimate uses the weekday peak rate (01:00-04:00 and 06:00-10:00 UTC), so a run outside those hours costs about half of what the estimate shows, and less again when the vendor's prompt cache is hit.
 
-![OpenAI engine settings with the base URL, API key, model picker and max output tokens rows](images/settings-llm-provider-model.png)
+![OpenAI engine settings with the base URL, API key keychain picker, model picker and max output tokens rows](images/settings-llm-provider-model.png)
 
-![Anthropic engine settings with the base URL, API key, model picker and max output tokens rows](images/settings-engine-anthropic.png)
+![Anthropic engine settings with the base URL, API key keychain picker, model picker and max output tokens rows](images/settings-engine-anthropic.png)
 
 ---
 
 ## Shared API keys
 
-You only enter a vendor's API token **once**, because a key belongs to the account rather than to the job: two engines reached through the same account read the one field their shared page holds.
+You only link a vendor's API token **once**, because a key belongs to the account rather than to the job: two engines reached through the same account read the one key row their shared page holds.
 
 | Account                | Key field shown           | Read by                                                                      |
 | ---------------------- | ------------------------- | ---------------------------------------------------------------------------- |
@@ -188,9 +220,9 @@ Need a key? Follow the matching use-case guide:
 - [OpenAI / Whisper API key](use-cases/openai-whisper-api-key.md)
 - [Google Gemini API key](use-cases/gemini-api-key.md)
 - [Mistral API key](use-cases/mistral-api-key.md)
-- DeepSeek has no guide page: create a key at [platform.deepseek.com](https://platform.deepseek.com/api_keys) and paste it into **DeepSeek API key** on the DeepSeek page.
+- DeepSeek has no guide page: create a key at [platform.deepseek.com](https://platform.deepseek.com/api_keys) and link it on **DeepSeek API key** on the DeepSeek page, which stores it in Obsidian's keychain.
 
-> **API keys** are stored in the plugin's `data.json` on this device and are never written to diagnostics output. Avoid syncing `data.json` to untrusted locations.
+> **API keys** are kept in Obsidian's keychain (**Settings > Keychain**) on this device, not in the plugin's `data.json`, and are never written to diagnostics output. The keychain does not sync, so each device needs a key linked once, and on the desktop each vault does.
 
 ---
 

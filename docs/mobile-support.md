@@ -1,6 +1,6 @@
 # Mobile support
 
-Advanced Audio Recorder runs in the **Obsidian mobile app** (iOS and Android) as well as on the desktop. You record straight into a note, play recordings back in the enhanced waveform player with markers and chapters, convert and split files, clean up noisy audio, and transcribe with a cloud engine - all from your phone or tablet. A handful of features stay desktop-only because they rely on hardware or capabilities the mobile app does not expose; where a setting is unavailable, the plugin **greys it out** rather than hiding it, and it never fails silently. This page collects everything that is specific to mobile in one place.
+Advanced Audio Recorder runs in the **Obsidian mobile app** (iOS and Android) as well as on the desktop. You record straight into a note, play recordings back in the enhanced waveform player with markers and chapters, convert and split files, clean up noisy audio, and transcribe with a cloud engine - all from your phone or tablet. A handful of features stay desktop-only because they rely on hardware or capabilities the mobile app does not expose. Where a setting is unavailable, the plugin **greys it out** rather than hiding it, and it never fails silently. This page collects everything that is specific to mobile in one place.
 
 - [What works on mobile](#what-works-on-mobile)
 - [Platform-specific limitations](#platform-specific-limitations)
@@ -11,7 +11,7 @@ Advanced Audio Recorder runs in the **Obsidian mobile app** (iOS and Android) as
 - [Getting started on mobile](#getting-started-on-mobile)
 - [Related pages](#related-pages)
 
-![Two enhanced audio players on a phone, each showing a waveform, playback controls, and a chapter list](images/mobile-audio-player.png)
+![Two enhanced audio players in a note on a phone with icons at the phone's own size, the first with its playback controls above the waveform, the second with the marker controls as well and a list of two chapters](images/mobile-audio-player.png)
 
 ## What works on mobile
 
@@ -38,7 +38,7 @@ The following features are **desktop-only** and do not run in the mobile app. Th
 - **Bit depth.** WAV is recorded through a compressed intermediate rather than as raw PCM on the phone, so the width of a sample belongs to that encoder and the **Bit depth** row cannot be honoured. It stays visible with its stored value, because a vault synced from a desktop machine carries the choice. See [Bit depth](formats.md#bit-depth).
 - **Multi-track recording.** Capturing several input devices at once needs the multi-device access the mobile app does not provide. A multi-track configuration synced from the desktop silently records a normal single-track session on the phone. See [Multi-track recording](multi-track-recording.md).
 - **Include system audio.** Recording this computer's own output beside the microphone opens two captures at once, which is the same access multi-track recording needs, so the switch is off on the phone and a vault carrying it on records the usual single track there. See [Recording this computer's own output](recording.md#recording-this-computers-own-output).
-- **The command line.** The terminal commands the plugin answers exist only where the app has a command line, which is the desktop build from Obsidian 1.12.2 on. Nothing about a mobile session depends on them. See [From the command line](recording.md#from-the-command-line).
+- **The command line.** The terminal commands the plugin answers exist only where the app has a command line, which is the desktop build. Nothing about a mobile session depends on them. See [Command line](command-line.md).
 - **Local whisper.cpp transcription.** The local engine shells out to a native binary, which the mobile app cannot do. Use a cloud engine instead - see [Transcription on mobile](#transcription-on-mobile).
 
 ## Crash recovery on mobile
@@ -77,15 +77,17 @@ The **Local whisper.cpp** engine is **desktop-only** and is shown blocked on mob
 
 ## The mobile recording banner
 
-The mobile app has no ribbon icon and no desktop status bar to show that a capture is in progress, so the plugin shows a **floating recording banner** instead. The banner carries a recording indicator, the elapsed time, and a **stop** button, so an active session is always visible and can always be stopped.
+The mobile app has no ribbon icon and no desktop status bar to show that a capture is in progress, so the plugin shows a **floating recording banner** instead. The banner carries a recording indicator, the elapsed time, and a **stop** button, so an active session stays visible and can be stopped from the banner. By default it floats just below the note header, clear of the status bar and of the edge where the system pulls down its notifications, and its stop button is a full-size touch target. The elapsed time follows the system text size, and with reduced motion turned on the recording dot stays red without pulsing. When it covers something you need, drag it to another part of the screen: it snaps to the nearest of six places along the top and bottom edges and stays there for later recordings, and a drag never stops the recording.
 
-The banner is governed by the **Mobile recording banner** setting under **Settings > Advanced Audio Recorder > Audio processing & feedback** (default **On**). On the desktop app the ribbon indicator and the status bar already make a recording obvious, so the banner is not shown there. See [Mobile recording banner](recording.md#mobile-recording-banner).
+![The mobile recording banner with a pulsing dot, the elapsed time 1:23 and a stop button, floating below the note header on a phone](images/mobile-recording-banner.png)
+
+The banner is governed by the **Show recording banner** setting on the **Settings > Advanced Audio Recorder > Mobile** page (default **On**), and its place by **Banner position** right below it, where **Top center** puts a dragged banner back. On the desktop app the ribbon indicator and the status bar already make a recording obvious, so the banner is not shown there. See [Mobile recording banner](recording.md#mobile-recording-banner).
 
 ## Getting started on mobile
 
 1. **Install the plugin.** Open **Settings > Community plugins** in the Obsidian mobile app, turn off **Restricted mode** if it is on, tap **Browse**, search for **Advanced Audio Recorder**, then **Install** and **Enable**. This is the same catalogue used on the desktop - see [Getting started](getting-started.md#from-community-plugins).
 2. **Grant microphone permission.** The first time you record, the operating system asks to let Obsidian use the microphone - choose **Allow**. If you miss the prompt or capture stays silent, enable microphone access for Obsidian in the phone's system settings.
-3. **Record.** Run the **Start/stop recording** command from the command palette (you can also add it to the mobile toolbar for one-tap access, since there is no ribbon icon on mobile). The [mobile recording banner](#the-mobile-recording-banner) appears while the session is live; tap its stop button, or run the command again, to finish and save.
+3. **Record.** Run the **Start/stop recording** command from the command palette (you can also add it to the mobile toolbar for one-tap access, since there is no ribbon icon on mobile). The [mobile recording banner](#the-mobile-recording-banner) appears while the session is live. Tap its stop button, or run the command again, to finish and save.
 4. **(Optional) Transcribe.** Enable transcription, pick a **cloud** engine, and add its API key under **Settings > Advanced Audio Recorder > Transcription**. See [Transcription on mobile](#transcription-on-mobile) and the [Record a voice memo or lecture on your phone](use-cases/record-on-mobile.md) walkthrough.
 
 Device-bound settings (the input device and channel layouts) are stored **per platform**, so a vault synced between a desktop and a phone keeps each device's own configuration intact.

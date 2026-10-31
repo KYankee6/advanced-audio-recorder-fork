@@ -32,7 +32,6 @@
 import { TFile, MarkdownView, Notice, debounce } from 'obsidian';
 import type {
 	App,
-	Editor,
 	MarkdownPostProcessorContext,
 	Plugin,
 	TAbstractFile,
@@ -49,7 +48,10 @@ import { resolveVoiceBoostStages } from '../cleanup/audioDsp';
 import { AudioPlayerRegistry, playbackKey } from './AudioPlayerRegistry';
 import { DetachedPlayback } from './DetachedPlayback';
 import { MediaSessionBridge } from './MediaSessionBridge';
-import { MarkerSearchIndex } from '../markers/MarkerSearchIndex';
+import {
+	MarkerSearchIndex,
+	type MarkerHit,
+} from '../markers/MarkerSearchIndex';
 import { MarkerSearchModal } from '../ui/MarkerSearchModal';
 import { SIDECAR_SUFFIX } from '../sidecar/RecordingSidecarStore';
 import type {
@@ -63,8 +65,9 @@ import {
 	isAudioFile,
 	parseTimecodeSubpath,
 	isSpeakerAlias,
-	wikiLinkWithAliasAtCursor,
 } from './timecodeLinks';
+import { editorPositionOfNode } from '../obsidian/editorDomPosition';
+import { linkAtColumn } from '../obsidian/sourceLinks';
 import { SpeakerRenameModal } from '../ui/SpeakerRenameModal';
 import { probeMediaKind, MEDIA_KIND, type MediaKind } from './mediaProbe';
 import { registerDomEventOnAllWindows } from '../utils/multiWindowDomEvents';
@@ -247,6 +250,11 @@ export class EnhancedPlayerRegistrar {
 					this.mediaKindStore?.handleRename(oldPath, file.path);
 					return;
 				}
+				// A sidecar that arrives at a path by a rename is a new sidecar
+				// there, the same as one created: the store moves a recording's
+				// sidecar this way, and trashing an orphan at the destination
+				// first has already dropped that path from the search.
+				this.reindexSidecar(file);
 				void this.markerStore.handleOutputRename(oldPath, file.path);
 			}),
 		);
@@ -303,6 +311,15 @@ export class EnhancedPlayerRegistrar {
 		if (recording !== null) {
 			void this.markerSearch.refresh(recording);
 		}
+	}
+
+	/**
+	 * Every marker of every recording, from the index the search opens over,
+	 * built on the first call of the session.
+	 * @returns The markers, by recording and time
+	 */
+	markerHits(): Promise<MarkerHit[]> {
+		return this.markerSearch.all();
 	}
 
 	/**
@@ -931,24 +948,26 @@ export class EnhancedPlayerRegistrar {
 	 *   the click is not on a wikilink or the editor internals are unavailable
 	 */
 	private resolveEditorLinkWithAlias(
-		node: Node,
+		node: HTMLElement,
 	): { target: string; alias: string | null } | null {
-		const view =
-			markdownViewContaining(this.app, node) ??
-			this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (!view) {
+		const rendered = editorPositionOfNode(node);
+		if (!rendered) {
 			return null;
 		}
-		const cm = (view.editor as EditorWithCodeMirror).cm;
-		if (!cm?.posAtDOM) {
-			return null;
-		}
+		const { editor, position } = rendered;
 		try {
-			const cursor = view.editor.offsetToPos(cm.posAtDOM(node));
-			return wikiLinkWithAliasAtCursor(
-				view.editor.getLine(cursor.line),
-				cursor.ch,
-			);
+			const lineText = editor.getLine(position.line);
+			const link = linkAtColumn(lineText, position.ch);
+			if (!link) {
+				return null;
+			}
+			const slice = lineText.slice(link.start, link.end);
+			const wiki = /^\[\[([^\]|\n]+)(?:\\?\|([^\]\n]*))?\]\]$/.exec(slice);
+			if (wiki) {
+				return { target: link.link, alias: wiki[2] ?? null };
+			}
+			const md = /^\[([^\]]*)\]\(/.exec(slice);
+			return { target: link.link, alias: md?.[1] ?? null };
 		} catch (error) {
 			console.error(
 				`${PLUGIN_LOG_PREFIX} Failed to resolve a timecode link in the editor.`,
@@ -957,9 +976,6 @@ export class EnhancedPlayerRegistrar {
 			return null;
 		}
 	}
+
 }
 
-/** CodeMirror view attached to an Obsidian Editor (internal API). */
-interface EditorWithCodeMirror extends Editor {
-	cm?: { posAtDOM?(node: Node): number };
-}

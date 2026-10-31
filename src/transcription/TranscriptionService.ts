@@ -37,7 +37,7 @@ import {
 	quickNoteTranscriptionSettings,
 } from '../settings/settingsSchema';
 import {
-	audioMimeFromExtension,
+	audioContainerFromExtension,
 	audioPrepOptions,
 	prepareAudio,
 	type PreparedAudio,
@@ -55,6 +55,7 @@ import {
 	collectFirstTurns,
 	plainText,
 	renameSpeakers,
+	segmentLanguages,
 	stitchChunks,
 	stripSpeakers,
 } from './transcriptModel';
@@ -96,11 +97,12 @@ import { ProfileKindId, selectedProfileId } from '../settings/profiles';
 import { ProfileTextSource } from '../settings/ProfileTextSource';
 import { readProfileNotes } from '../settings/ProfileNoteStore';
 import { createLlmProvider, createTranscriptionProvider } from './factories';
-import { vendorMaxTokens } from '../providers/providers';
+import { sameEngine, vendorMaxTokens } from '../providers/providers';
 import { jobVendorId, LlmJobId } from './llm/vendors';
 import {
 	effectiveDiarize,
 	effectiveLanguage,
+	effectiveLanguages,
 	effectiveSpeechTranslation,
 	effectiveWordTimestamps,
 } from './providers/capabilities';
@@ -113,6 +115,13 @@ import {
 	selectedEngineModel,
 	sumUsage,
 } from './costs';
+import { errorMessage } from '../errors';
+import {
+	judgePartTimeline,
+	timelineFaultMessage,
+	trimToPart,
+	type PartSpan,
+} from './partTimeline';
 
 // Cancellation belongs to every long job, not to transcription alone, so it
 // lives in utils and is re-exported here for the callers that already reach
@@ -136,6 +145,10 @@ export interface TranscribeRunOptions {
 	 * file's bytes - the dialog reads them to probe the duration for the cost
 	 * estimate - passing them here avoids reading the whole file a second
 	 * time. Omitted, the service reads the file itself.
+	 *
+	 * Handed over rather than lent: a recording the engine cannot read as it
+	 * stands is decoded from this very buffer, and the browser's decoder leaves
+	 * it detached, so the caller does not read it again after the run starts.
 	 */
 	audioBytes?: ArrayBuffer | undefined;
 	/** Cancellation token. */
@@ -358,13 +371,19 @@ export interface TranscriptionServiceDeps {
  */
 interface PassContext {
 	readonly payloads: readonly PreparedPayload[];
+	/**
+	 * Where the recording's last part ends, in seconds, or undefined when the
+	 * parts carry no measured end. Taken from the whole plan, because a top-up
+	 * sends only some of its parts and the last of those need not end the
+	 * recording.
+	 */
+	readonly recordingEndSeconds: number | undefined;
 	readonly partCount: number;
 	readonly provider: TranscriptionProvider;
 	readonly token: CancellationToken;
 	readonly discardedUsage: TranscriptionUsage[];
 	readonly onProgress?:
-		| ((fraction: number, label: string) => void)
-		| undefined;
+		((fraction: number, label: string) => void) | undefined;
 	readonly onCost?: ((cost: TranscribeRunCost) => void) | undefined;
 	readonly runCost: () => TranscribeRunCost;
 }
@@ -390,7 +409,10 @@ interface RunLedger {
 
 /** Audio held in memory, with no file in the vault behind it. */
 export interface DictationAudio {
-	/** The recorded container bytes. */
+	/**
+	 * The recorded container bytes, handed over to the run the way
+	 * {@link TranscribeRunOptions.audioBytes} are.
+	 */
 	readonly bytes: ArrayBuffer;
 	/** Container the bytes are in, as a file extension without the dot. */
 	readonly extension: string;
@@ -431,12 +453,14 @@ interface PartRun {
 	readonly token: CancellationToken;
 	/** Human label for the part ('' for a single indivisible job). */
 	readonly label: string;
+	/**
+	 * Where the recording's last part ends, in seconds, or undefined when the
+	 * parts carry no measured end. Tells a part that ends the recording from
+	 * one that ends mid-conversation.
+	 */
+	readonly recordingEndSeconds: number | undefined;
 	/** Accumulates successful per-part transcripts (mutated). */
-	readonly results: {
-		offsetSeconds: number;
-		transcript: Transcript;
-		usage?: TranscriptionUsage;
-	}[];
+	readonly results: PassResult[];
 	/** Accumulates recoverable per-part failures (mutated). */
 	readonly failedParts: PartFailure[];
 	/**
@@ -491,6 +515,70 @@ function retryWaitMs(error: unknown, attempt: number): number | null {
 		TRANSCRIBE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
 		TRANSCRIBE_RETRY_MAX_DELAY_MS,
 	);
+}
+
+/**
+ * Whether a buffer was transferred away, which leaves it empty for good.
+ *
+ * Read through the ES2024 `detached` property, typed here because the plugin
+ * compiles against ES2022. A runtime without the property answers false, which
+ * leaves the send to go ahead exactly as it did before the check existed.
+ * @param buffer - The bytes about to be sent
+ * @returns True when the buffer was detached
+ */
+function isDetached(buffer: ArrayBuffer): boolean {
+	return (
+		(buffer as ArrayBuffer & { readonly detached?: boolean }).detached ===
+		true
+	);
+}
+
+/**
+ * Refuses to send audio that something has already used up.
+ *
+ * A part is sent more than once - again after a refusal the run waits out, and
+ * again for the advanced second pass - and the browser's decoder empties any
+ * buffer it is handed. Audio decoded inside a provider was exactly that: the
+ * retry after a 503 found the bytes gone, and the run reported a decode
+ * failure instead of the refusal it had been waiting out (issue #136).
+ * Preparation now does every decode once, from bytes nothing reads again, so
+ * this cannot happen on the shipping path; asked anyway because the failure
+ * it stands guard over is a paid upload of nothing, or an error naming the
+ * wrong cause, and both are far easier to fix when they say what they are.
+ * @param payload - The part about to be sent
+ * @param label - The part, as the run names it ('' for a single-part run)
+ * @throws When the part's bytes were detached before the send
+ */
+function assertUnconsumed(payload: AudioPayload, label: string): void {
+	if (isDetached(payload.data)) {
+		throw new Error(
+			`The audio for ${label || 'the recording'} was used up before it ` +
+				'could be sent. This is a defect in the plugin; please report it.',
+		);
+	}
+}
+
+/**
+ * The part as its answer is judged, or null when the answer is taken as it
+ * is: the engine measures its timecodes on the audio, or the part's end was
+ * never measured, as on the whole-file path.
+ * @param part - The part being transcribed
+ * @returns Its length and whether it ends the recording
+ */
+function estimatedSpan(part: PartRun): PartSpan | null {
+	const { prepared, recordingEndSeconds } = part;
+	if (
+		!part.provider.capabilities.estimatesTimecodes ||
+		prepared.endSeconds === undefined
+	) {
+		return null;
+	}
+	return {
+		durationSeconds: prepared.endSeconds - prepared.offsetSeconds,
+		isLast:
+			recordingEndSeconds === undefined ||
+			prepared.endSeconds >= recordingEndSeconds,
+	};
 }
 
 /**
@@ -589,10 +677,14 @@ export class TranscriptionService {
 		this.throwIfCancelled(token);
 
 		const payloads = selectRanges(prepared.payloads, options.onlyRanges);
-		const ledger = this.openLedger(settings, provider, payloads, token, {
-			onProgress: options.onProgress,
-			onCost: options.onCost,
-		});
+		const ledger = this.openLedger(
+			settings,
+			provider,
+			prepared.payloads,
+			payloads,
+			token,
+			{ onProgress: options.onProgress, onCost: options.onCost },
+		);
 		const { failedParts, secondPassResults } = ledger;
 		const runCost = ledger.context.runCost;
 		// The advanced mode transcribes everything twice, so it splits the
@@ -643,6 +735,7 @@ export class TranscriptionService {
 			const outcome = await new AdvancedTwoPassRunner({
 				settings,
 				baseline: stitched,
+				baselineResults: ledger.results,
 				transcribeOptions,
 				engineId: provider.id,
 				sourcePath: file.path,
@@ -797,7 +890,9 @@ export class TranscriptionService {
 	 * recording run uses, and none of what a recording run adds for a document
 	 * is: no speakers, no word timings, no advanced second pass, no Markdown
 	 * and no transcript post-processing. A dictation is one person's text for
-	 * the cursor, and the quick note profile is the only rewrite it gets.
+	 * the cursor, and the quick note profile is the only rewrite it gets: in
+	 * the transcription request itself when the engine can rewrite there, and
+	 * as a second request to the quick note LLM otherwise.
 	 * @param audio - The dictated audio, held in memory
 	 * @param options - Progress and cancellation
 	 * @returns The text to insert and what producing it cost
@@ -855,21 +950,37 @@ export class TranscriptionService {
 			false,
 		);
 		this.throwIfCancelled(token);
+		// The rewrite rides in the transcription request when the engine can
+		// hear and rewrite at once, when the rewrite is configured on that same
+		// engine, so the model the settings name for it is the one that writes,
+		// and when the dictation goes in one part, since a rewrite per part
+		// would rewrite fragments of what was said.
+		const rewriteInRequest =
+			instruction !== '' &&
+			provider.capabilities.rewritesInRequest &&
+			sameEngine(
+				settings.transcriptionProvider,
+				jobVendorId(settings, LlmJobId.QuickNote),
+			) &&
+			prepared.payloads.length === 1;
 		const ledger = this.openLedger(
 			settings,
 			provider,
+			prepared.payloads,
 			prepared.payloads,
 			token,
 			{ onProgress: options.onProgress },
 		);
 		await this.transcribePass(
 			ledger.context,
-			transcribeOptions,
+			rewriteInRequest
+				? { ...transcribeOptions, rewrite: instruction }
+				: transcribeOptions,
 			ledger.results,
 			ledger.failedParts,
 			0,
 			TRANSCRIBE_CHUNK_PROGRESS_CEILING,
-			'Transcribing',
+			rewriteInRequest ? 'Transcribing and rewriting' : 'Transcribing',
 		);
 		const transcript = this.stitchFirstPass(ledger, token, fileName);
 		const missing = missingPartsWarning(ledger.failedParts);
@@ -882,8 +993,14 @@ export class TranscriptionService {
 		// is what sizes its estimate. A dictation that heard nothing has
 		// nothing to rewrite and is not sent.
 		const lastSegment = transcript.segments.at(-1);
-		const text =
-			instruction !== '' && lastSegment !== undefined && heard !== ''
+		const text = rewriteInRequest
+			? // Several texts only when a truncated answer was retried in
+				// pieces, each rewritten on its own, kept in timeline order.
+				ledger.results
+					.map((part) => part.rewritten ?? '')
+					.filter((part) => part !== '')
+					.join('\n\n')
+			: instruction !== '' && lastSegment !== undefined && heard !== ''
 				? await this.rewriteDictation(settings, heard, instruction, {
 						durationSeconds: lastSegment.end,
 						token,
@@ -1038,6 +1155,10 @@ export class TranscriptionService {
 					settings.transcriptionProvider,
 					settings.transcriptionLanguage,
 				),
+				languages: effectiveLanguages(
+					settings.transcriptionProvider,
+					settings.transcriptionLanguage,
+				),
 				diarize: wanted.diarize,
 				// Gated like diarize: an engine that returns segment-level
 				// timing only never sees a request it would drop, and a stored
@@ -1068,7 +1189,8 @@ export class TranscriptionService {
 	 * engine and model.
 	 * @param settings - The run's settings snapshot
 	 * @param provider - The engine every part is sent to
-	 * @param payloads - The parts the run sends
+	 * @param plan - Every part the recording prepared to
+	 * @param payloads - The parts of the plan the run sends
 	 * @param token - Cancellation for the run
 	 * @param report - Where progress and running cost are reported
 	 * @returns An empty ledger over those parts
@@ -1076,6 +1198,7 @@ export class TranscriptionService {
 	private openLedger(
 		settings: AudioRecorderSettings,
 		provider: TranscriptionProvider,
+		plan: readonly PreparedPayload[],
 		payloads: readonly PreparedPayload[],
 		token: CancellationToken,
 		report: Pick<PassContext, 'onProgress' | 'onCost'>,
@@ -1106,6 +1229,7 @@ export class TranscriptionService {
 		return {
 			context: {
 				payloads,
+				recordingEndSeconds: plan.at(-1)?.endSeconds,
 				partCount: payloads.length,
 				provider,
 				token,
@@ -1163,7 +1287,9 @@ export class TranscriptionService {
 	 *
 	 * The bytes come from the caller, which reads a recording from the vault
 	 * or already holds them - the dialog reads the file to probe its duration
-	 * for the cost estimate, and a dictation never had a file at all.
+	 * for the cost estimate, and a dictation never had a file at all. They are
+	 * the run's from here on: a decode takes them (see `prepareAudio`), and
+	 * every send reads the parts preparation hands back, never these.
 	 * @param bytes - The audio, in the container its extension names
 	 * @param fileName - Name the audio is uploaded under
 	 * @param extension - Container extension without the dot
@@ -1183,9 +1309,10 @@ export class TranscriptionService {
 		const prepared = await prepareAudio(
 			bytes,
 			fileName,
-			audioMimeFromExtension(extension),
+			audioContainerFromExtension(extension),
 			audioPrepOptions(
 				provider.capabilities,
+				provider.label,
 				provider.requiresNetwork,
 				Math.max(1, settings.transcriptionChunkMb) * BYTES_PER_MB,
 				diarize,
@@ -1229,7 +1356,8 @@ export class TranscriptionService {
 		progressSpan: number,
 		verb: string,
 	): Promise<void> {
-		const { payloads, partCount, provider, token } = context;
+		const { payloads, partCount, provider, token, recordingEndSeconds } =
+			context;
 		for (let i = 0; i < partCount; i++) {
 			this.throwIfCancelled(token);
 			const payload = payloads[i];
@@ -1249,6 +1377,7 @@ export class TranscriptionService {
 				providerOptions: passOptions,
 				token,
 				label: partLabel,
+				recordingEndSeconds,
 				results: passResults,
 				failedParts: passFailed,
 				discardedUsage: context.discardedUsage,
@@ -1410,7 +1539,79 @@ export class TranscriptionService {
 			offsetSeconds: prepared.offsetSeconds,
 		};
 		try {
-			const chunkResult = await this.transcribeWithRetries(part, payload);
+			let chunkResult = await this.transcribeWithRetries(part, payload);
+			const span = estimatedSpan(part);
+			const firstFault =
+				span && judgePartTimeline(chunkResult.segments, span);
+			if (span && firstFault) {
+				// The timecodes are the model's estimate and drift from one
+				// request to the next, so the same part sent once more usually
+				// comes back inside it. The rejected answer was billed all the
+				// same, so its usage stays in the run's total.
+				console.warn(
+					`${PLUGIN_LOG_PREFIX} ${label || 'The audio'} came back ` +
+						'with timecodes that do not fit the part; sending it again.',
+				);
+				if (chunkResult.usage) {
+					discardedUsage.push(chunkResult.usage);
+				}
+				const rejected = chunkResult;
+				let retryFailure: string | undefined;
+				try {
+					chunkResult = await this.transcribeWithRetries(
+						part,
+						payload,
+					);
+				} catch (error) {
+					// A cancel ends the run. Any other failure leaves the first
+					// answer, whose lines inside the part were billed and are
+					// kept rather than lost with the part. That includes an
+					// answer cut off at the output limit: splitting the part
+					// would send it twice more for an answer already in hand,
+					// so only the cut-off request's usage is counted. The first
+					// answer's usage is already counted with the discarded
+					// requests, so it is not carried again.
+					this.rethrowIfCancelled(error, token);
+					if (
+						error instanceof TranscriptTruncatedError &&
+						error.usage
+					) {
+						discardedUsage.push(error.usage);
+					}
+					retryFailure = errorMessage(error);
+					chunkResult = {
+						segments: rejected.segments,
+						language: rejected.language,
+					};
+				}
+				const fault = judgePartTimeline(chunkResult.segments, span);
+				if (fault) {
+					// What fits the part is kept, and the part is recorded as
+					// incomplete so the note says so and a top-up can ask for
+					// it again.
+					failedParts.push({
+						label: label || this.partTimeLabel(prepared),
+						message: timelineFaultMessage(
+							fault,
+							span,
+							part.provider.label,
+							retryFailure === undefined
+								? { firstFault }
+								: { retryFailure },
+						),
+						startSeconds: prepared.offsetSeconds,
+						endSeconds:
+							prepared.offsetSeconds + span.durationSeconds,
+					});
+					chunkResult = {
+						...chunkResult,
+						segments: trimToPart(
+							chunkResult.segments,
+							span.durationSeconds,
+						),
+					};
+				}
+			}
 			results.push({
 				offsetSeconds: payload.offsetSeconds,
 				transcript: buildTranscript(chunkResult.segments, {
@@ -1419,6 +1620,9 @@ export class TranscriptionService {
 				// Carried per part so the run's cost sums what the provider
 				// actually reported billing for, across chunks and retries.
 				...(chunkResult.usage ? { usage: chunkResult.usage } : {}),
+				...(chunkResult.rewritten === undefined
+					? {}
+					: { rewritten: chunkResult.rewritten }),
 			});
 		} catch (error) {
 			// A cancel aborts the whole run; never salvage past it. An abort
@@ -1463,8 +1667,7 @@ export class TranscriptionService {
 						'length; reporting it without subdividing further.',
 				);
 			}
-			const detail =
-				error instanceof Error ? error.message : String(error);
+			const detail = errorMessage(error);
 			// A single indivisible job has nothing to keep, so fail as before. A
 			// labelled part (one of several, or a subdivision) records the failure
 			// and carries on: discarding a completed - and, on a paid API, already
@@ -1502,6 +1705,7 @@ export class TranscriptionService {
 		payload: AudioPayload,
 	): Promise<WhisperResult> {
 		for (let attempt = 1; ; attempt++) {
+			assertUnconsumed(payload, part.label);
 			try {
 				return await part.provider.transcribe(
 					payload,
@@ -1512,6 +1716,17 @@ export class TranscriptionService {
 				if (waitMs === null) {
 					throw error;
 				}
+				// The refusal is only ever shown as a passing progress line,
+				// and the error a run ends with is the last attempt's. Written
+				// here so the cause that started the retries is on record even
+				// when a later attempt fails differently - which is how a 503
+				// once hid behind an unrelated decode error.
+				console.warn(
+					`${PLUGIN_LOG_PREFIX} ${part.label || 'The audio'} was ` +
+						`refused on attempt ${String(attempt)}; sending it ` +
+						`again in ${String(Math.ceil(waitMs / MS_PER_SECOND))}s.`,
+					error,
+				);
 				part.onRetryWait(waitMs, part.label);
 				try {
 					await delay(waitMs, part.token.signal);
@@ -1587,6 +1802,7 @@ export class TranscriptionService {
 			{
 				task: settings.llmPostProcessTask,
 				language: transcript.language,
+				segmentLanguages: segmentLanguages(transcript.segments),
 				cleanupPrompt: resolveLlmPrompt(settings, LlmTask.Cleanup),
 				summaryPrompt: resolveLlmPrompt(settings, LlmTask.Summary),
 				customInstruction: resolveLlmPrompt(settings, LlmTask.Custom),

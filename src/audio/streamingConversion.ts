@@ -8,62 +8,115 @@
  * @module audio/streamingConversion
  */
 
-import {
-	Input,
-	Output,
-	BlobSource,
-	BufferTarget,
-	ALL_FORMATS,
+import type {
+	AudioCodec,
 	AudioSample,
-	Conversion,
+	AudioSampleInit,
+	ConversionAudioOptions,
+	Input,
 } from 'mediabunny';
-import type { AudioCodec, ConversionAudioOptions } from 'mediabunny';
-import { ensureEncoderRegistered, createOutputFormat } from './AudioEncoder';
+import {
+	ensureEncoderRegistered,
+	createOutputFormat,
+	encodableSampleRate,
+} from './AudioEncoder';
 import { getFormatDescriptor } from './formatRegistry';
+import { loadAudioEngine } from './audioEngine';
 import { ChannelMode, monoPickIndex } from './downmix';
 import { disposableOf } from '../utils/disposables';
+import {
+	NEVER_CANCELLED,
+	onCancelled,
+	throwIfCancelled,
+	type CancellationToken,
+} from '../utils/cancellation';
+import { PLUGIN_LOG_PREFIX } from '../constants';
+
+/** A conversion written at another sample rate than its source has. */
+export interface SampleRateChange {
+	/** Rate of the source, in Hz. */
+	readonly from: number;
+	/** Rate the converted file is written at, in Hz. */
+	readonly to: number;
+}
 
 /**
- * Builds a mono AudioSample holding one picked channel of the input
- * sample. Used as the mediabunny `process` hook for the left/right
- * channel modes; mediabunny closes the input sample itself after the
- * hook returns. The pick is clamped so a right pick on mono input
- * returns that channel instead of failing. Exported for unit tests.
+ * What a conversion produced, in whatever shape its caller holds files in.
+ *
+ * One type from the streaming core up to the conversion ladder, so the rate
+ * change travels with the file through the worker and every step instead of
+ * being restated beside each of them.
+ */
+export interface ConvertedAudio<T> {
+	/** The converted file. */
+	readonly data: T;
+	/**
+	 * Set when the encoder refused the source's rate and the file was written
+	 * at another, null when it keeps the source's rate.
+	 */
+	readonly sampleRateChange: SampleRateChange | null;
+}
+
+/**
+ * How far a copied stream may be shifted to start at zero, in seconds.
+ *
+ * Wide enough for any codec's priming - AAC's 2112 samples are under a tenth
+ * of a second even at 22.05 kHz, Opus pre-skip at most 80 ms - and narrow
+ * enough that a stream starting later than that, which is a recording with a
+ * real gap at its head, is transcoded rather than shifted over the gap.
+ */
+const REMUX_SHIFT_TOLERANCE_SECONDS = 0.25;
+
+/**
+ * Builds the mono sample holding one picked channel of the input sample,
+ * as the init the `process` hook for the left/right channel modes wraps in
+ * an AudioSample; mediabunny closes the input sample itself after the hook
+ * returns. The pick is clamped so a right pick on mono input returns that
+ * channel instead of failing. Exported for unit tests.
  * @param sample - Decoded input sample (any channel count)
  * @param channelIndex - Zero-based channel to keep
- * @returns Mono sample at the input's rate and timestamp
+ * @returns Init of a mono sample at the input's rate and timestamp
  */
 export function extractChannelSample(
 	sample: AudioSample,
 	channelIndex: number,
-): AudioSample {
+): AudioSampleInit {
 	const pick = Math.max(
 		0,
 		Math.min(channelIndex, sample.numberOfChannels - 1),
 	);
 	const data = new Float32Array(sample.numberOfFrames);
 	sample.copyTo(data, { planeIndex: pick, format: 'f32-planar' });
-	return new AudioSample({
+	return {
 		data,
 		format: 'f32',
 		numberOfChannels: 1,
 		sampleRate: sample.sampleRate,
 		timestamp: sample.timestamp,
-	});
+	};
 }
 
 /**
- * Builds a mono AudioSample holding the plain average of every channel
- * of the input sample. Used as the mediabunny `process` hook for the
- * mono mix mode so the conversion downmix is sample-identical to the
- * PCM capture worklet and downmixChannelData - mediabunny's own
- * numberOfChannels remixing follows the Web Audio speaker rules
- * instead, which weight 5.1 layouts and drop the LFE. Exported for
+ * Builds the mono sample holding the plain average of every channel of the
+ * input sample, as the init the `process` hook for the mono mix mode wraps
+ * in an AudioSample, so the conversion downmix is sample-identical to the
+ * PCM capture worklet and downmixChannelData.
+ *
+ * Mediabunny's own `numberOfChannels: 1` is not a substitute, not even for
+ * stereo, where its mixer computes the same 0.5 * (L + R). The remix runs
+ * inside its resampler, which interpolates every output frame between two
+ * source frames at a position computed in floating point, so at an unchanged
+ * rate the fraction is a rounding residue rather than zero: measured against
+ * this hook, about one sample in ten comes out one float32 step away. The
+ * resampler also cuts the stream into buffers of its own and sums decoded
+ * samples whose timestamps overlap, where this hook passes each one through
+ * as it was decoded. Beyond two channels it follows the Web Audio speaker
+ * rules instead, which weight 5.1 layouts and drop the LFE. Exported for
  * unit tests.
  * @param sample - Decoded input sample (any channel count)
- * @returns Mono sample at the input's rate and timestamp
+ * @returns Init of a mono sample at the input's rate and timestamp
  */
-export function averageChannelsSample(sample: AudioSample): AudioSample {
+export function averageChannelsSample(sample: AudioSample): AudioSampleInit {
 	const frames = sample.numberOfFrames;
 	const channels = sample.numberOfChannels;
 	const interleaved = new Float32Array(frames * channels);
@@ -76,13 +129,13 @@ export function averageChannelsSample(sample: AudioSample): AudioSample {
 		}
 		mono[frame] = sum / channels;
 	}
-	return new AudioSample({
+	return {
 		data: mono,
 		format: 'f32',
 		numberOfChannels: 1,
 		sampleRate: sample.sampleRate,
 		timestamp: sample.timestamp,
-	});
+	};
 }
 
 /**
@@ -101,11 +154,14 @@ export function averageChannelsSample(sample: AudioSample): AudioSample {
  * @param allowRemux - Allow packet copy when the codecs match
  * @param onProgress - Optional progress callback (0-100, deduplicated)
  * @param channelMode - Channel layout for the output audio
- * @returns Bytes of the converted file
+ * @param token - Cancels the conversion, inside mediabunny's own loop
+ * @returns The converted file, with the rate it was written at when that is
+ *   not the source's
  * @throws Error when the target format has no codec mapping, the
  * input has no audio track, the conversion cannot process the audio
  * track, or it produces no output (the caller falls back to decode
- * and re-encode)
+ * and re-encode), and whatever the cancelled step failed with once the
+ * token is cancelled
  */
 export async function runStreamingConversion(
 	recordedBlob: Blob,
@@ -114,7 +170,8 @@ export async function runStreamingConversion(
 	allowRemux: boolean,
 	onProgress?: (percent: number) => void,
 	channelMode: ChannelMode = ChannelMode.Source,
-): Promise<ArrayBuffer> {
+	token: CancellationToken = NEVER_CANCELLED,
+): Promise<ConvertedAudio<ArrayBuffer>> {
 	const codec: AudioCodec | undefined =
 		getFormatDescriptor(targetFormat)?.codec;
 	if (!codec) {
@@ -125,10 +182,11 @@ export async function runStreamingConversion(
 
 	// The Input holds readers over the blob; `using` frees them on
 	// success and on every throw path alike
+	const mediabunny = await loadAudioEngine();
 	using input = disposableOf(
-		new Input({
-			source: new BlobSource(recordedBlob),
-			formats: ALL_FORMATS,
+		new mediabunny.Input({
+			source: new mediabunny.BlobSource(recordedBlob),
+			formats: mediabunny.ALL_FORMATS,
 		}),
 	);
 	return await convertWithInput(
@@ -139,6 +197,7 @@ export async function runStreamingConversion(
 		allowRemux,
 		onProgress,
 		channelMode,
+		token,
 	);
 }
 
@@ -152,17 +211,19 @@ async function convertWithInput(
 	codec: AudioCodec,
 	bitrate: number,
 	allowRemux: boolean,
-	onProgress?: (percent: number) => void,
-	channelMode: ChannelMode = ChannelMode.Source,
-): Promise<ArrayBuffer> {
+	onProgress: ((percent: number) => void) | undefined,
+	channelMode: ChannelMode,
+	token: CancellationToken,
+): Promise<ConvertedAudio<ArrayBuffer>> {
 	const audioTrack = await input.getPrimaryAudioTrack();
 	if (!audioTrack) {
 		throw new Error('Input contains no audio track');
 	}
 
-	const target = new BufferTarget();
-	const output = new Output({
-		format: createOutputFormat(targetFormat),
+	const mediabunny = await loadAudioEngine();
+	const target = new mediabunny.BufferTarget();
+	const output = new mediabunny.Output({
+		format: await createOutputFormat(targetFormat),
 		target,
 	});
 
@@ -181,12 +242,15 @@ async function convertWithInput(
 	if (channelMode !== ChannelMode.Source) {
 		const sourceChannels = await audioTrack.getNumberOfChannels();
 		if (sourceChannels > 1 && channelMode === ChannelMode.MonoMix) {
-			monoProcess = averageChannelsSample;
+			monoProcess = (sample: AudioSample): AudioSample =>
+				new mediabunny.AudioSample(averageChannelsSample(sample));
 		} else if (sourceChannels > 1) {
 			const pick = monoPickIndex(channelMode, sourceChannels);
 			if (pick !== null) {
 				monoProcess = (sample: AudioSample): AudioSample =>
-					extractChannelSample(sample, pick);
+					new mediabunny.AudioSample(
+						extractChannelSample(sample, pick),
+					);
 			}
 		}
 	}
@@ -200,8 +264,39 @@ async function convertWithInput(
 	// quality instead of the configured one
 	const remuxEligible =
 		allowRemux && inputCodec === codec && monoProcess === null;
-	let audio: ConversionAudioOptions =
-		remuxEligible || isPcmTarget ? { codec } : { codec, bitrate };
+	// The bitrate is asked through Quality, as the offline encoder asks it:
+	// mediabunny deprecated the bare field, and any quality still forces the
+	// re-encode the remux rule above relies on.
+	let audio: ConversionAudioOptions = { codec };
+	let sampleRateChange: SampleRateChange | null = null;
+	if (!remuxEligible && !isPcmTarget) {
+		const quality = new mediabunny.Quality({ bitrate });
+		audio = { codec, quality };
+		const sourceRate = await audioTrack.getSampleRate();
+		// The encoder is handed what the mono hook returns, so that is the
+		// channel count it is asked about.
+		const numberOfChannels = monoProcess
+			? 1
+			: await audioTrack.getNumberOfChannels();
+		const rate = await encodableSampleRate(codec, {
+			numberOfChannels,
+			sampleRate: sourceRate,
+			quality,
+		});
+		if (rate === null) {
+			// Conversion then falls back to its own fixed layout, stereo at
+			// 48 kHz, which nothing here can name in advance or report.
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} The ${targetFormat} encoder takes no standard rate for a ${String(numberOfChannels)}-channel layout; mediabunny will choose the layout.`,
+			);
+		} else if (rate !== sourceRate) {
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} The ${targetFormat} encoder does not take ${String(sourceRate)} Hz; converting at ${String(rate)} Hz instead.`,
+			);
+			audio = { ...audio, sampleRate: rate };
+			sampleRateChange = { from: sourceRate, to: rate };
+		}
+	}
 	if (monoProcess) {
 		audio = {
 			...audio,
@@ -209,10 +304,18 @@ async function convertWithInput(
 			processedNumberOfChannels: 1,
 		};
 	}
-	const conversion = await Conversion.init({
+	const conversion = await mediabunny.Conversion.init({
 		input,
 		output,
 		audio,
+		// A copy into a container that stamps no time on its frames - ADTS,
+		// MP3, FLAC, WAV - has to start at zero, and a codec's priming puts the
+		// first packet a little before it: AAC behind an edit list, which is
+		// how iOS records. Refused, the copy silently became a transcode at
+		// mediabunny's default quality rather than the session's bitrate.
+		// Shifting the whole stream onto zero moves nothing relative to
+		// anything else in a one-track file.
+		copy: { shiftTolerance: REMUX_SHIFT_TOLERANCE_SECONDS },
 		showWarnings: false,
 	});
 
@@ -241,11 +344,24 @@ async function convertWithInput(
 		};
 	}
 
-	await conversion.execute();
+	// Asked once more before the loop starts, since probing the encoder
+	// above takes long enough for a cancel to arrive, and listened for
+	// while it runs: mediabunny stops its own demux and transcode loop on
+	// cancel(), which no step boundary out here could reach.
+	throwIfCancelled(token);
+	const detach = onCancelled(token, () => conversion.cancel());
+	try {
+		await conversion.execute();
+	} finally {
+		detach();
+	}
 
 	const resultBuffer = target.buffer;
 	if (!resultBuffer || resultBuffer.byteLength === 0) {
 		throw new Error(`Conversion to "${targetFormat}" produced no output`);
 	}
-	return resultBuffer;
+	// Reported with the bytes rather than when the rate is chosen, so a
+	// conversion that fails after choosing it says nothing about a file it
+	// never wrote.
+	return { data: resultBuffer, sampleRateChange };
 }

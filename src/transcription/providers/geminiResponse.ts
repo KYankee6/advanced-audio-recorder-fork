@@ -2,13 +2,16 @@
  * Pure mapping of a Gemini `generateContent` response into the plugin's
  * transcript segment model. Gemini is asked for structured JSON (segments with
  * a start, optional end, optional speaker, and text), which it returns as the
- * text of the response part; this module extracts and parses it. Tolerant of
+ * text of the response part; this module extracts and parses it, and the
+ * single rewritten `text` a request with a rewrite instruction asks for
+ * instead. Tolerant of
  * missing or malformed fields so a surprising response degrades to "best
  * available" rather than throwing.
  * @module transcription/providers/geminiResponse
  */
 
 import type { TranscriptSegment } from '../TranscriptTypes';
+import { dominantSegmentLanguage } from '../transcriptModel';
 import { parseTimecode } from '../../utils/TimeUtils';
 import { PLUGIN_LOG_PREFIX } from '../../constants';
 import type { WhisperResult } from './whisperResponse';
@@ -19,11 +22,10 @@ import { isRecord } from './responseUtils';
 const RESPONSE_EXCERPT_LENGTH = 200;
 
 /**
- * Coerces a raw timecode value to seconds. Accepts a finite number (already
- * seconds) or a "HH:MM:SS"/"MM:SS"/bare-seconds string - a defensive fallback
- * in case the model emits a string despite the numeric schema - delegating the
- * string case to the shared timecode parser. Returns `fallback` for anything
- * else.
+ * Coerces a raw timecode value to seconds. Accepts the "MM:SS" string the
+ * request asks for, as well as "HH:MM:SS" and bare seconds, delegating the
+ * string case to the shared timecode parser, and a finite number, which is
+ * already seconds. Returns `fallback` for anything else.
  * @param value - Raw timecode value
  * @param fallback - Returned when `value` cannot be parsed
  * @returns Seconds as a number
@@ -77,8 +79,6 @@ export function mapGeminiResponse(
 		);
 		return { segments: [], ...(usage ? { usage } : {}) };
 	}
-	const language =
-		typeof parsed.language === 'string' ? parsed.language : undefined;
 	const segments: TranscriptSegment[] = [];
 	for (const entry of parsed.segments) {
 		if (!isRecord(entry)) {
@@ -96,12 +96,46 @@ export function mapGeminiResponse(
 			entry.speaker.trim() !== ''
 				? entry.speaker.trim()
 				: undefined;
+		// Present only when the request named several languages, whose schema
+		// asks every segment for the one it was spoken in.
+		const segmentLanguage =
+			typeof entry.language === 'string' ? entry.language.trim() : '';
 		segments.push({
 			start,
 			end,
 			text: segText,
 			...(speaker ? { speaker } : {}),
+			...(segmentLanguage ? { language: segmentLanguage } : {}),
 		});
 	}
+	const language =
+		dominantSegmentLanguage(segments) ??
+		(typeof parsed.language === 'string' ? parsed.language : undefined);
 	return { language, segments, ...(usage ? { usage } : {}) };
+}
+
+/**
+ * Maps the response to a request that carried a rewrite instruction, whose
+ * schema asks for one `text` field instead of segments.
+ * @param body - Parsed JSON response body
+ * @returns No segments, the rewritten text ('' when none came back), and usage
+ */
+export function mapGeminiRewrite(body: unknown): WhisperResult {
+	const usage = usageFromGemini(body);
+	const text = geminiCandidateText(body);
+	let rewritten = '';
+	if (text.trim() !== '') {
+		try {
+			const parsed: unknown = JSON.parse(text);
+			if (isRecord(parsed) && typeof parsed.text === 'string') {
+				rewritten = parsed.text.trim();
+			}
+		} catch {
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} Gemini returned non-JSON rewrite text; treating as empty:`,
+				text.slice(0, RESPONSE_EXCERPT_LENGTH),
+			);
+		}
+	}
+	return { segments: [], rewritten, ...(usage ? { usage } : {}) };
 }

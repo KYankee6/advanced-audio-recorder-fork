@@ -14,6 +14,7 @@ import {
 	findProfile,
 	freeProfileName,
 	moveProfile,
+	profileIdNamed,
 	profileNameRejection,
 	profilesOfKind,
 	removeAndReselectProfile,
@@ -29,6 +30,8 @@ import {
 	serializeSettings,
 } from 'src/settings/settingsSerialization';
 import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
+import { isRefusal } from 'src/utils/refusal';
+import { SHIPPED_PROFILES_GIVEN } from '../helpers/settingsFixtures';
 
 /** A profile of the kind under test, so the helpers are exercised on their own. */
 const simple = (
@@ -196,6 +199,41 @@ describe('profile list helpers', () => {
 		});
 	});
 
+	describe('profileIdNamed', () => {
+		const profiles = [
+			simple('a', 'Team'),
+			simple('b', 'Glossary', ProfileKindId.Dictionary),
+		];
+
+		// "No profile" is the id '', a string like the refusal used to be,
+		// so only the shape of the read tells the two apart.
+		it('reads none as the empty id rather than as a refusal', () => {
+			const read = profileIdNamed(
+				profiles,
+				ProfileKindId.Dictionary,
+				'None',
+			);
+
+			expect(read).toEqual({ value: '' });
+			expect(isRefusal(read)).toBe(false);
+		});
+
+		it('picks a profile of the kind by its name, without regard to case', () => {
+			expect(
+				profileIdNamed(profiles, ProfileKindId.Dictionary, ' team '),
+			).toEqual({ value: 'a' });
+		});
+
+		it('refuses a name no profile of the kind holds, listing the names', () => {
+			expect(
+				profileIdNamed(profiles, ProfileKindId.Participants, 'Team'),
+			).toEqual({
+				refusal:
+					'No profile named "Team". The ones to choose from: none.',
+			});
+		});
+	});
+
 	describe('freeProfileName', () => {
 		it('keeps counting until it finds a name no profile holds', () => {
 			const taken = [
@@ -316,6 +354,7 @@ describe('a note-backed profile in data.json', () => {
 
 	it('reads an empty or non-string path as no note at all', () => {
 		const settings = mergeSettings({
+			...SHIPPED_PROFILES_GIVEN,
 			profiles: [
 				{
 					id: 'empty',

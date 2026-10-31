@@ -3,7 +3,7 @@
  * @module main
  */
 
-import { Notice, Plugin } from 'obsidian';
+import { ButtonComponent, Notice, Plugin, normalizePath } from 'obsidian';
 import type { TFile } from 'obsidian';
 import { RecordingStatus } from './types';
 import type {
@@ -11,7 +11,11 @@ import type {
 	RecordingControls,
 	RecordingSaveResult,
 } from './types';
-import { PLUGIN_LOG_PREFIX } from './constants';
+import {
+	PLUGIN_LOG_PREFIX,
+	RECORDING_PANEL_PLACED_KEY,
+	RECORDING_PANEL_VIEW_TYPE,
+} from './constants';
 import { isRecordingBannerSupported } from './platform/capabilities';
 import type { AudioRecorderSettings } from './settings/settingsSchema';
 import { setSelectedProfileId, type ProfileKindId } from './settings/profiles';
@@ -20,6 +24,12 @@ import {
 	serializeSettings,
 } from './settings/settingsSerialization';
 import { AudioRecorderSettingTab } from './settings/SettingsTab';
+import {
+	ApiKeyMigration,
+	keychainDeviceId,
+	resolveApiKeys,
+} from './settings/apiKeySecrets';
+import { ACCOUNTS, type AccountId } from './providers/providers';
 import { RecordingManager } from './recording/RecordingManager';
 import { detectSilentChannel } from './recording/silentChannelDetector';
 import type { ChannelMode } from './audio/downmix';
@@ -32,6 +42,7 @@ import {
 } from './recording/RecoveryService';
 import { RecoveryModal } from './ui/RecoveryModal';
 import { EncodingWorkerClient } from './audio/EncodingWorkerClient';
+import { encodingWorkerScript } from './audio/audioEngine';
 import {
 	updateStatusBar,
 	updateRecordingLiveStats,
@@ -47,34 +58,36 @@ import {
 	QUICK_NOTE_GLYPHS,
 	RIBBON_HIDDEN_CLASS,
 	updateRibbonIcon,
-	initializeRibbonIcon,
 } from './ui/RibbonIcon';
-import { ContextMenu } from './ui/ContextMenu';
+import { ContextMenu, type MenuFamilies } from './ui/ContextMenu';
 import type { ActionServices, SessionServices } from './actions/PluginAction';
-import { activeAudioFile, FILE_ACTIONS } from './actions/fileActions';
-import { SESSION_ACTIONS } from './actions/sessionActions';
-import {
-	activeTranscriptSelection,
-	TRANSCRIPT_ACTIONS,
-} from './actions/transcriptActions';
-import { PLAYBACK_ACTIONS } from './actions/playbackActions';
-import { SEARCH_ACTIONS } from './actions/searchActions';
-import { HELP_ACTIONS } from './actions/helpActions';
-import { registerActionCommands } from './actions/registerActionCommands';
+import { ActionRegistry } from './actions/ActionRegistry';
+import { FILE_ACTIONS, fileActionFamily } from './actions/fileActions';
+import { sessionActionFamily } from './actions/sessionActions';
+import { transcriptActionFamily } from './actions/transcriptActions';
+import { playbackActionFamily } from './actions/playbackActions';
+import { positionActionFamily } from './actions/positionActions';
+import { folderActionFamily } from './actions/folderActions';
+import { searchActionFamily } from './actions/searchActions';
+import { helpActionFamily } from './actions/helpActions';
+import { ActionTargetModal } from './ui/ActionTargetModal';
 import { EnhancedPlayerRegistrar } from './player/EnhancedPlayerRegistrar';
 import { MediaKindStore, MEDIA_KIND_STORE_FILE } from './player/MediaKindStore';
 import { RecordingSidecarStore } from './sidecar/RecordingSidecarStore';
 import { AutoChapterService } from './chapters/AutoChapterService';
 import { RecordingMarkerModal } from './ui/MarkerModal';
-import { isAudioFile } from './utils/audioFile';
 import { openPluginSettings } from './obsidian/settingsNavigation';
-import { transcriptionRefusal } from './settings/settingsAttention';
 import { quickNotesAvailable } from './settings/settingsSchema';
 import { QuickNoteController } from './quicknotes/QuickNoteController';
+import { dictationAnchorField } from './quicknotes/dictationAnchor';
 import { MemoryRecorder } from './recording/MemoryRecorder';
 import { TranscriptionService } from './transcription/TranscriptionService';
 import { ProfileNoteStore } from './settings/ProfileNoteStore';
-import { registerCliCommands, type CliHost } from './obsidian/cliCommands';
+import {
+	cliCommands,
+	registerCliCommands,
+	type CliHost,
+} from './obsidian/cliCommands';
 import { TranscriptionModal } from './ui/TranscriptionModal';
 import type { TranscriptionModalOptions } from './ui/TranscriptionModal';
 import {
@@ -94,6 +107,11 @@ import { QUEUE_ASSUMED_RECORDING_SECONDS } from './constants';
 import { transcribeFile } from './transcription/runTranscription';
 import { releaseNotesSince } from './release/releaseNotes';
 import { ReleaseNotesModal } from './ui/ReleaseNotesModal';
+import {
+	RecordingPanelView,
+	type RecordingPanelHost,
+} from './panel/RecordingPanelView';
+import { probeDurationSeconds } from './utils/AudioFileAnalyzer';
 
 /** Delay before retrying a failed settings read, in milliseconds. */
 const SETTINGS_READ_RETRY_DELAY_MS = 250;
@@ -250,6 +268,20 @@ export default class AudioRecorderPlugin extends Plugin {
 	 * replacing them with defaults.
 	 */
 	private settingsInitialized = false;
+	/**
+	 * The settings tab, kept so a change made in Obsidian's keychain page can
+	 * refresh what the tab reports about each engine's key.
+	 */
+	private settingTab: AudioRecorderSettingTab | null = null;
+	/**
+	 * Moves plain-text API keys into Obsidian's keychain. Kept for the life of
+	 * the plugin, because it remembers which secrets this instance wrote, and
+	 * a later load in the same session must not take those as confirmed.
+	 */
+	private readonly apiKeyMigration = new ApiKeyMigration(
+		this.app.secretStorage,
+		keychainDeviceId(this.app),
+	);
 
 	/**
 	 * Called when the plugin is loaded.
@@ -257,13 +289,28 @@ export default class AudioRecorderPlugin extends Plugin {
 	override async onload(): Promise<void> {
 		await this.loadSettings();
 		this.profileNotes.register(this);
+		// A key edited, linked, or deleted in Obsidian's keychain page changes
+		// what a run is sent with, without anything of this plugin being
+		// saved. The keys are resolved again, in place, so every reader of the
+		// live settings sees the change at once. 'changed' is fired by
+		// SecretStorage.setSecret and by the Keychain page in Obsidian 1.14.4
+		// but is not part of the public typings. If it stops firing, keys are
+		// still resolved on every load and every save, only not live.
+		this.registerEvent(
+			this.app.secretStorage.on('changed', () => {
+				this.onKeychainChanged();
+			}),
+		);
 
 		// Offload streaming conversions to a Web Worker when the build
-		// injected its source; everything falls back to the main thread
+		// injected its source; everything falls back to the main thread.
+		// The worker runs the one engine script ahead of its own code.
 		this.encodingWorker = new EncodingWorkerClient(
-			typeof __ENCODING_WORKER_SOURCE__ === 'string'
-				? __ENCODING_WORKER_SOURCE__
-				: null,
+			encodingWorkerScript(
+				typeof __ENCODING_WORKER_SOURCE__ === 'string'
+					? __ENCODING_WORKER_SOURCE__
+					: null,
+			),
 		);
 		this.journal = new SessionJournal(
 			this.getPluginFilePath(JOURNAL_FILE_NAME),
@@ -289,8 +336,19 @@ export default class AudioRecorderPlugin extends Plugin {
 			// joins the same session counter the transcription runs report to.
 			{ costSink: this.transcriptionCostTracker },
 		);
-		this.recordingBanner = new RecordingBanner(() => {
-			void this.recordingManager.stopRecording();
+		this.recordingBanner = new RecordingBanner({
+			onStop: () => {
+				void this.recordingManager.stopRecording();
+			},
+			onAnchorChange: (anchor) => {
+				this.settings.mobileRecordingBannerPosition = anchor;
+				void this.saveSettings().catch((error: unknown) => {
+					console.warn(
+						`${PLUGIN_LOG_PREFIX} Saving the recording banner position failed:`,
+						error,
+					);
+				});
+			},
 		});
 		this.recordingManager = new RecordingManager(
 			this.app,
@@ -312,6 +370,9 @@ export default class AudioRecorderPlugin extends Plugin {
 					: null,
 		);
 
+		// Every Markdown editor carries the field a dictation anchors its text
+		// in, so the anchor follows the edits made while it is transcribed.
+		this.registerEditorExtension(dictationAnchorField);
 		this.quickNotes = new QuickNoteController({
 			app: this.app,
 			getSettings: () => this.settings,
@@ -329,12 +390,20 @@ export default class AudioRecorderPlugin extends Plugin {
 			},
 		});
 
-		this.addSettingTab(new AudioRecorderSettingTab(this.app, this));
-		this.registerCommands();
+		this.settingTab = new AudioRecorderSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
+		const registry = new ActionRegistry(this, (targets, describe, run) => {
+			new ActionTargetModal(this.app, targets, describe, run).open();
+		});
+		// The recorder's own command-line commands first, then one per action,
+		// all under the registry's one check that no two share an id.
+		registry.addCliCommands(
+			cliCommands(this.createCliHost(), this.manifest.id),
+		);
+		const menuFamilies = this.registerCommands(registry);
 		// The desktop command line, where the app has one. Reports whether it
-		// registered, which is what the CLI-less platforms and the Obsidians
-		// below 1.12.2 answer.
-		registerCliCommands(this, this.createCliHost());
+		// registered, which is what the CLI-less platforms answer.
+		registerCliCommands(this, registry.cliCommands());
 		// Named after the plugin, because Obsidian's own Audio recorder puts a
 		// button with the same job in the same ribbon under the tooltip
 		// "Start/stop recording", and the ribbon's context menu, where a
@@ -356,10 +425,19 @@ export default class AudioRecorderPlugin extends Plugin {
 		this.contextMenu = new ContextMenu(
 			this,
 			this.createActionServices(),
-			FILE_ACTIONS,
-			TRANSCRIPT_ACTIONS,
+			registry,
+			menuFamilies,
 		);
 		this.contextMenu.register();
+
+		// The panel is built by Obsidian whenever it opens one, including on
+		// startup for a panel the saved layout restores, so the factory is
+		// registered before the layout is.
+		this.registerView(
+			RECORDING_PANEL_VIEW_TYPE,
+			(leaf) =>
+				new RecordingPanelView(leaf, this.createRecordingPanelHost()),
+		);
 
 		// The queue outlives a session, so it is built before anything can
 		// queue into it and offered back once the workspace is up.
@@ -443,6 +521,7 @@ export default class AudioRecorderPlugin extends Plugin {
 			// user has to answer first, so it belongs on top of the stack.
 			this.announceReleaseNotes();
 			void this.checkForInterruptedSessions();
+			void this.placeRecordingPanel();
 		});
 	}
 
@@ -461,10 +540,12 @@ export default class AudioRecorderPlugin extends Plugin {
 	}
 
 	/**
-	 * What the CLI is allowed to ask of the plugin.
+	 * What the CLI's own commands are allowed to ask of the plugin.
 	 *
 	 * A port rather than the plugin itself: a command line reaches a running
-	 * app from outside it, and what it may do here is these five things.
+	 * app from outside it, and what it may do here is these few things. Every
+	 * other command is an action, and reaches the plugin through the services
+	 * every action is given.
 	 * @returns The host the CLI commands are built over
 	 */
 	private createCliHost(): CliHost {
@@ -476,17 +557,7 @@ export default class AudioRecorderPlugin extends Plugin {
 			stopRecording: (): Promise<string | null> =>
 				this.recordingManager.stopRecording(),
 			recordingFormat: (): string => this.settings.recordingFormat,
-			transcriptionRefusal: (): string | null =>
-				transcriptionRefusal(this.settings),
-			audioFileAt: (path: string): TFile | null => {
-				const file = this.app.vault.getFileByPath(path);
-				return file && isAudioFile(file) ? file : null;
-			},
-			// The same bargain every other surface makes for a paid job: the
-			// dialog runs it, reports its progress, and can be cancelled.
-			transcribe: (file: TFile): void => {
-				this.openTranscription(file);
-			},
+			playback: () => this.playerRegistrar.currentPlaybackState(),
 		};
 	}
 
@@ -616,8 +687,8 @@ export default class AudioRecorderPlugin extends Plugin {
 		this.playerRegistrar.dispose();
 		this.encodingWorker?.terminate();
 		this.encodingWorker = null;
-		initializeStatusBar(this.statusBarItem);
-		initializeRibbonIcon(this.ribbonIconEl);
+		// The status bar item and the ribbon icon are not reset here: Obsidian
+		// removes both when the plugin unloads.
 	}
 
 	/**
@@ -666,6 +737,10 @@ export default class AudioRecorderPlugin extends Plugin {
 			} else if (!this.settingsInitialized) {
 				this.settings = await mergeSettingsAsync({});
 			}
+			// Resolved but not migrated: a key moved into the keychain is only
+			// out of data.json once data.json is written, and nothing may be
+			// written this session.
+			resolveApiKeys(this.settings, this.app.secretStorage);
 			this.settingsInitialized = true;
 			return;
 		}
@@ -673,6 +748,8 @@ export default class AudioRecorderPlugin extends Plugin {
 		this.settingsLoadFailed = false;
 		this.settings = await mergeSettingsAsync(data ?? {});
 		this.settingsInitialized = true;
+		const migration = this.apiKeyMigration.migrate(this.settings);
+		resolveApiKeys(this.settings, this.app.secretStorage);
 		if (restoredFromBackup) {
 			new Notice('Settings were restored from the backup file.');
 			// Complete the recovery: recreate the missing data.json
@@ -682,13 +759,86 @@ export default class AudioRecorderPlugin extends Plugin {
 			// before the RecordingManager is constructed in onload.
 			await this.saveData(serializeSettings(this.settings));
 		}
+		// After the restore's own write rather than instead of it: a backup
+		// written by an earlier version holds the keys in plain text too, and
+		// the move is announced only by the write that records it.
+		if (migration.changed) {
+			await this.persistApiKeyMigration(migration.linked);
+		}
 		await this.backupSettings();
+	}
+
+	/**
+	 * Writes data.json right after a migration changed what it holds: the
+	 * links of keys just moved into the keychain, or the removal of a
+	 * plain-text copy a later start confirmed is no longer needed. The backup
+	 * written after this follows it the same way.
+	 *
+	 * A failed write is not a failed load. The secrets are in the keychain and
+	 * the settings in memory link them, while data.json still holds what it
+	 * held; the next load finds the same keys, links the secrets that already
+	 * hold them instead of creating new ones, and writes again. Nothing is
+	 * announced until a write has succeeded, so the notice never claims a move
+	 * that the file on disk does not show.
+	 * @param linked - The accounts linked to a secret by this load
+	 */
+	private async persistApiKeyMigration(linked: AccountId[]): Promise<void> {
+		try {
+			await this.saveData(serializeSettings(this.settings));
+		} catch (error) {
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} The API keys were copied to Obsidian's keychain, but data.json could not be written; the move is retried on the next load:`,
+				error,
+			);
+			return;
+		}
+		if (linked.length === 0) {
+			return;
+		}
+		const names = linked.map((id) => ACCOUNTS[id].keyFieldName);
+		new Notice(
+			`Advanced Audio Recorder: ${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} copied into Obsidian's keychain (Settings > Keychain). ` +
+				"The plain-text copy in the plugin's data.json is removed the next time Obsidian starts on this device and finds the key there. " +
+				'Secrets are kept on each device, and on the desktop in each vault, and are not synced, so enter the key once on your other devices and vaults.',
+			0,
+		);
+	}
+
+	/**
+	 * Answers a change in Obsidian's keychain: a secret added, edited, or
+	 * deleted, here or through another plugin. Usually only the runtime keys
+	 * move and nothing is written; the settings tab is read again so each
+	 * engine's entry reports the key it now has.
+	 *
+	 * A secret deleted before its move was confirmed is the exception. Its
+	 * plain-text copy is dropped and data.json written at once, because the
+	 * next start would otherwise take the deletion for a lost write and store
+	 * the key again. Not while saving is blocked: nothing on disk can change
+	 * then, and the copy stays until a session that can write.
+	 */
+	private onKeychainChanged(): void {
+		resolveApiKeys(this.settings, this.app.secretStorage);
+		if (
+			!this.settingsLoadFailed &&
+			this.apiKeyMigration.forgetDeletedMoves(this.settings)
+		) {
+			void this.saveSettings().catch((error: unknown) => {
+				console.warn(
+					`${PLUGIN_LOG_PREFIX} Saving the settings after a deleted keychain secret failed:`,
+					error,
+				);
+			});
+		}
+		this.settingTab?.update();
 	}
 
 	/**
 	 * Saves plugin settings to storage.
 	 */
 	async saveSettings(): Promise<void> {
+		// First, because the change being saved may be a newly linked secret:
+		// the key it names is what every subsystem told below has to see.
+		resolveApiKeys(this.settings, this.app.secretStorage);
 		// A note just picked for a profile is read before anything is written
 		// or redrawn, so the save carries its text and the tab shows it.
 		await this.profileNotes.reconcile();
@@ -705,16 +855,21 @@ export default class AudioRecorderPlugin extends Plugin {
 			// persisted
 			this.recordingManager.updateSettings(this.settings);
 			this.applyQuickNoteSettings();
+			this.renderRecordingBanner();
 			this.playerRegistrar.refresh();
+			this.refreshRecordingPanels();
 			return;
 		}
 		await this.saveData(serializeSettings(this.settings));
 		await this.backupSettings();
 		this.recordingManager.updateSettings(this.settings);
 		this.applyQuickNoteSettings();
+		// The banner switch and position apply to a recording in progress
+		this.renderRecordingBanner();
 		// Apply player-affecting changes (enable toggle, waveform, etc.)
 		// to open embeds immediately, without re-opening the note
 		this.playerRegistrar.refresh();
+		this.refreshRecordingPanels();
 	}
 
 	/**
@@ -731,6 +886,8 @@ export default class AudioRecorderPlugin extends Plugin {
 		await this.profileNotes.reconcile();
 		this.recordingManager.updateSettings(this.settings);
 		this.applyQuickNoteSettings();
+		this.renderRecordingBanner();
+		this.refreshRecordingPanels();
 	}
 
 	/**
@@ -847,9 +1004,7 @@ export default class AudioRecorderPlugin extends Plugin {
 	> {
 		try {
 			return (await this.loadData()) as
-				| Partial<AudioRecorderSettings>
-				| null
-				| undefined;
+				Partial<AudioRecorderSettings> | null | undefined;
 		} catch {
 			return undefined;
 		}
@@ -938,7 +1093,7 @@ export default class AudioRecorderPlugin extends Plugin {
 		if (!pluginDir) {
 			return null;
 		}
-		return `${pluginDir}/${fileName}`;
+		return normalizePath(`${pluginDir}/${fileName}`);
 	}
 
 	/**
@@ -959,13 +1114,9 @@ export default class AudioRecorderPlugin extends Plugin {
 			// Read through the field rather than captured, because the queue is
 			// built after these services are: a menu entry acts long after
 			// load, and there is nothing to act on before it finished.
-			transcriptionQueue: {
-				queueFolder: async (folder) => {
-					await this.transcriptionQueue?.queueFolder(folder);
-				},
-				open: () => {
-					this.transcriptionQueue?.open();
-				},
+			transcriptionQueue: this.createQueuePort(),
+			onMarkersChanged: (path) => {
+				this.playerRegistrar.reloadMarkersFor(path);
 			},
 			autoChapters: this.autoChapterService,
 			recordingSidecar: this.sidecarStore,
@@ -974,58 +1125,166 @@ export default class AudioRecorderPlugin extends Plugin {
 	}
 
 	/**
-	 * Registers every plugin command through the shared action registry.
-	 * The three lists differ only in the context they resolve - the active
-	 * audio file, the recording session, the playback that is running -
-	 * so a feature added to a list reaches the palette, the Hotkeys
-	 * settings, and (for file actions) the context menus at once.
+	 * The transcription queue as the actions drive it. Read through the field
+	 * rather than captured, because the queue is built after the services
+	 * are: a menu entry acts long after load, and a load that stopped before
+	 * the queue was built leaves every entry answering as an empty queue
+	 * rather than dereferencing a field that was never assigned.
+	 * @returns The queue port
 	 */
-	private registerCommands(): void {
+	private createQueuePort(): ActionServices['transcriptionQueue'] {
+		const queue = (): QueueCoordinator | null => this.transcriptionQueue;
+		return {
+			queueFolder: async (folder) => {
+				await queue()?.queueFolder(folder);
+			},
+			open: () => {
+				queue()?.open();
+			},
+			enqueueFolder: async (folder) =>
+				(await queue()?.enqueueFolder(folder)) ?? {
+					found: 0,
+					added: 0,
+				},
+			status: async () =>
+				(await queue()?.status()) ?? {
+					entries: [],
+					paused: false,
+					running: false,
+				},
+			start: () => {
+				queue()?.start();
+			},
+			pause: () => {
+				queue()?.pause();
+			},
+			clear: () => {
+				queue()?.clear();
+			},
+			remove: (path) => queue()?.remove(path) ?? false,
+		};
+	}
+
+	/**
+	 * Registers every plugin action through the action registry, which puts
+	 * each on the palette, the Hotkeys settings and the command line at once.
+	 * The families differ only in the target they resolve - the recordings of
+	 * what is active, a point of a recording, the recording session, the
+	 * playback that is running - so a feature added to a family reaches every
+	 * surface without another line here.
+	 * @param registry - The registry to add the families to
+	 * @returns The registered families the context menus render
+	 */
+	private registerCommands(registry: ActionRegistry): MenuFamilies {
 		// Each resolver runs on every palette check, so the services are
 		// built once here; they read live state through their closures.
-		const session = this.createSessionServices();
-		registerActionCommands(this, SESSION_ACTIONS, () => session);
-
-		registerActionCommands(
-			this,
-			FILE_ACTIONS,
-			activeAudioFile(this.createActionServices()),
-		);
-
+		const services = this.createActionServices();
+		registry.add(sessionActionFamily(this.createSessionServices()));
+		const file = registry.add(fileActionFamily(services));
 		// A transcript action acts on a selection inside a transcript line,
 		// which the active editor's selection resolves to (or does not).
-		registerActionCommands(
-			this,
-			TRANSCRIPT_ACTIONS,
-			activeTranscriptSelection(this.createActionServices()),
-		);
-
+		const transcript = registry.add(transcriptActionFamily(services));
 		// The player registrar is created after this method runs, so the
-		// resolver reaches it through the field it later fills. It pulls the
+		// resolvers reach it through the field it later fills. They pull the
 		// live playback rather than reusing the snapshot the status bar was
 		// last pushed: a command has to act on the playback as it stands, and
 		// a pushed snapshot only describes it as of the last media event.
-		registerActionCommands(this, PLAYBACK_ACTIONS, () =>
-			this.playerRegistrar.currentPlaybackState(),
-		);
-
+		const playback = (): PlaybackControlsState | null =>
+			this.playerRegistrar.currentPlaybackState();
+		registry.add(playbackActionFamily(playback));
+		const position = registry.add(positionActionFamily(services, playback));
+		const folder = registry.add(folderActionFamily(services));
 		// A vault-wide search is bound to no file and no playback, so its
 		// context always resolves and the command is always offered.
-		registerActionCommands(this, SEARCH_ACTIONS, () => ({
-			openMarkerSearch: () => this.playerRegistrar.openMarkerSearch(),
-			openTranscriptionQueue: () => {
-				this.transcriptionQueue?.open();
-			},
-		}));
-
+		registry.add(
+			searchActionFamily({
+				openMarkerSearch: () => this.playerRegistrar.openMarkerSearch(),
+				markerHits: () => this.playerRegistrar.markerHits(),
+				transcriptionQueue: services.transcriptionQueue,
+				openRecordingPanel: () => this.openRecordingPanel(),
+			}),
+		);
 		// Asked for deliberately rather than met after an update, so it shows
 		// every release the bundle carries notes for instead of only the ones
 		// since the last announcement.
-		registerActionCommands(this, HELP_ACTIONS, () => ({
-			showReleaseNotes: () => {
-				new ReleaseNotesModal(this.app, releaseNotesSince('')).open();
+		registry.add(
+			helpActionFamily({
+				showReleaseNotes: () => {
+					new ReleaseNotesModal(
+						this.app,
+						releaseNotesSince(''),
+					).open();
+				},
+			}),
+		);
+		return { file, transcript, position, folder };
+	}
+
+	/**
+	 * What the recording panel is built over: the same services and file
+	 * actions the menus use, the recorder for its start/stop button, and a
+	 * length reader that stays on the cheap readers and answers null instead
+	 * of raising a notice, since the panel reads a length nobody asked for.
+	 * @returns The host every panel instance shares
+	 */
+	private createRecordingPanelHost(): RecordingPanelHost {
+		return {
+			displayName: this.manifest.name,
+			services: this.createActionServices(),
+			actions: FILE_ACTIONS,
+			recording: this.recordingManager,
+			readDuration: (file) => probeDurationSeconds(this.app, file),
+			openSettings: () => {
+				openPluginSettings(this.app, this.manifest.id);
 			},
-		}));
+			openTranscriptionQueue: () => {
+				this.transcriptionQueue?.open();
+			},
+		};
+	}
+
+	/**
+	 * Puts the recording panel in the right sidebar the first time the plugin
+	 * runs with it on this device, without switching to it. After that the
+	 * saved layout owns the panel: it stays wherever the user moved it, and a
+	 * user who closed it opens it again from the palette rather than finding
+	 * it back on every start.
+	 *
+	 * That it was placed is kept in the app's local storage rather than in
+	 * data.json. The layout is per device, and data.json is synced: a flag
+	 * there would keep the panel off a phone or a second computer because it
+	 * was placed on the first one.
+	 */
+	private async placeRecordingPanel(): Promise<void> {
+		if (this.app.loadLocalStorage(RECORDING_PANEL_PLACED_KEY) !== null) {
+			return;
+		}
+		try {
+			await this.app.workspace.ensureSideLeaf(
+				RECORDING_PANEL_VIEW_TYPE,
+				'right',
+				{ active: false, reveal: false },
+			);
+			this.app.saveLocalStorage(RECORDING_PANEL_PLACED_KEY, true);
+		} catch (error) {
+			console.warn(
+				`${PLUGIN_LOG_PREFIX} Placing the recording panel failed:`,
+				error,
+			);
+		}
+	}
+
+	/**
+	 * Shows the recording panel, opening it in the right sidebar when it is
+	 * not open anywhere.
+	 */
+	private async openRecordingPanel(): Promise<void> {
+		// Finds an open panel before it creates one, and reveals it.
+		await this.app.workspace.ensureSideLeaf(
+			RECORDING_PANEL_VIEW_TYPE,
+			'right',
+			{ active: true, reveal: true },
+		);
 	}
 
 	/**
@@ -1160,10 +1419,11 @@ export default class AudioRecorderPlugin extends Plugin {
 	/**
 	 * Opens the transcription dialog on a file and starts it there.
 	 *
-	 * Every transcription this plugin starts on its own - after a recording,
-	 * from the command line - goes through here rather than in the background:
-	 * the user gets visible progress and a cancel button for what can be a
-	 * long, paid job. The dialog reports its own errors and writes the
+	 * A transcription this plugin starts on its own after a recording goes
+	 * through here rather than in the background: the user gets visible
+	 * progress and a cancel button for what can be a long, paid job. The
+	 * command line's transcribe opens the same dialog the same way, through
+	 * its action. The dialog reports its own errors and writes the
 	 * configured outputs, with a file fallback when the note is not editable.
 	 * @param file - The audio file to transcribe
 	 * @param notePath - Note the transcript's links should resolve in, where
@@ -1265,22 +1525,26 @@ export default class AudioRecorderPlugin extends Plugin {
 					`Recording's ${suggestion.silentSide} channel is silent. `,
 				);
 			}
-			const button = createEl('button', {
-				cls: 'aar-silent-channel-convert',
-				text:
+			const actionEl = createSpan();
+			new ButtonComponent(actionEl)
+				.setButtonText(
 					suggestions.length === 1
 						? 'Convert to mono'
 						: `Convert ${suggestion.file.name}`,
-				attr: { type: 'button' },
-			});
-			button.addEventListener('click', () => {
-				if (suggestions.length === 1) {
-					this.silentChannelNotice?.hide();
-					this.silentChannelNotice = null;
-				}
-				this.openMonoConversion(suggestion.file, suggestion.keepMode);
-			});
-			fragment.append(button);
+				)
+				.setClass('aar-notice-action')
+				.setClass('aar-silent-channel-convert')
+				.onClick(() => {
+					if (suggestions.length === 1) {
+						this.silentChannelNotice?.hide();
+						this.silentChannelNotice = null;
+					}
+					this.openMonoConversion(
+						suggestion.file,
+						suggestion.keepMode,
+					);
+				});
+			fragment.append(actionEl);
 		}
 		this.silentChannelNotice = new Notice(fragment, 0);
 	}
@@ -1358,8 +1622,7 @@ export default class AudioRecorderPlugin extends Plugin {
 	 * @returns The active background transcription, if any
 	 */
 	private activeBackgroundTranscription():
-		| BackgroundTranscriptionProgress
-		| undefined {
+		BackgroundTranscriptionProgress | undefined {
 		let active: BackgroundTranscriptionProgress | undefined;
 		for (const entry of this.backgroundTranscriptions.values()) {
 			active = entry;
@@ -1544,7 +1807,52 @@ export default class AudioRecorderPlugin extends Plugin {
 		// keeps its precedence when recording returns to idle.
 		this.renderStatusBar();
 		updateRibbonIcon(this.ribbonIconEl, status);
+		this.renderRecordingBanner();
+		this.forEachRecordingPanel((panel) => {
+			panel.refreshRecordingState();
+		});
+	}
 
+	/**
+	 * Runs something against every open recording panel. A panel the saved
+	 * layout restored stays a placeholder until its tab is first shown, and
+	 * there is no view to reach yet, so those are skipped.
+	 * @param apply - What to do with each panel
+	 */
+	private forEachRecordingPanel(
+		apply: (panel: RecordingPanelView) => void,
+	): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(
+			RECORDING_PANEL_VIEW_TYPE,
+		)) {
+			if (leaf.view instanceof RecordingPanelView) {
+				apply(leaf.view);
+			}
+		}
+	}
+
+	/**
+	 * Redraws the open recording panels after the settings changed: the
+	 * actions they list and the switches they show are gated by settings,
+	 * which none of the events a panel listens to carries.
+	 */
+	private refreshRecordingPanels(): void {
+		this.forEachRecordingPanel((panel) => {
+			void panel.refresh();
+		});
+	}
+
+	/**
+	 * Shows the mobile banner while a recording is active and the user wants
+	 * it, at the anchor the settings name, and hides it otherwise. Driven by
+	 * both the status and the settings, so a change to either applies at once.
+	 */
+	private renderRecordingBanner(): void {
+		// A save still settling after unload must not bring the banner back
+		if (this.unloaded) {
+			return;
+		}
+		const status = this.recordingStatus;
 		const active =
 			status === RecordingStatus.Recording ||
 			status === RecordingStatus.Paused;
@@ -1553,7 +1861,10 @@ export default class AudioRecorderPlugin extends Plugin {
 			isRecordingBannerSupported() &&
 			this.settings.mobileRecordingBanner
 		) {
-			this.recordingBanner.show(status === RecordingStatus.Paused);
+			this.recordingBanner.show(
+				status === RecordingStatus.Paused,
+				this.settings.mobileRecordingBannerPosition,
+			);
 		} else {
 			this.recordingBanner.hide();
 		}

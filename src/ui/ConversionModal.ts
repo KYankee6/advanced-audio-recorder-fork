@@ -4,16 +4,14 @@
  */
 
 import { App, Notice, Setting, TFile } from 'obsidian';
-import { PluginModal } from './PluginModal';
+import { CancellableJobModal } from './CancellableJobModal';
 import type { DropdownComponent } from 'obsidian';
-import { isOfflineEncodingSupported } from '../audio/AudioEncoder';
 import {
 	ChannelMode,
 	channelCountFor,
-	isMonoChannelMode,
 	normalizeChannelMode,
 } from '../audio/downmix';
-import { AUDIO_EXTENSIONS, FORMAT_WAV } from '../constants';
+import { FORMAT_WAV } from '../constants';
 import {
 	addBitrateSetting,
 	type BitrateRow,
@@ -21,7 +19,7 @@ import {
 	addLinkActionSetting,
 } from '../settings/settingControls';
 import { getEncoderDescription } from './formatDescriptions';
-import { ConversionService } from '../recording/api';
+import { ConversionService, conversionTargets } from '../recording/api';
 import type { EncodingWorkerClient } from '../audio/EncodingWorkerClient';
 import type {
 	AudioRecorderSettings,
@@ -38,7 +36,7 @@ export interface ConversionModalOptions {
 /**
  * Modal for converting an audio file to a different format.
  */
-export class ConversionModal extends PluginModal {
+export class ConversionModal extends CancellableJobModal {
 	private readonly sourceFile: TFile;
 	private targetFormat: string = FORMAT_WAV;
 	private bitrate: number;
@@ -49,15 +47,10 @@ export class ConversionModal extends PluginModal {
 	private formatDropdown: DropdownComponent | null = null;
 	/** Bitrate row, re-offered when the target format changes. */
 	private bitrateRow: BitrateRow | null = null;
-	/** Whether the conversion pipeline is currently running. */
-	private isConverting = false;
-	/** Progress notice shown when the modal is closed mid-conversion. */
-	private progressNotice: Notice | null = null;
 	/** Conversion pipeline behind the form. */
 	private readonly conversionService: ConversionService;
 	private readonly onConverted?:
-		| ((convertedPath: string) => void)
-		| undefined;
+		((convertedPath: string) => void) | undefined;
 
 	/**
 	 * @param app - Obsidian app handle
@@ -173,17 +166,13 @@ export class ConversionModal extends PluginModal {
 			cls: 'aar-conversion-progress',
 		});
 
-		new Setting(contentEl).addButton((button) => {
-			button
-				.setButtonText('Convert')
-				.setCta()
-				.onClick(() => {
-					button.setDisabled(true);
-					void this.runConversion(progressEl).finally(() => {
-						button.setDisabled(false);
-					});
-				});
-		});
+		this.renderJobActions('Convert', progressEl, () =>
+			this.runConversion(progressEl),
+		);
+	}
+
+	protected override jobTitle(): string {
+		return `Converting "${this.sourceFile.name}"`;
 	}
 
 	/**
@@ -193,12 +182,9 @@ export class ConversionModal extends PluginModal {
 	 * modes, so a stereo file can become a mono file of the same format.
 	 */
 	private availableFormats(): string[] {
-		const sourceFormat = this.sourceFile.extension.toLowerCase();
-		return AUDIO_EXTENSIONS.filter(
-			(format) =>
-				isOfflineEncodingSupported(format) &&
-				(format !== sourceFormat ||
-					isMonoChannelMode(this.channelMode)),
+		return conversionTargets(
+			this.sourceFile.extension.toLowerCase(),
+			this.channelMode,
 		);
 	}
 
@@ -232,36 +218,13 @@ export class ConversionModal extends PluginModal {
 		);
 	}
 
-	override onClose(): void {
-		if (this.isConverting && !this.progressNotice) {
-			// Timeout 0 keeps the notice visible until hidden explicitly;
-			// setProgress mirrors further pipeline progress into it
-			this.progressNotice = new Notice(
-				`Converting "${this.sourceFile.name}" continues in the background...`,
-				0,
-			);
-		}
-		this.contentEl.empty();
-	}
-
 	/**
-	 * Shows pipeline progress in the modal and mirrors it to the
-	 * background notice when the modal was closed mid-conversion.
+	 * Runs the conversion through the frame, which offers the Cancel for as
+	 * long as it runs and closes the dialog once it is done.
 	 * @param progressEl - Progress element inside the modal
-	 * @param text - Progress text; an empty string clears the element
 	 */
-	private setProgress(progressEl: HTMLElement, text: string): void {
-		progressEl.setText(text);
-		if (this.progressNotice && text !== '') {
-			this.progressNotice.setMessage(
-				`Converting "${this.sourceFile.name}": ${text}`,
-			);
-		}
-	}
-
 	private async runConversion(progressEl: HTMLElement): Promise<void> {
-		this.isConverting = true;
-		try {
+		await this.runJob(async (token) => {
 			const outcome = await this.conversionService.convert(
 				{
 					sourceFile: this.sourceFile,
@@ -274,25 +237,24 @@ export class ConversionModal extends PluginModal {
 				(text) => {
 					this.setProgress(progressEl, text);
 				},
+				token,
 			);
+			if (outcome.status === 'cancelled') {
+				new Notice(`Cancelled converting "${this.sourceFile.name}".`);
+				return false;
+			}
 			if (outcome.status !== 'completed') {
-				return;
+				return false;
 			}
 
 			this.setProgress(progressEl, '');
-			// Conversion already rewrote the note's link (linkAction); prime the
-			// new file so the enhanced player applies without reopening the note.
+			// Conversion already rewrote the note's link (linkAction); prime
+			// the new file so the enhanced player applies without reopening
+			// the note.
 			this.onConverted?.(outcome.newPath);
 			const action = this.deleteSource ? 'Replaced with' : 'Converted to';
 			new Notice(`${action} ${outcome.newFileName}`);
-			// Cleared before close() so onClose does not start a
-			// background notice for an already finished conversion
-			this.isConverting = false;
-			this.close();
-		} finally {
-			this.isConverting = false;
-			this.progressNotice?.hide();
-			this.progressNotice = null;
-		}
+			return true;
+		});
 	}
 }

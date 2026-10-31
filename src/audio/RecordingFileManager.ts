@@ -12,18 +12,18 @@ import { PLUGIN_LOG_PREFIX } from '../constants';
 import { sanitizeFileNameSegment } from '../utils/fileNames';
 
 /**
- * Returns the directory of the currently active Markdown file.
+ * Returns the folder of the currently active Markdown file.
  * @param app - Obsidian App instance
- * @returns Directory path or empty string if no active .md file
+ * @returns Folder path, or an empty string when no note is active or the
+ * note sits at the vault root
  */
 export function getActiveFileDirectory(app: App): string {
 	const activeFile = app.workspace.getActiveFile();
-	if (!activeFile || !activeFile.path.toLowerCase().endsWith('.md')) {
+	if (activeFile?.extension.toLowerCase() !== 'md') {
 		return '';
 	}
-	const segments = activeFile.path.split('/');
-	segments.pop();
-	return segments.join('/');
+	const folder = activeFile.parent;
+	return folder && !folder.isRoot() ? folder.path : '';
 }
 
 /**
@@ -58,7 +58,9 @@ export async function ensureFolderExists(
 	app: App,
 ): Promise<void> {
 	const normalizedPath = normalizePath(path).trim();
-	if (!normalizedPath) {
+	// The vault root, which normalizePath gives as "/" for an empty path,
+	// always exists and is no folder to create.
+	if (!normalizedPath || normalizedPath === '/') {
 		return;
 	}
 	if (await app.vault.adapter.exists(normalizedPath)) {

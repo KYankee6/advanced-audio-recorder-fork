@@ -6,7 +6,7 @@
  */
 
 import { App, Notice, Setting, TFile } from 'obsidian';
-import { PluginModal } from './PluginModal';
+import { CancellableJobModal } from './CancellableJobModal';
 import {
 	FORMAT_WAV,
 	MIN_SPLIT_CHUNK_MINUTES,
@@ -23,22 +23,23 @@ import {
 	addNumberInputTo,
 } from '../settings/settingControls';
 import {
+	chapterCutsOf,
 	clampSplitMinutes,
 	sanitizePartSuffix,
 	SplitService,
+	type ChapterCut,
 } from '../recording/api';
 import type {
 	AudioRecorderSettings,
 	ConversionLinkAction,
 } from '../settings/settingsSchema';
-import type { ChapterCut } from '../recording/SplitService';
-import { chapters, type PlayerMarker } from '../markers/markerModel';
+import type { PlayerMarker } from '../markers/markerModel';
 import { PLUGIN_LOG_PREFIX } from '../constants';
 
 /**
  * Modal for splitting an audio file into parts of a fixed duration.
  */
-export class SplitModal extends PluginModal {
+export class SplitModal extends CancellableJobModal {
 	private readonly sourceFile: TFile;
 	private partMinutes: number;
 	private partSuffix: string;
@@ -52,10 +53,6 @@ export class SplitModal extends PluginModal {
 	private byChapters = false;
 	/** The recording's chapters, loaded when the dialog opens. */
 	private chapterCuts: ChapterCut[] = [];
-	/** Whether the split pipeline is currently running. */
-	private isSplitting = false;
-	/** Progress notice shown when the modal is closed mid-split. */
-	private progressNotice: Notice | null = null;
 	/** Split pipeline behind the form. */
 	private readonly splitService: SplitService;
 
@@ -185,17 +182,13 @@ export class SplitModal extends PluginModal {
 			cls: 'aar-split-progress',
 		});
 
-		new Setting(contentEl).addButton((button) => {
-			button
-				.setButtonText('Split')
-				.setCta()
-				.onClick(() => {
-					button.setDisabled(true);
-					void this.runSplit(progressEl).finally(() => {
-						button.setDisabled(false);
-					});
-				});
-		});
+		this.renderJobActions('Split', progressEl, () =>
+			this.runSplit(progressEl),
+		);
+	}
+
+	protected override jobTitle(): string {
+		return `Splitting "${this.sourceFile.name}"`;
 	}
 
 	/**
@@ -210,10 +203,7 @@ export class SplitModal extends PluginModal {
 		hideWhenByChapters: readonly Setting[],
 	): Promise<void> {
 		const markers = await this.readMarkers();
-		this.chapterCuts = chapters(markers).map((chapter) => ({
-			startSeconds: chapter.time,
-			title: chapter.label,
-		}));
+		this.chapterCuts = chapterCutsOf(markers);
 		if (this.chapterCuts.length === 0) {
 			return;
 		}
@@ -254,33 +244,6 @@ export class SplitModal extends PluginModal {
 		}
 	}
 
-	override onClose(): void {
-		if (this.isSplitting && !this.progressNotice) {
-			// Timeout 0 keeps the notice visible until hidden explicitly;
-			// setProgress mirrors further pipeline progress into it
-			this.progressNotice = new Notice(
-				`Splitting "${this.sourceFile.name}" continues in the background...`,
-				0,
-			);
-		}
-		this.contentEl.empty();
-	}
-
-	/**
-	 * Shows pipeline progress in the modal and mirrors it to the
-	 * background notice when the modal was closed mid-split.
-	 * @param progressEl - Progress element inside the modal
-	 * @param text - Progress text; an empty string clears the element
-	 */
-	private setProgress(progressEl: HTMLElement, text: string): void {
-		progressEl.setText(text);
-		if (this.progressNotice && text !== '') {
-			this.progressNotice.setMessage(
-				`Splitting "${this.sourceFile.name}": ${text}`,
-			);
-		}
-	}
-
 	/**
 	 * Resolves the extension the part files will get.
 	 * @returns Part file extension without the dot
@@ -309,17 +272,18 @@ export class SplitModal extends PluginModal {
 	}
 
 	/**
-	 * Runs the split pipeline for the configured form values. Failure
+	 * Runs the split pipeline for the configured form values through the
+	 * frame, which offers the Cancel for as long as it runs. Failure
 	 * details are surfaced by the pipeline itself; the form only shows
 	 * the completion notice and closes.
+	 * @param progressEl - Progress element inside the modal
 	 */
 	private async runSplit(progressEl: HTMLElement): Promise<void> {
-		this.isSplitting = true;
-		try {
+		await this.runJob(async (token) => {
 			const suffix = this.resolvePartSuffix();
 			if (suffix === null) {
 				this.setProgress(progressEl, '');
-				return;
+				return false;
 			}
 			const partSeconds =
 				clampSplitMinutes(this.partMinutes) * SECONDS_PER_MINUTE;
@@ -337,23 +301,21 @@ export class SplitModal extends PluginModal {
 				(text) => {
 					this.setProgress(progressEl, text);
 				},
+				token,
 			);
+			if (outcome.status === 'cancelled') {
+				new Notice(`Cancelled splitting "${this.sourceFile.name}".`);
+				return false;
+			}
 			if (outcome.status !== 'completed') {
-				return;
+				return false;
 			}
 
 			this.setProgress(progressEl, '');
 			new Notice(
 				`Split into ${String(outcome.partCount)} parts: ${outcome.firstPartName} ...`,
 			);
-			// Cleared before close() so onClose does not start a
-			// background notice for an already finished split
-			this.isSplitting = false;
-			this.close();
-		} finally {
-			this.isSplitting = false;
-			this.progressNotice?.hide();
-			this.progressNotice = null;
-		}
+			return true;
+		});
 	}
 }

@@ -11,6 +11,7 @@
  * @module tests/helpers/obsidianMock
  */
 
+import { TFile, WorkspaceLeaf } from 'obsidian';
 import type {
 	App,
 	Menu,
@@ -20,7 +21,11 @@ import type {
 	Workspace,
 } from 'obsidian';
 import { partial } from './doubles';
-import { Plugin as MockPluginClass } from '../mocks/obsidian';
+import {
+	Plugin as MockPluginClass,
+	TFile as MockFileClass,
+	TFolder as MockFolderClass,
+} from '../mocks/obsidian';
 import type {
 	App as MockApp,
 	Menu as MockMenu,
@@ -108,4 +113,44 @@ export function mockPluginHost(app: App): Plugin {
 		app as unknown as ConstructorParameters<typeof MockPluginClass>[0],
 		partial<PluginManifest>({}),
 	) as unknown as Plugin;
+}
+
+/**
+ * A vault file at a path. The shared mock's TFile takes the path that its real
+ * counterpart only receives from the vault, which the real typings do not
+ * declare.
+ * @param path - Vault path of the file
+ * @returns The file
+ */
+export function fileAt(path: string): TFile {
+	return new (TFile as unknown as new (path: string) => TFile)(path);
+}
+
+/**
+ * A workspace leaf over an app, the way the mock workspace builds one for a
+ * sidebar tab. The real typings construct a leaf with no arguments.
+ * @param app - The app the leaf hands its view
+ * @returns The leaf
+ */
+export function leafOver(app: App): WorkspaceLeaf {
+	return new (WorkspaceLeaf as unknown as new (app: App) => WorkspaceLeaf)(
+		app,
+	);
+}
+
+/**
+ * A vault file with the folder Obsidian would give it as its parent: the root
+ * folder ('/') for a file at the top of the vault. The published TFile type
+ * has no public constructor, so a test that needs a file with a real parent
+ * builds it here.
+ * @param path - Vault-relative path of the file
+ * @returns The file, its parent set
+ */
+export function fileInFolder(path: string): TFile {
+	const file = new MockFileClass(path);
+	const slash = path.lastIndexOf('/');
+	file.parent = new MockFolderClass(
+		slash === -1 ? '/' : path.slice(0, slash),
+	);
+	return file as unknown as TFile;
 }

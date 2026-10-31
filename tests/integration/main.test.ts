@@ -15,10 +15,12 @@ import type { PluginManifest, TFile } from 'obsidian';
 import { createFile } from '../helpers/createApp';
 import { allEls, el, textOf } from '../helpers/dom';
 import { MODAL } from '../helpers/selectors';
-import { partial } from '../helpers/doubles';
+import { internalsOf, partial } from '../helpers/doubles';
 import { asMockPlugin, asMockVault } from '../helpers/obsidianMock';
+import { SHIPPED_PROFILES_GIVEN } from '../helpers/settingsFixtures';
 import { modalInstances } from '../mocks/obsidian';
 import { ReleaseNotesModal } from 'src/ui/ReleaseNotesModal';
+import { ActionTargetModal } from 'src/ui/ActionTargetModal';
 import { makePlaybackState } from '../helpers/playbackHarness';
 import { COMMAND_IDS, TRANSCRIPTION_PROVIDER_IDS } from 'src/constants';
 import { RecordingManager } from 'src/recording/RecordingManager';
@@ -98,6 +100,8 @@ jest.mock('src/player/EnhancedPlayerRegistrar', () => ({
 		currentPlaybackState: jest.fn(() => null),
 		primeSavedRecordingsForEnhancement: jest.fn(),
 		openMarkerSearch: jest.fn().mockResolvedValue(undefined),
+		markerHits: jest.fn().mockResolvedValue([]),
+		reloadMarkersFor: jest.fn(),
 	})),
 }));
 
@@ -117,6 +121,14 @@ jest.mock('src/transcription/QueueCoordinator', () => ({
 		queueFolder: jest.fn().mockResolvedValue(undefined),
 		open: jest.fn(),
 		resumeIfPending: jest.fn().mockResolvedValue(undefined),
+		enqueueFolder: jest.fn().mockResolvedValue({ found: 2, added: 1 }),
+		status: jest
+			.fn()
+			.mockResolvedValue({ entries: [], paused: true, running: false }),
+		start: jest.fn(),
+		pause: jest.fn(),
+		clear: jest.fn(),
+		remove: jest.fn(() => true),
 	})),
 }));
 
@@ -129,7 +141,6 @@ jest.mock('src/ui/StatusBar', () => ({
 
 jest.mock('src/ui/RibbonIcon', () => ({
 	updateRibbonIcon: jest.fn(),
-	initializeRibbonIcon: jest.fn(),
 }));
 
 jest.mock('src/ui/DeviceSelectionModal', () => ({
@@ -673,6 +684,7 @@ describe('AudioRecorderPlugin settings persistence', () => {
 
 		/** The glossary as data.json stores it, cached as the given text. */
 		const storedGlossary = (body: string): Record<string, unknown> => ({
+			...SHIPPED_PROFILES_GIVEN,
 			profiles: [
 				{
 					id: 'g1',
@@ -866,11 +878,25 @@ describe('AudioRecorderPlugin crash recovery wiring', () => {
 	});
 });
 
+/** The services the plugin handed its menus, every action's. */
+function menuServices(): ActionServices {
+	return at((ContextMenu as jest.Mock).mock.calls, 0)[1] as ActionServices;
+}
+
+/** Loads a plugin with no saved data and hands back its action services. */
+async function loadedServices(): Promise<ActionServices> {
+	const { plugin } = createPlugin([null]);
+	await onloadWithTimers(plugin);
+	return menuServices();
+}
+
 /** The slice of the mocked player registrar these cases drive. */
 interface PlayerRegistrarDouble {
 	subscribePlayback: jest.Mock;
 	currentPlaybackState: jest.Mock;
 	openMarkerSearch: jest.Mock;
+	markerHits: jest.Mock;
+	reloadMarkersFor: jest.Mock;
 }
 
 /**
@@ -1349,8 +1375,10 @@ describe('AudioRecorderPlugin silent-channel suggestion', () => {
 			notice.message,
 			MODAL.silentChannelConvert,
 		);
+		// A native button, Obsidian's ButtonComponent, is what makes the
+		// action reachable from the keyboard. A notice holds no form, so the
+		// button's type submits nothing whatever it is.
 		expect(button.tagName).toBe('BUTTON');
-		expect(button.type).toBe('button');
 		button.click();
 		expect(notice.hide).toHaveBeenCalled();
 		expect(openSpy).toHaveBeenCalledWith(file, 'mono-left');
@@ -1415,6 +1443,48 @@ describe('AudioRecorderPlugin searching the vault for a marker', () => {
 		).toBe(true);
 		expect(registrar.openMarkerSearch).toHaveBeenCalledTimes(1);
 	});
+
+	it('lists the markers on the command line from the same index', async () => {
+		const { plugin, registrar } = await pluginWithPlayback();
+
+		await asMockPlugin(plugin).invokeCliCommand(`${MANIFEST.id}:markers`);
+
+		expect(registrar.markerHits).toHaveBeenCalledTimes(1);
+	});
+
+	it('reloads the markers a player shows once an action changed them', async () => {
+		const { registrar } = await pluginWithPlayback();
+		const services = menuServices();
+
+		services.onMarkersChanged('Recordings/a.webm');
+
+		expect(registrar.reloadMarkersFor).toHaveBeenCalledWith(
+			'Recordings/a.webm',
+		);
+	});
+});
+
+describe('AudioRecorderPlugin asking which target a command is for', () => {
+	it('opens a picker when the command could run on several', async () => {
+		const { plugin } = createPlugin([{ transcriptionEnabled: true }]);
+		asMockVault(plugin.app.vault).seed([
+			{ path: 'Recordings/a.webm', data: new ArrayBuffer(8) },
+			{ path: 'Archive/b.webm', data: new ArrayBuffer(8) },
+		]);
+		await onloadWithTimers(plugin);
+
+		expect(
+			asMockPlugin(plugin).invokeCommand(COMMAND_IDS.transcribeFolder),
+		).toBe(true);
+
+		const picker = modalInstances.at(-1);
+		if (!(picker instanceof ActionTargetModal)) {
+			throw new Error('The palette opened no target picker');
+		}
+		expect(
+			picker.getItems().map((target) => picker.getItemText(target)),
+		).toEqual(['the whole vault', 'Archive', 'Recordings']);
+	});
 });
 
 // The queue is wired in three places - the folder menu, the palette command,
@@ -1422,16 +1492,23 @@ describe('AudioRecorderPlugin searching the vault for a marker', () => {
 // to reach the one coordinator the plugin built.
 describe('AudioRecorderPlugin transcription queue', () => {
 	/** The coordinator the plugin built on load. */
-	function coordinator(): {
-		queueFolder: jest.Mock;
-		open: jest.Mock;
-		resumeIfPending: jest.Mock;
-	} {
-		return at((QueueCoordinator as jest.Mock).mock.results, 0).value as {
-			queueFolder: jest.Mock;
-			open: jest.Mock;
-			resumeIfPending: jest.Mock;
-		};
+	/** The coordinator the plugin built, every method a spy. */
+	type CoordinatorDouble = Record<
+		| 'queueFolder'
+		| 'open'
+		| 'resumeIfPending'
+		| 'enqueueFolder'
+		| 'status'
+		| 'start'
+		| 'pause'
+		| 'clear'
+		| 'remove',
+		jest.Mock
+	>;
+
+	function coordinator(): CoordinatorDouble {
+		return at((QueueCoordinator as jest.Mock).mock.results, 0)
+			.value as CoordinatorDouble;
 	}
 
 	it('offers to carry on with a queue a previous session left', async () => {
@@ -1512,10 +1589,7 @@ describe('AudioRecorderPlugin transcription queue', () => {
 		const deps = at((QueueRunner as jest.Mock).mock.calls, 0)[0] as {
 			transcribe: (file: TFile, options: unknown) => Promise<unknown>;
 		};
-		const services = at(
-			(ContextMenu as jest.Mock).mock.calls,
-			0,
-		)[1] as ActionServices;
+		const services = menuServices();
 
 		await deps.transcribe(partial<TFile>({ path: 'a.webm' }), {
 			notePathForLinks: 'a.webm',
@@ -1542,12 +1616,7 @@ describe('AudioRecorderPlugin transcription queue', () => {
 	});
 
 	it('hands the folder menu the same queue', async () => {
-		const { plugin } = createPlugin([null]);
-		await onloadWithTimers(plugin);
-		const services = at(
-			(ContextMenu as jest.Mock).mock.calls,
-			0,
-		)[1] as ActionServices;
+		const services = await loadedServices();
 
 		await services.transcriptionQueue.queueFolder(
 			partial<TFolder>({ path: 'Recordings' }),
@@ -1560,15 +1629,63 @@ describe('AudioRecorderPlugin transcription queue', () => {
 		expect(coordinator().open).toHaveBeenCalledTimes(1);
 	});
 
+	it('hands the command line the same queue', async () => {
+		const services = await loadedServices();
+		const queue = services.transcriptionQueue;
+		const folder = partial<TFolder>({ path: 'Recordings' });
+
+		await expect(queue.enqueueFolder(folder)).resolves.toEqual({
+			found: 2,
+			added: 1,
+		});
+		await expect(queue.status()).resolves.toEqual({
+			entries: [],
+			paused: true,
+			running: false,
+		});
+		queue.start();
+		queue.pause();
+		queue.clear();
+		expect(queue.remove('a.webm')).toBe(true);
+
+		expect(coordinator().enqueueFolder).toHaveBeenCalledWith(folder);
+		expect(coordinator().start).toHaveBeenCalledTimes(1);
+		expect(coordinator().pause).toHaveBeenCalledTimes(1);
+		expect(coordinator().clear).toHaveBeenCalledTimes(1);
+		expect(coordinator().remove).toHaveBeenCalledWith('a.webm');
+	});
+
+	it('answers the command line as an empty queue before it has been built', async () => {
+		const { plugin } = createPlugin([null]);
+		const queue = internalsOf<{ createActionServices(): ActionServices }>(
+			plugin,
+		).createActionServices().transcriptionQueue;
+
+		await expect(
+			queue.enqueueFolder(partial<TFolder>({ path: 'Recordings' })),
+		).resolves.toEqual({ found: 0, added: 0 });
+		await expect(queue.status()).resolves.toEqual({
+			entries: [],
+			paused: false,
+			running: false,
+		});
+		expect(queue.remove('a.webm')).toBe(false);
+		expect(() => {
+			queue.start();
+			queue.pause();
+			queue.clear();
+		}).not.toThrow();
+	});
+
 	it('answers the folder menu before the queue has been built', async () => {
 		// The menu is wired during load, ahead of the queue, and its entries
 		// read the field when they are clicked rather than when they were
 		// wired. A load that stopped in between left them dereferencing a
 		// field that was never assigned.
 		const { plugin } = createPlugin([null]);
-		const services = (
-			plugin as unknown as { createActionServices(): ActionServices }
-		).createActionServices();
+		const services = internalsOf<{
+			createActionServices(): ActionServices;
+		}>(plugin).createActionServices();
 
 		expect(() => {
 			services.transcriptionQueue.open();

@@ -11,6 +11,7 @@
     - [Mistral Voxtral](#mistral-voxtral)
     - [Local whisper.cpp (desktop)](#local-whispercpp-desktop)
 - [Model picker and language](#model-picker-and-language)
+    - [Several languages in one recording](#several-languages-in-one-recording)
 - [Speakers and diarization](#speakers-and-diarization)
     - [Naming speakers](#naming-speakers)
 - [Biasing recognition toward your own terms](#biasing-recognition-toward-your-own-terms)
@@ -36,7 +37,7 @@ Open **Settings > Advanced Audio Recorder > Transcription** and turn on **Enable
 1. **Transcription engine** - the row naming the service that transcribes, with the **Engines** entry under it opening the page where that service is configured: base URL, API key, and model.
 2. **Transcribe after recording** - auto-transcribe each saved recording (off by default).
 3. **Show cost estimates** - the estimated API cost before a run and the running session total (on by default).
-4. **Language** - `auto` to detect, or an ISO code.
+4. **Language** - `auto` to detect, an ISO code, or several codes separated by commas for a recording that switches language.
 5. **Speaker diarization** - request speaker labels (only some engines).
 6. **Translate speech to English** - write the recording down in English whatever was spoken, using the engine's own translating operation (only some engines).
 7. **Participant profile** - shown while diarization is on, with the **Participant profiles** catalogue under it.
@@ -89,7 +90,7 @@ Settings to fill:
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | **Upload chunk size** | Megabytes per WAV chunk when a recording is too large to upload whole. Range 1-24 MB.                                           | 24                          |
 | **Base URL**          | OpenAI-compatible endpoint base, e.g. `https://api.openai.com/v1` or a Groq URL. Shared with the OpenAI engine.                 | `https://api.openai.com/v1` |
-| **OpenAI API key**    | Your API key, read by this engine and by the OpenAI one. Stored in plugin data on this device.                                  | -                           |
+| **OpenAI API key**    | Your API key, read by this engine and by the OpenAI one. Kept in Obsidian's keychain on this device.                            | -                           |
 | **Model**             | Model id in use, picked from the ids the **Model catalogue** entry below it holds. Must support `verbose_json` with timestamps. | `whisper-1`                 |
 
 Behavior and limits:
@@ -98,11 +99,11 @@ Behavior and limits:
 - **Larger files** are resampled to **16 kHz mono**, split into upload-sized WAV chunks (sized by **Upload chunk size**, default 24 MB to stay under the 25 MB limit), and the per-chunk results are stitched back onto one timeline.
 - **No diarization.** Whisper does not return speaker labels, so **Speaker diarization** is disabled for this engine.
 - **Speech translation.** The endpoint carries a second operation that writes the recording down in **English** whatever was spoken. Turn on **Translate speech to English** to use it. Chunking and the dictionary bias behave exactly as they do on the transcription operation, but the translation one takes a narrower set of fields, so two things are dropped from the request rather than sent and refused. The **Language** hint goes, because it would describe the audio rather than the answer. **Word-level timestamps** go with it, because the operation has no timing granularity to ask for and answers with segments only, so a translated transcript carries per-segment timings and never per-word ones. This is the only engine that offers speech translation at all. To translate into any other language, or on any other engine, use the [translation task](llm-post-processing.md) of LLM post-processing instead, which runs on the finished transcript.
-- **Model requirements.** Only models that return `verbose_json` with segment timestamps work. `whisper-1` is OpenAI's; `whisper-large-v3` and `whisper-large-v3-turbo` are served by Groq and other compatible hosts. (OpenAI's `gpt-4o-transcribe` models do **not** support `verbose_json` and are intentionally excluded.)
+- **Model requirements.** Only models that return `verbose_json` with segment timestamps work. `whisper-1` is OpenAI's; `whisper-large-v3` and `whisper-large-v3-turbo` are served by Groq and other compatible hosts. OpenAI's `gpt-4o-transcribe` models do **not** support `verbose_json`, and `gpt-transcribe` documents no segment timestamps, so both are intentionally excluded. OpenAI has scheduled `whisper-1` to shut down on February 26, 2027.
 
 Getting a key: [OpenAI Whisper API key](use-cases/openai-whisper-api-key.md) · [Groq Whisper setup](use-cases/groq-whisper-setup.md). The **Whisper API models** link in the **Model** row's description points at the [OpenAI speech-to-text guide](https://developers.openai.com/api/docs/guides/speech-to-text).
 
-![The Whisper API engine page under Engines, with the Base URL, OpenAI API key, Model and Upload chunk size rows](images/settings-engine-whisper-api.png)
+![The Whisper API engine page under Engines, with the Base URL, OpenAI API key keychain picker, Model and Upload chunk size rows](images/settings-engine-whisper-api.png)
 
 ### Deepgram
 
@@ -113,7 +114,7 @@ Settings to fill:
 | Setting              | Description                                                                                                          | Default                       |
 | -------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
 | **Base URL**         | Deepgram API base.                                                                                                   | `https://api.deepgram.com/v1` |
-| **Deepgram API key** | Your Deepgram key. Stored in plugin data on this device.                                                             | -                             |
+| **Deepgram API key** | Your Deepgram key. Kept in Obsidian's keychain on this device.                                                       | -                             |
 | **Model**            | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `nova-3`, `nova-2-meeting`). | `nova-3`                      |
 
 Behavior and limits:
@@ -126,30 +127,33 @@ Behavior and limits:
 
 Getting a key: [Deepgram API key](use-cases/deepgram-api-key.md). The **Deepgram model list** link in the **Model** row's description points at the [Deepgram model list](https://developers.deepgram.com/docs/model).
 
-![The Deepgram engine page under Engines, with the Base URL, Deepgram API key and Model rows](images/settings-engine-deepgram.png)
+![The Deepgram engine page under Engines, with the Base URL, Deepgram API key keychain picker and Model rows](images/settings-engine-deepgram.png)
 
 ### Google Gemini
 
-Google's multimodal `generateContent` API, using the File API to upload the recording.
+Google's multimodal `generateContent` API. Audio up to 14 MB travels inline in that one request, and larger audio is uploaded through the File API first.
 
 Settings to fill:
 
 | Setting                   | Description                                                                                                                    | Default                                     |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
 | **Base URL**              | Gemini API base (no version segment).                                                                                          | `https://generativelanguage.googleapis.com` |
-| **Google Gemini API key** | Your Gemini key. Stored in plugin data on this device.                                                                         | -                                           |
-| **Model**                 | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `gemini-3.5-flash`, `gemini-2.5-pro`). | `gemini-3.5-flash`                          |
+| **Google Gemini API key** | Your Gemini key. Kept in Obsidian's keychain on this device.                                                                   | -                                           |
+| **Model**                 | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `gemini-3.8-flash`, `gemini-4-argon`). | `gemini-3.8-flash`                          |
 
 Behavior and limits:
 
+- **Short audio in one request.** Audio up to 14 MB, which covers a quick note and about seven minutes of decoded WAV, is sent inline in the `generateContent` request, with no upload, no wait for the file to be processed and no cleanup afterwards. When Google Gemini is also the quick note rewrite engine, that one request carries the quick note profile's instruction and returns the rewritten text, as [Quick notes](quick-notes.md#choosing-the-engines) describes.
 - **Up to 2 GB uploaded whole** via the File API, then transcribed in one request - so diarization keeps consistent speaker numbering across the whole file.
 - **Container conversion.** Containers Gemini does not accept directly (notably `webm`, `mp4`, and `m4a`) are decoded to **16 kHz mono WAV** before upload. WAV, MP3, AAC, OGG, FLAC, and AIFF are sent as-is.
 - **Long recordings are split.** A recording **longer than 15 minutes** is split into parts of equal length, each transcribed and stitched back onto the timeline; a recording of exactly 15 minutes still goes in one request. Splitting **resets Gemini's per-request speaker numbering**, so a diarized split shows a warning that speaker labels may differ between parts; the message suggests using Deepgram or splitting the recording for consistent speakers.
+- **A part whose timecodes do not fit it is sent again.** Gemini writes the start and end of every segment itself rather than measuring them on the audio, and on a long part they can drift from one request to the next. An answer whose lines end more than 5 seconds past the end of the part, or stop more than a minute before its end on any part but the recording's last, is set aside and the part is sent once more, which is billed like any other request. When the second answer does not fit either, the lines inside the part are kept, the lines past its end are dropped, and the part is listed in the incomplete-transcription warning with the reason, so [Transcribe the parts that failed](#transcribing-the-parts-that-failed) can ask for it again. When sending the part again fails, the first answer is kept the same way, and the reason names that failure too. An answer that spreads too little speech over the whole part still passes, because its lines stay inside the part and reach its end.
 - **Diarization supported.** Turn on **Speaker diarization** to request speaker labels.
+- **Several languages in one recording.** The only engine that reads a list of languages. With **Language** set to codes separated by commas, every segment comes back in the language it was spoken in and is tagged with its code. See [Several languages in one recording](#several-languages-in-one-recording).
 
 Getting a key: [Gemini API key](use-cases/gemini-api-key.md). The **Gemini model list** link in the **Model** row's description points at the [Gemini model list](https://ai.google.dev/gemini-api/docs/models).
 
-![The Google Gemini engine page under Engines, with the Base URL, Google Gemini API key, Model and Max output tokens rows](images/settings-llm-gemini-provider.png)
+![The Google Gemini engine page under Engines, with the Base URL, Google Gemini API key keychain picker, Model and Max output tokens rows](images/settings-llm-gemini-provider.png)
 
 ### Mistral Voxtral
 
@@ -160,12 +164,12 @@ Settings to fill:
 | Setting             | Description                                                                                                     | Default                     |
 | ------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | **Base URL**        | Mistral API base, shared with the Mistral chat engine.                                                          | `https://api.mistral.ai/v1` |
-| **Mistral API key** | Your Mistral key. Stored in plugin data on this device.                                                         | -                           |
+| **Mistral API key** | Your Mistral key. Kept in Obsidian's keychain on this device.                                                   | -                           |
 | **Model**           | Model id in use, picked from the ids the **Model catalogue** entry below it holds (e.g. `voxtral-mini-latest`). | `voxtral-mini-latest`       |
 
 Behavior and limits:
 
-- **Up to three hours in one request**, so a whole meeting is transcribed in one piece and speaker numbering stays consistent from start to finish. Files are sent whole up to **1 GB**. A recording past the three-hour mark is refused before anything is uploaded, with a message pointing at the [splitter](splitting.md), whenever the plugin can measure its length: that is every recording it decodes, which includes the `webm` it records by default. An already-accepted container longer than three hours is measured only by the endpoint, which refuses it in Mistral's own words.
+- **Up to three hours in one request**, so a whole meeting is transcribed in one piece and speaker numbering stays consistent from start to finish. Files are sent whole up to **1 GB**. A recording the plugin decodes, which includes the `webm` it records by default, has its length measured before anything is uploaded, and one past the three-hour mark is split into parts of up to three hours that are stitched back onto one timeline. Speaker numbering can then reset between parts, and a diarized split shows the same warning as on Gemini. An already-accepted container longer than three hours is measured only by the endpoint, which refuses it in Mistral's own words.
 - **Container conversion.** MP3, WAV, M4A, FLAC, and OGG are uploaded untouched. Any other container, including the `webm` this plugin records by default, is decoded to **16 kHz mono WAV** first, which costs time and memory on a long recording. Choosing MP3 or M4A as the [recording format](recording.md) avoids the decode entirely.
 - **Diarization supported.** Turn on **Speaker diarization** to request speaker labels, and whatever the endpoint names them they can be renamed like any other engine's.
 - **The engine detects the language itself.** Mistral refuses a language hint alongside the timestamp granularity that makes the response carry timed segments at all, so the granularity is sent and the hint is not. **Language** stays editable while this engine is selected, because auto chapters fall back to that same field when a transcript carries no detected language, and the note under the row says the transcription request ignores it.
@@ -212,7 +216,7 @@ Every cloud engine's page carries the same pair of rows: a **Model** dropdown ho
 - **Filter the list** - type in the **Filter models** field above the catalogue once the list is long enough to scroll.
 - **Catalogue link** - the **Model** row's description ends in a link to that engine's official model list. Every engine carries one, Voxtral, Anthropic and Mistral included.
 
-On Obsidian 1.13 and later the catalogue lives on a page of its own, because a vendor catalogue can run to thirty ids and inline they would bury the settings after them. On older versions the list is shown inline, since that Obsidian has no sub-pages.
+The catalogue lives on a page of its own, because a vendor catalogue can run to thirty ids and inline they would bury the settings after them.
 
 The list is seeded on first run with common models for each engine and is fully user-editable. Local whisper.cpp does not use this picker - it takes a model **file path** instead (see above).
 
@@ -220,6 +224,44 @@ The **Language** setting controls the spoken language sent to the engine:
 
 - Leave it as **`auto`** to let the engine detect the language.
 - Or set an **ISO code** such as `en`, `ru`, or `es` to force a language. All languages supported by the chosen model work.
+- Or list **several codes separated by commas**, such as `pl, uk`, for a recording that switches between them. What the engine does with the list is described below.
+
+### Several languages in one recording
+
+A language lesson, an interview with an interpreter, or a meeting where people switch between two languages is transcribed badly when the engine settles on one language: the passages in the other language come back respelled in the first one's alphabet, and their meaning is lost. Listing every language the recording holds in **Language**, separated by commas, tells the engine to expect the switch.
+
+```text
+pl, uk
+```
+
+![The Language row with Google Gemini as the transcription engine and pl, uk typed in the field, its note saying that a list of languages makes each segment come back in its own language](images/settings-transcription-language-list.png)
+
+With that value, a Polish lesson whose tutor explains the grammar in Ukrainian comes back with each line in its own language and script:
+
+```text
+0:33 - Speaker 2: Możemy od razu po polsku, czy chciałby pan na początku
+0:35 - Speaker 2: по-українськи щось мені повідомити?
+14:27 - Speaker 2: Jest? Dobrze. Andrzej to mój przyjaciel.
+```
+
+Only one engine can be told several languages at once, because only its request is ours to write. The rest receive the first code of the list:
+
+| Engine            | Several codes in **Language**                                                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Google Gemini     | Every code is sent. Each segment is written in its own language and script, tagged with its code, and a language may change mid-sentence. |
+| Whisper API       | Only the first code is sent, so the whole recording is transcribed as that language.                                                      |
+| Deepgram          | Only the first code is sent. Deepgram's own `multi` mode does not cover every language pair, so the plugin does not use it.               |
+| Local whisper.cpp | Only the first code is sent.                                                                                                              |
+| Mistral Voxtral   | Nothing is sent. The engine detects the language itself.                                                                                  |
+
+What the list changes on Gemini:
+
+- **Every segment carries its language.** The JSON output stores the code on each segment as `language`. Markdown, SubRip and WebVTT outputs show the text only.
+- **The recording's own language is the one most of the text is in.** It is what the recording panel shows, what auto chapters write in, and what post-processing is told. A Polish lesson with a Ukrainian opening reads as `pl`.
+- **A language outside the list is tagged `other`.** The language field of the response schema takes the codes listed and `other`, so a third language spoken in passing is written in its own script and tagged `other` rather than with a code it is not in. It never becomes the recording's own language, and listing every language you expect gives those segments their real code.
+- **Advanced two-pass transcription keeps working.** The second pass is told the same languages, and it is not discarded when the language most of the text is in differs between the passes. It is discarded when any of its parts comes back in a language outside the list that the first pass did not hear in that part.
+
+The plugin names no language of its own in the instruction it sends: the codes come from the field and nowhere else, so any pair or triple works the same way, for example `pl, uk, be` or `de, en`.
 
 ---
 
@@ -311,7 +353,7 @@ What changes follows the split: **the note** gets one line in place of the selec
 
 ## Biasing recognition toward your own terms
 
-Names, abbreviations, and domain jargon are the words an engine mishears most often. **Dictionary profiles** live under the **Advanced settings** master switch (**Settings > Advanced Audio Recorder > Transcription > Advanced settings**), which is off by default; turn it on to reveal the dictionary and the two-pass mode, and with it off a recording transcribes in one plain pass with no biasing. The profiles are named glossaries, one term per line, so you can keep separate lists for different meeting types (standup, legal, medical) instead of one merged glossary that dilutes the bias. Manage them in the settings tab: **Dictionary profiles** opens a page (on Obsidian 1.13 and later; inline on older versions) whose entry shows the profile in use. That page is a list of the saved profiles with a filter above them, each entry saying how many terms it holds and whether a run uses it, plus **Add profile** for another one. Opening an entry gives that profile a page of its own with its terms across the full width, a **Dictionary profile** switch that makes it the profile in use, and **Rename profile** and **Delete profile**. That switch decides which profile a run applies by default, and the Transcribe dialog lists every saved profile whichever one is in use. Names are unique, because a profile's page is addressed by its name. A term may contain spaces, so a full name or a multi-word product stays intact, while blank lines and case-insensitive duplicates are ignored. In the per-run **Transcribe audio** dialog you choose which profile to apply for that run, or **None**; the last choice is remembered and becomes the default for the next dialog and for transcribe-on-save.
+Names, abbreviations, and domain jargon are the words an engine mishears most often. **Dictionary profiles** live under the **Advanced settings** master switch (**Settings > Advanced Audio Recorder > Transcription > Advanced settings**), which is off by default; turn it on to reveal the dictionary and the two-pass mode, and with it off a recording transcribes in one plain pass with no biasing. The profiles are named glossaries, one term per line, so you can keep separate lists for different meeting types (standup, legal, medical) instead of one merged glossary that dilutes the bias. Manage them in the settings tab: **Dictionary profiles** opens a page whose entry shows the profile in use. That page is a list of the saved profiles with a filter above them, each entry saying how many terms it holds and whether a run uses it, plus **Add profile** for another one. Opening an entry gives that profile a page of its own with its terms across the full width, a **Dictionary profile** switch that makes it the profile in use, and **Rename profile** and **Delete profile**. That switch decides which profile a run applies by default, and the Transcribe dialog lists every saved profile whichever one is in use. Names are unique, because a profile's page is addressed by its name. A term may contain spaces, so a full name or a multi-word product stays intact, while blank lines and case-insensitive duplicates are ignored. In the per-run **Transcribe audio** dialog you choose which profile to apply for that run, or **None**; the last choice is remembered and becomes the default for the next dialog and for transcribe-on-save.
 
 **A profile can be read from a note.** A glossary of a hundred terms is easier to keep as an ordinary note: it is edited in the normal editor, synced and versioned with the vault, linked to the project it belongs to, and editable from a phone without opening the plugin settings. Below that switch, every profile page has a **Source** row that chooses where the profile's text comes from. **Typed text** keeps the terms field, and **Note** replaces it with a **Note** row that suggests the vault's notes; an **Open note** action joins it once a note is picked. The description under **Source** names the text the profile applies, `Uses the text typed in the settings.` or `Uses the text of Glossaries/Standup.md.`, and while **Note** is chosen with no note picked yet it opens with `No note picked yet.`, because the typed text still applies. Nothing is stored for that choice until a note is picked, so closing the settings first returns the page to **Typed text**. Picking a note for a profile that holds typed text asks first, because the note's text takes its place: an empty note is offered the typed text, which is added to it, and any other note is confirmed before the typed text is lost. A note that cannot be read is not picked, and a notice says so. The line is drawn with the page, so a note renamed or deleted while the settings stay open is reflected the next time the page is opened. Once a note is picked, the profile's text becomes the note's text below its frontmatter. A transcription and a chapter generation read the note again as they start, and the **Rename speakers** dialog reads it as it opens, from the note's editor when it is open, so an edit made a moment before applies, and an edit saved during a run applies to the next one. List markup is read the way a list is meant: a glossary written as bullets, a numbered list, or checkboxes, inside a callout or not, yields the terms without the markers, and a link yields the name it shows (its alias, or else the name of the linked note). Bold, italic, highlighted text, and inline code yield the text inside them, a Markdown link yields its label, and struck-through text and embeds yield nothing. Headings, horizontal rules, tables, code blocks, `%%` comments, and the title line of a callout are skipped. Each line is one term, so a definition written after a term on its line is sent with it. Both rules hold for terms typed into the settings as well. Renaming or moving the note, or the folder holding it, inside Obsidian keeps the profile pointed at it. When the note disappears (deleted, moved outside Obsidian, or not yet delivered by sync), the profile keeps the text last read from it, **Source** says `Uses the text last read from Glossaries/Standup.md, which is missing.`, and a run that applies it names the note in a notice and goes ahead with that text. A note that is in the vault and cannot be read, for example while another program holds it locked, is handled the same way: a run, and the **Rename speakers** dialog under its profile picker, say that the note could not be read and use the text last read from it. Every catalogue entry names where its text comes from beside what it holds and whether a run uses it, for example `In use, note, 12 terms`, `Typed text, 3 terms`, or `Note missing, 12 terms`. The picker of the profile in use repeats the line from **Source** under its description, and the profile pickers of the **Transcribe audio**, **Generate chapters**, and **Rename speakers** dialogs show the same line for the profile picked there. Choosing **Typed text** again detaches the profile and leaves the note's current text in its terms field, ready to edit (or the text last read from it, with a notice, when the note cannot be read), while emptying the **Note** field keeps the page on a note until another one is picked. Participant rosters, chapter guidance, and post-processing prompts can be read from notes the same way, and a prompt is sent exactly as the note holds it, Markdown included.
 
@@ -351,7 +393,7 @@ Deepgram's biasing depends on the selected **Deepgram model**, which is worth re
 
 **Advanced two-pass transcription (experimental)** is a sub-toggle of the **Advanced settings** master switch (**Settings > Advanced Audio Recorder > Transcription > Advanced settings**), sitting just below the dictionary profiles it reuses. It applies the method from *Whisper: Courtside Edition* (arXiv:2602.18966) inside the plugin: instead of one recognition pass, the recording is transcribed twice. Between the passes a team of LLM agents mines the first (draft) transcript for the meeting's domain context - the topic, proper names, domain jargon, and especially English technical terms and acronyms spoken inside another language - and assembles it into a compact hint that the second pass receives as a decoding bias. The second pass re-decodes the same audio leaning toward the right names and spellings while still checking against the acoustics; unlike an LLM edit of the text, it actually re-listens to the recording.
 
-The mode targets the words a single pass gets wrong most stubbornly in, for example, Russian technical meetings: Russian proper names (rare, inflected, easily invented), professional jargon, and English terms and acronyms that a single pass transliterates ("кубернетис", "си ай си ди") or spells out. The agents put the canonical spellings (`Kubernetes`, `CI/CD`) into the second pass's hint, and the second pass asks for the language the first pass detected, so an English-heavy hint does not flip a Russian recording into English. Asking is not always enough: Mistral Voxtral reads no language hint at all, and any engine may detect afresh, so the language the second pass actually came back in is compared against the first pass's and a pass that drifted is discarded in favor of the baseline.
+The mode targets the words a single pass gets wrong most stubbornly in, for example, Russian technical meetings: Russian proper names (rare, inflected, easily invented), professional jargon, and English terms and acronyms that a single pass transliterates ("кубернетис", "си ай си ди") or spells out. The agents put the canonical spellings (`Kubernetes`, `CI/CD`) into the second pass's hint, and the second pass asks for the language the first pass detected, so an English-heavy hint does not flip a Russian recording into English. Asking is not always enough: Mistral Voxtral reads no language hint at all, and any engine may detect afresh, so the language the second pass actually came back in is compared against the first pass's, part by part for a recording that is split, and a pass with any part that drifted is discarded in favor of the baseline.
 
 **It is off by default and costs real money and time when on:** every file runs two engine passes (roughly 2x the engine cost and duration) plus four to six sequential LLM calls on the engine its own **Context agents engine** row names, which sits beside the two-pass toggle so this mode can run on a different service from post-processing, and because a keyword-biased engine such as Deepgram reads only a keyterm list it runs two fewer of them, skipping the topic and sentence agents it does not need. On a cheap LLM model the money is small, but the sequential calls add latency. Turn it on for the recordings where names and terminology matter, and leave the normal single pass for everything else. The regular LLM post-processing still runs afterwards, on top of whichever pass won. Because that choice is usually made per recording, the **Transcribe audio** dialog carries its own **Advanced two-pass transcription** toggle that overrides this saved setting for a single run: enable the pricier pass for one important meeting, or skip it for a routine file, without changing the default. The toggle defaults from your saved setting, and the length safeguard stays in the settings tab.
 
@@ -460,7 +502,7 @@ Options toggled mid-run do **not** change an in-flight job: the run snapshots it
 While a transcription runs, the dialog shows a **progress bar**, a live **elapsed-time counter**, and a status label that reports the current stage (preparing audio, transcribing a part, post-processing). The buttons let you control the run:
 
 - **Cancel** - stops the run. For endpoints that accept direct browser requests (the normal case), pressing **Cancel** aborts the in-flight request immediately and releases the connection. Only when an endpoint refuses browser (CORS) requests and the plugin falls back to Obsidian's own request channel does cancellation wait until that request returns or hits the timeout. Every model call the run makes answers the same signal, so a Cancel pressed during [LLM post-processing](llm-post-processing.md), the context agents, or a pause between retries ends the call in flight rather than paying for it to finish.
-- **Minimize** - sends the job to the status bar so you can keep working. The status bar then shows live transcription progress; **click it** (or focus it and press Enter) to reopen the dialog. **Closing** the dialog instead of minimizing **cancels** the running job.
+- **Minimize** - sends the job to the status bar so you can keep working. The status bar then shows live transcription progress; **click it** to reopen the dialog. It is a button, so it can also be reached with the keyboard and pressed with Enter or Space, and a screen reader announces it as **Restore transcription window**. **Closing** the dialog instead of minimizing **cancels** the running job.
 - **Recording takes precedence** in the status bar, so an active recording's status is shown first and the transcription progress reappears once recording finishes.
 
 Each network request - one part of a long recording, or a whole-file upload - is bounded by the **Request timeout** (default **10 minutes**, range **1-60**), so a stalled request fails that part and is reported rather than hanging the run. Underneath this cap, a whole-file upload scales its own timeout with payload size, so a large but healthy upload is not aborted prematurely; the **Request timeout** value is the ceiling.
@@ -474,6 +516,8 @@ A part whose transcript overruns the model's **output-token limit** (which Gemin
 ## Transcribing a folder
 
 Right-click a folder and choose **Transcribe every recording in this folder** to queue all the recordings in it, including those in the folders under it. The dialog that opens lists what will run and roughly what it will cost, so a month of recordings is approved once instead of opened one at a time.
+
+The same action is the palette command **Transcribe every recording in a folder**, which asks for the folder in a picker listing every folder that holds a recording. From a terminal, `advanced-audio-recorder:transcribe-folder` queues a folder and `advanced-audio-recorder:queue` shows and drives the queue - see [Command line](command-line.md#folders-and-the-transcription-queue).
 
 The queue runs **one recording at a time**. The engines it calls are paid, rate limited, and slow on a long recording, and firing a folder's worth of requests at once is the way to be refused by all of them at once. Each recording's state is shown as it goes: waiting, transcribing, done, or failed with the reason the engine gave. A recording that fails does not stop the rest.
 
@@ -489,11 +533,18 @@ Every queued run counts into the **"Spent this session"** total by the same rule
 
 A recording longer than the engine takes in one request is sent in parts, and a part can fail on its own: a rate limit, a provider fault, a request the engine refused. The run keeps every part that came back rather than throwing the transcript away, warns about the gap in a callout, and **records what it lost** in the recording's sidecar, with the time bounds of each missing part and the reason the engine gave.
 
+The callout names every missing part with the same reason, so it is still in the note after the notice that also showed it has closed. A part Gemini answered with timecodes outside it twice is listed too, since only some of its lines are in the transcript. A run of a 24-minute recording whose first part the model refused starts with:
+
+```markdown
+> [!warning] Transcription incomplete: the 0:00-12:06 segment is missing from the transcript below, in whole or in part.
+> - The 0:00-12:06 segment: Gemini blocked the request (OTHER) and returned no output. Adjust the input or check the provider content policy.
+```
+
 **Transcribe the parts that failed**, in the recording's context menu, the editor menu of its embed, and the command palette, sends **exactly those parts again** and splices what comes back into the transcript already written. The part boundaries are a pure function of the recording's length and the engine's limit, so the same recording is cut the same way every time and the part that failed is the part that is asked for. That is what makes this a top-up rather than a second run: you are billed for the missing minutes, not for the whole recording.
 
 What it does with the result:
 
-- The stretches that were sent are **replaced wholesale** by what came back for them, and everything outside those stretches is left untouched. The decision is made by stretch rather than by comparing segment starts, because a chunk size or an engine changed since the first run moves the part boundaries: the parts that already succeeded would then come back a few tenths of a second off, and a proximity test would read them as new segments and write the same speech into the transcript twice. Anything you edited by hand inside a retried stretch is overwritten along with the rest of it.
+- The stretches that were sent are **replaced wholesale** by what came back for them, and everything outside those stretches is left untouched. The decision is made by stretch rather than by comparing segment starts, because a chunk size or an engine changed since the first run moves the part boundaries: the parts that already succeeded would then come back a few tenths of a second off, and a proximity test would read them as new segments and write the same speech into the transcript twice. Anything you edited by hand inside a retried stretch is overwritten along with the rest of it. A stretch that fails again and brings nothing back keeps what it held, so the lines a part kept when its timecodes did not fit are not lost to a second failure.
 - Every transcript file the run wrote is **rewritten** with the completed transcript, each in the format it was written in. No second set of files appears beside the first.
 - What still fails is recorded again, so the action can be run once more later; a run that comes back whole clears the record.
 - The speaker names you assigned are **re-applied** to the recovered segments, exactly as a full re-run applies them, so a topped-up transcript does not call the same person both by name and by the engine's own label.
@@ -514,7 +565,7 @@ Cloud transcription is a paid API call, and nobody likes a surprise bill. With *
 - **During a long multi-part run**, a live "Cost so far" line accumulates what the completed transcription parts actually billed.
 - **After the run**, a notice reports the transcription cost together with the running session total, and the dialog shows a **Session spending** block under its own heading. **"Spent this session"** is a per-session counter of everything priced since Obsidian started, kept per engine, and the block states that the run estimated above is not counted in it yet. The line names what the total is made of: runs that could not be priced at all, and steps whose figure is an estimate rather than a count the vendor reported.
 
-Below the breakdown, a **Check current pricing** line links straight to the pricing page of each provider the run uses, so the built-in rates are one click from the authoritative numbers. The transcription cost is computed from what the provider **actually reported billing for** - Deepgram's and OpenAI's billed audio duration, Gemini's token counts split by modality (audio input and the text prompt are billed at different rates) - and falls back to the duration-based estimate when a provider reports nothing. Estimates use **built-in, approximate pay-as-you-go rates** for the common models (`whisper-1`, Groq's `whisper-large-v3`(-turbo) and `distil-whisper`, Deepgram `nova`/`enhanced`/`base` and its hosted Whisper models, Gemini 2.x and 3.x, the Voxtral models, and the OpenAI, Anthropic, Gemini, and Mistral post-processing models); providers change prices, so always verify against the linked pricing page. A model the plugin has no rate for shows "no built-in rate" instead of a wrong number, and such runs are counted separately in the session total rather than silently added as zero. The **local whisper.cpp engine is free** and shows no cost. The LLM steps (context agents, post-processing, auto chapters) are counted in the session total too, and they are priced the same way the transcription is: OpenAI, Anthropic, and Gemini all return the token counts they billed in the same response the text comes from, so a completed step is recorded at **what it cost** rather than at what it was expected to cost. Reasoning tokens, which the models that produce them report separately, are billed at the output rate. The pre-run estimate is the fallback, used for a model with no built-in rate and for a vendor that reported no counts, and the session line says how many steps were priced that way, so an estimate is never presented as a measurement.
+Below the breakdown, a **Check current pricing** line links straight to the pricing page of each provider the run uses, so the built-in rates are one click from the authoritative numbers. The transcription cost is computed from what the provider **actually reported billing for** - Deepgram's and OpenAI's billed audio duration, Gemini's token counts split by modality (audio input and the text prompt are billed at different rates) - and falls back to the duration-based estimate when a provider reports nothing. Estimates use **built-in, approximate pay-as-you-go rates** for the common models (`whisper-1`, Groq's `whisper-large-v3`(-turbo), Deepgram `nova`/`enhanced`/`base` and its hosted Whisper models, Gemini 2.x and 3.x, the Voxtral models, and the OpenAI, Anthropic, Gemini, and Mistral post-processing models); providers change prices, so always verify against the linked pricing page. A model the plugin has no rate for shows "no built-in rate" instead of a wrong number, and such runs are counted separately in the session total rather than silently added as zero. The **local whisper.cpp engine is free** and shows no cost. The LLM steps (context agents, post-processing, auto chapters) are counted in the session total too, and they are priced the same way the transcription is: OpenAI, Anthropic, and Gemini all return the token counts they billed in the same response the text comes from, so a completed step is recorded at **what it cost** rather than at what it was expected to cost. Reasoning tokens, which the models that produce them report separately, are billed at the output rate. The pre-run estimate is the fallback, used for a model with no built-in rate and for a vendor that reported no counts, and the session line says how many steps were priced that way, so an estimate is never presented as a measurement.
 
 ---
 
@@ -522,9 +573,9 @@ Below the breakdown, a **Check current pricing** line links straight to the pric
 
 After transcription, you can optionally pass the transcript through an LLM to **clean up** punctuation and formatting (preserving wording, timestamps, and speakers), **summarize** it into key points and action items, **translate** it into another language, or apply a **custom instruction**. Five providers are available, each with its own default model, and OpenAI is the one selected out of the box:
 
-- OpenAI runs `gpt-5.6-sol` by default.
-- Anthropic runs `claude-opus-4-8` by default.
-- Google Gemini runs `gemini-3.5-flash` by default.
+- OpenAI runs `gpt-6.1-sol` by default.
+- Anthropic runs `claude-opus-5-5` by default.
+- Google Gemini runs `gemini-3.8-flash` by default.
 - Mistral runs `mistral-medium-latest` by default.
 - DeepSeek runs `deepseek-flash` by default.
 
@@ -559,8 +610,8 @@ The **Auto chapters** block and the **Engines** entry stay in settings when **En
 
 ## Security and storage
 
-- **API keys** are stored in the plugin's `data.json` **on this device** and are **never written to diagnostics** output.
-- **Avoid syncing `data.json`** to untrusted locations, since it holds your keys in plain text.
+- **API keys** are kept in Obsidian's keychain (**Settings > Keychain**) **on this device**, not in the plugin's `data.json`, and are **never written to diagnostics** output.
+- **`data.json` holds only the ID** of each linked secret, so syncing it does not copy your keys. The keychain does not sync either, so a second device needs each key linked once under the same ID. A key moved from an earlier version stays in `data.json` until Obsidian next starts and finds it in the keychain.
 - **Local whisper.cpp keeps everything offline** - no key, no upload, no network request - for the most privacy-sensitive recordings.
 
 ---
@@ -569,31 +620,31 @@ The **Auto chapters** block and the **Engines** entry stay in settings when **En
 
 All transcription settings live under **Settings > Advanced Audio Recorder > Transcription**. The global and output settings:
 
-| Setting                             | Description                                                                                             | Default                        |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| **Enable transcription**            | Master toggle that reveals the rest of the section.                                                     | Off                            |
-| **Transcribe after recording**      | Auto-transcribe each saved recording (first file only).                                                 | Off                            |
-| **Show cost estimates**             | Show an approximate API cost before a run and a running session total (cloud engines only).             | On                             |
-| **Transcription engine**            | Whisper API / Deepgram / Google Gemini / Mistral Voxtral / Local whisper.cpp.                           | Whisper API                    |
-| **Language**                        | `auto` to detect, or an ISO code (`en`, `ru`, `es`). Ignored by Voxtral, which detects it itself.       | `auto`                         |
-| **Speaker diarization**             | Request speaker labels (Deepgram, Gemini, and Voxtral only).                                            | Off                            |
-| **Translate speech to English**     | Write the recording down in English whatever was spoken (Whisper API only).                             | Off                            |
-| **Word-level timestamps**           | Per-word timing in JSON file output. Selectable on Whisper API, the one engine that reads the request.  | Off                            |
-| **Request timeout**                 | Minutes before one request is aborted and reported (cloud engines only). Range 1-60.                    | 10                             |
-| **Local run timeout**               | Minutes before the local whisper.cpp process is stopped (that engine only). Range 1-720.                | 120                            |
-| **Advanced settings**               | Master switch revealing the dictionary and the two-pass mode; off keeps one plain pass with no biasing. | Off                            |
-| **Advanced two-pass transcription** | Two engine passes with LLM-generated context biasing the second (roughly 2x cost; experimental).        | Off                            |
-| **Second-pass length safeguard**    | Keep the biased second pass only when its text is at least this fraction of the first pass.             | 0.8                            |
-| **Destination**                     | Insert into note / Save to file / Note and file / Save to file and link it in the note.                 | Insert into note               |
-| **File format**                     | JSON / SubRip (.srt) / WebVTT (.vtt) / Plain text (.txt). Shown when destination is not note-only.      | JSON                           |
-| **Note heading**                    | Heading inserted above the transcript (empty for none).                                                 | `## Transcript`                |
-| **Include timestamps**              | Render timestamps on each line.                                                                         | On                             |
-| **Timestamps as player links**      | Render each timestamp as a `#t=` player link.                                                           | On                             |
-| **Include speakers**                | Render speaker labels (diarization-gated).                                                              | On                             |
-| **Merge speaker turns**             | Merge consecutive same-speaker segments (diarization-gated).                                            | On                             |
-| **Timestamp format**                | Template wrapping `{time}`.                                                                             | `{time}`                       |
-| **Speaker format**                  | Template wrapping `{speaker}` (diarization-gated).                                                      | `**{speaker}**`                |
-| **Line format**                     | Arrangement of `{timestamp} {speaker} {text}`.                                                          | `{timestamp} {speaker} {text}` |
+| Setting                             | Description                                                                                                                               | Default                        |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| **Enable transcription**            | Master toggle that reveals the rest of the section.                                                                                       | Off                            |
+| **Transcribe after recording**      | Auto-transcribe each saved recording (first file only).                                                                                   | Off                            |
+| **Show cost estimates**             | Show an approximate API cost before a run and a running session total (cloud engines only).                                               | On                             |
+| **Transcription engine**            | Whisper API / Deepgram / Google Gemini / Mistral Voxtral / Local whisper.cpp.                                                             | Whisper API                    |
+| **Language**                        | `auto` to detect, an ISO code (`en`, `ru`, `es`), or several separated by commas (`pl, uk`). Ignored by Voxtral, which detects it itself. | `auto`                         |
+| **Speaker diarization**             | Request speaker labels (Deepgram, Gemini, and Voxtral only).                                                                              | Off                            |
+| **Translate speech to English**     | Write the recording down in English whatever was spoken (Whisper API only).                                                               | Off                            |
+| **Word-level timestamps**           | Per-word timing in JSON file output. Selectable on Whisper API, the one engine that reads the request.                                    | Off                            |
+| **Request timeout**                 | Minutes before one request is aborted and reported (cloud engines only). Range 1-60.                                                      | 10                             |
+| **Local run timeout**               | Minutes before the local whisper.cpp process is stopped (that engine only). Range 1-720.                                                  | 120                            |
+| **Advanced settings**               | Master switch revealing the dictionary and the two-pass mode; off keeps one plain pass with no biasing.                                   | Off                            |
+| **Advanced two-pass transcription** | Two engine passes with LLM-generated context biasing the second (roughly 2x cost; experimental).                                          | Off                            |
+| **Second-pass length safeguard**    | Keep the biased second pass only when its text is at least this fraction of the first pass.                                               | 0.8                            |
+| **Destination**                     | Insert into note / Save to file / Note and file / Save to file and link it in the note.                                                   | Insert into note               |
+| **File format**                     | JSON / SubRip (.srt) / WebVTT (.vtt) / Plain text (.txt). Shown when destination is not note-only.                                        | JSON                           |
+| **Note heading**                    | Heading inserted above the transcript (empty for none).                                                                                   | `## Transcript`                |
+| **Include timestamps**              | Render timestamps on each line.                                                                                                           | On                             |
+| **Timestamps as player links**      | Render each timestamp as a `#t=` player link.                                                                                             | On                             |
+| **Include speakers**                | Render speaker labels (diarization-gated).                                                                                                | On                             |
+| **Merge speaker turns**             | Merge consecutive same-speaker segments (diarization-gated).                                                                              | On                             |
+| **Timestamp format**                | Template wrapping `{time}`.                                                                                                               | `{time}`                       |
+| **Speaker format**                  | Template wrapping `{speaker}` (diarization-gated).                                                                                        | `**{speaker}**`                |
+| **Line format**                     | Arrangement of `{timestamp} {speaker} {text}`.                                                                                            | `{timestamp} {speaker} {text}` |
 
 Per-engine fields (base URL, key, model picker, upload chunk size) are documented in [Engines](#engines) above.
 
@@ -620,4 +671,4 @@ Per-engine fields (base URL, key, model picker, upload chunk size) are documente
 - **A part of a long recording is missing** - that part failed; a `> [!warning]` callout names the stretch and a notice explains the cause. Re-run the failed file, or check the engine's quota and key.
 - **A large file uploaded to Whisper** - there is no "file too large" error. Whisper has a hard 25 MB limit, but files over it are resampled to 16 kHz mono and split into chunks automatically, so the run proceeds without an error. If a chunk still fails, lower **Upload chunk size**.
 - **API errors (401/403/quota)** - verify the **API key** and **base URL** for the engine, and check the account's billing or starter credit. A key is only required while the **Base URL** points at the vendor's own host, so a `401` from an endpoint you pointed elsewhere means that endpoint wants a key after all. See the per-engine use-case guides for getting and checking keys, and the [Engines reference](settings-reference.md#transcription) for when the key field may be left empty.
-- **A run pauses and says it is retrying** - the provider refused that request for now, with a rate limit or a fault of its own, and the part is sent again rather than lost. Each part is tried up to three times, honouring the pause the provider asks for through `Retry-After` and otherwise backing off from two seconds. A provider asking to wait longer than a minute is telling you to come back later, so the part is reported missing instead of freezing the run, and **Cancel** ends a pause at once.
+- **A run pauses and says it is retrying** - the provider refused that request for now, with a rate limit or a fault of its own, and the part is sent again rather than lost. Each part is tried up to three times, honouring the pause the provider asks for through `Retry-After` and otherwise backing off from two seconds. A provider asking to wait longer than a minute is telling you to come back later, so the part is reported missing instead of freezing the run, and **Cancel** ends a pause at once. The refusal behind every pause is written to the developer console (**Ctrl+Shift+I**, or **Cmd+Option+I** on macOS) with the attempt it ended, so a run whose last attempt failed for another reason still shows what started the retries. Every retry sends the same audio as the first attempt: a recording that has to be converted for the engine is decoded once per run, and the converted audio is what each attempt and the advanced second pass upload.

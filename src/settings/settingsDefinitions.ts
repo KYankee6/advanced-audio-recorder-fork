@@ -1,14 +1,9 @@
 /**
- * The settings tab described as data: one tree of Obsidian setting definitions
- * that both render paths read.
+ * The settings tab described as data: one tree of Obsidian setting definitions.
  *
- * From Obsidian 1.13 this tree is the tab - the framework renders it, indexes
- * every setting for the settings search, reads and writes the values, runs the
- * validators, and re-evaluates the `visible`/`disabled` predicates. Below 1.13
- * none of that exists, so {@link module:settings/legacySettingsRenderer} walks
- * the same tree with the old `Setting` API. The official migration guide's
- * dual-support path keeps two hand-written implementations instead; for a tab
- * with sixty-odd settings that is a drift generator, and the guide says as much.
+ * This tree is the tab. Obsidian renders it, indexes every setting for the
+ * settings search, reads and writes the values, runs the validators, and
+ * re-evaluates the `visible`/`disabled` predicates.
  *
  * A handful of rows cannot be declared: the documentation callout, the format
  * list blocked per option by an asynchronous encoder probe, the output summary
@@ -41,8 +36,9 @@ import {
 import { diagnosticsPage } from './sections/diagnosticsSection';
 import { enginesPage } from './sections/enginesSection';
 import { fileStorageGroup } from './sections/fileStorageSection';
-import { isSystemAudioLoopbackAvailable } from '../recording/systemAudioSupport';
+import { systemAudioGrantSupport } from '../recording/systemAudioSupport';
 import { llmGroup } from './sections/llmSection';
+import { mobilePage } from './sections/mobileSection';
 import { multiTrackPage } from './sections/multiTrackSection';
 import { outputFormatGroup } from './sections/outputFormatSection';
 import { quickNotesPage } from './sections/quickNotesSection';
@@ -64,10 +60,10 @@ export {
 } from './sections/controlKeys';
 
 export {
+	FILTER_LINE_LIST_CLASS,
 	SETTINGS_BLOCK_ROW_CLASS,
 	SETTINGS_ROOT_CLASS,
 	SETTINGS_SECTION_CLASS,
-	SETTINGS_TAB_CLASS,
 	STACKED_TEXT_CLASS,
 } from './sections/context';
 
@@ -77,11 +73,7 @@ export type {
 	SettingsDefinitionContext,
 } from './sections/context';
 
-export {
-	CONTROL_WRITE_EFFECTS,
-	controlValue,
-	numberControlRejection,
-} from './controlValues';
+export { CONTROL_WRITE_EFFECTS, controlValue } from './controlValues';
 
 /**
  * Builds the tab's definition tree.
@@ -102,7 +94,7 @@ export function buildSettingsDefinitions(
 	// differ between them, and asking it costs a synchronous trip through
 	// Electron's remote module - which is why it is asked here, once per build
 	// of the tree, rather than by each row that reports it.
-	const systemAudioAvailable = isSystemAudioLoopbackAvailable();
+	const systemAudio = systemAudioGrantSupport();
 	return [
 		...sectionItems([
 			{
@@ -130,7 +122,7 @@ export function buildSettingsDefinitions(
 			ctx.settings,
 			ctx.devices,
 			ctx.sampleRates,
-			systemAudioAvailable,
+			systemAudio,
 		),
 		outputFormatGroup(ctx.outputFormat, ctx.settings),
 		fileStorageGroup(ctx.settings),
@@ -140,7 +132,7 @@ export function buildSettingsDefinitions(
 			// tuned with.
 			quickNotesPage(ctx),
 			audioSplittingPage(ctx.settings),
-			multiTrackPage(ctx.settings, ctx.devices, systemAudioAvailable),
+			multiTrackPage(ctx.settings, ctx.devices, systemAudio),
 			audioPlayerPage(ctx.settings),
 			{
 				// Forty-odd settings with a scope of their own: the style guide's
@@ -166,6 +158,7 @@ export function buildSettingsDefinitions(
 			},
 			audioProcessingPage(ctx.settings),
 			audioCleanupPage(ctx.settings),
+			mobilePage(ctx.settings),
 			diagnosticsPage(ctx.diagnostics, ctx.settings),
 		]),
 	];

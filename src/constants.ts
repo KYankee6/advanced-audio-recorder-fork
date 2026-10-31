@@ -287,15 +287,8 @@ export const PLAYER_ICONS = {
 	previousChapter: 'chevron-first',
 	nextChapter: 'chevron-last',
 	chapterLoop: 'repeat-1',
-	/**
-	 * Live cleanup of the playing audio. The older `mic-2` name rather than
-	 * the `mic-vocal` it was renamed to in Lucide 0.395, because Obsidian
-	 * pins its icon set and only reached 0.446 in 1.7, while the manifest
-	 * supports 1.6.6. Both names draw the same glyph, and the old one still
-	 * resolves in current Lucide, so this is the name that resolves on every
-	 * version the plugin runs on.
-	 */
-	voiceBoost: 'mic-2',
+	/** Live cleanup of the playing audio. */
+	voiceBoost: 'mic-vocal',
 	searchMarkers: 'search',
 	speed: 'gauge',
 	copyLink: 'link',
@@ -344,13 +337,6 @@ export const PLAYER_LOOP = false;
 
 /** Seconds the seek area moves per arrow-key press. */
 export const PLAYER_SEEK_KEYBOARD_STEP_SECONDS = 5;
-
-/**
- * Animation frames to wait for the embed to attach to the document before
- * giving up the editor-mode probe (the embed-registry path renders while
- * still detached). At ~60fps this is roughly 1.5 seconds.
- */
-export const PLAYER_ATTACH_WAIT_FRAMES = 90;
 
 /**
  * Animation frames to retry drawing the waveform while the seek area still
@@ -460,25 +446,28 @@ export const DEFAULT_WHISPER_API_MODEL = 'whisper-1';
  * gains ids worth offering, which tops up the saved lists once: a list stays
  * the user's to edit, so an id deleted after that stays deleted.
  */
-export const MODEL_SEED_GENERATION = 2;
+export const MODEL_SEED_GENERATION = 3;
 
 /**
  * Seed model ids for the OpenAI-compatible Whisper API. They populate the
  * model picker on first run and can be extended with custom ids in settings.
  * All return `verbose_json` with segment timestamps, which the provider
  * relies on: `whisper-1` is OpenAI's; the `*-v3*` ids are served by Groq and
- * other compatible hosts. (OpenAI's newer `gpt-4o-transcribe`,
- * `gpt-4o-mini-transcribe`, and `gpt-4o-transcribe-diarize` models are
- * omitted: none of them return `verbose_json` - the diarize variant has its
- * own `diarized_json` format without segment timecodes - so they are
- * incompatible with the timed output the plugin requests. As of July 2026,
- * `whisper-1` remains OpenAI's only model that supports it.)
+ * other compatible hosts. Groq shut `distil-whisper-large-v3-en` down on
+ * August 23, 2025, so it is no longer seeded.
+ *
+ * OpenAI's other transcription models are omitted because none is documented
+ * to return segment timestamps: the speech-to-text guide still names
+ * `whisper-1` as the model to use for them, the `gpt-4o-transcribe` family
+ * returns no `verbose_json`, and `gpt-transcribe` (July 2026) documents no
+ * timestamps either, while `gpt-live-transcribe` is realtime only. OpenAI has
+ * deprecated `whisper-1` for shutdown on February 26, 2027, which leaves this
+ * engine needing a timed successor before then.
  */
 export const WHISPER_API_MODEL_SUGGESTIONS = [
 	'whisper-1',
 	'whisper-large-v3',
 	'whisper-large-v3-turbo',
-	'distil-whisper-large-v3-en',
 ];
 
 /** Where to find the model list for the configured Whisper API host. */
@@ -502,19 +491,20 @@ export const DEFAULT_DEEPGRAM_MODEL = 'nova-3';
 /**
  * Seed Deepgram speech-to-text model ids for the pre-recorded API. They
  * populate the model picker on first run and can be extended with custom ids
- * in settings. Grouped by family: Nova-3, Nova-2 and its named variants,
+ * in settings. Grouped by family: Nova-3 with its medical and pharma
+ * (September 2026, English only) variants, Nova-2 and its named variants,
  * Nova, Enhanced (`enhanced`, `enhanced-meeting`, `enhanced-phonecall`,
  * `enhanced-finance`), Base, and the hosted Whisper sizes. The real-time
- * Flux family (`flux-general-en`, `flux-general-multi`) is omitted - even
- * after gaining word-level timestamps in July 2026 it remains a streaming
- * conversational model for voice agents, not part of the pre-recorded API
- * this plugin uses. See {@link DEEPGRAM_MODELS_DOC_URL} for the
- * authoritative, current list.
+ * Flux family (`flux-general-en`, `flux-general-multi`) is omitted - as of
+ * October 2026 it is still served only on the streaming `/v2/listen`
+ * endpoint, not by the pre-recorded API this plugin uses. See
+ * {@link DEEPGRAM_MODELS_DOC_URL} for the authoritative, current list.
  */
 export const DEEPGRAM_MODEL_SUGGESTIONS = [
 	'nova-3',
 	'nova-3-general',
 	'nova-3-medical',
+	'nova-3-pharma',
 	'nova-2',
 	'nova-2-general',
 	'nova-2-meeting',
@@ -605,15 +595,13 @@ export const VOXTRAL_MAX_REQUEST_BYTES = 1024 * 1024 * 1024;
  * Hard per-request duration ceiling for Voxtral, in seconds: three hours, the
  * length the Voxtral Transcribe 2 announcement documents for one request.
  *
- * Deliberately separate from `VOXTRAL_CAPABILITIES.maxRequestSeconds`, which is
- * the cap `audioPrep` splits on and has to stay unbounded. That cap is proven
- * through a byte proxy ({@link MIN_AUDIO_BYTES_PER_SEC}), so stating three
- * hours there would clear only files under about 10.8 MB and send every longer
- * recording down the decode path, which is the whole-file upload this engine is
- * chosen for. This ceiling is proven exactly instead, against the decoded
- * sample count, which is the first moment the real duration is known and still
- * early enough to refuse locally rather than after uploading several hundred
- * megabytes the endpoint then declines.
+ * Held two ways, by `VOXTRAL_CAPABILITIES`. A container the endpoint reads is
+ * sent whole and the endpoint enforces this itself, because proving it through
+ * a byte proxy ({@link MIN_AUDIO_BYTES_PER_SEC}) would clear only files under
+ * about 10.8 MB and send every longer recording down the decode path, which is
+ * the whole-file upload this engine is chosen for. A recording that is decoded
+ * anyway has its exact length, and is split at this ceiling before anything is
+ * uploaded rather than after several hundred megabytes the endpoint declines.
  */
 export const VOXTRAL_MAX_REQUEST_SECONDS = 3 * 60 * 60;
 
@@ -671,31 +659,35 @@ export const DEFAULT_GEMINI_BASE_URL =
 	'https://generativelanguage.googleapis.com';
 
 /**
- * Default Gemini transcription model id. Moved from `gemini-2.5-flash` to
- * `gemini-3.5-flash` (GA May 2026): the strongest Flash generation, accepts
- * audio, and priced in the same tier as the 2.5 Flash it replaces.
+ * Default Gemini transcription model id. Moved from `gemini-3.5-flash`, which
+ * Google deprecated on October 8, 2026 and now redirects to 3.6 Flash, to
+ * `gemini-3.8-flash` (GA September 2026): the newest Flash, accepts audio, the
+ * model Google's own audio guide uses, and priced the same as 3.6 Flash.
  */
-export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.8-flash';
 
 /**
  * Seed Gemini model ids for the model picker on first run; the list is
- * user-editable. Flash models are cheaper and fast enough for transcription;
- * the GA 3.x generation (all accept audio) leads the list, with the 2.5
- * generation kept while it stays in the catalog. Deliberately excluded as of
- * July 2026: `gemini-3.5-pro` (announced but not released - no public API
- * id), `gemini-3.1-pro-preview` (preview, not GA), the Live and TTS models
- * (live audio-to-audio dialog and speech synthesis, not file transcription),
- * and `gemini-3.5-flash-cyber` (restricted-access pilot). See
- * {@link GEMINI_MODELS_DOC_URL} for the authoritative, current list.
+ * user-editable. Every seed is GA and accepts audio. Flash models are cheaper
+ * and fast enough for transcription and lead the list; `gemini-4-argon`
+ * (October 2026) is the flagship reasoning model for those who want it.
+ *
+ * Left out as of October 2026, each for a reason a request would meet:
+ * `gemini-3.5-flash` and `gemini-3.7-flash` (deprecated, redirected to a newer
+ * Flash), `gemini-2.0-flash` (shut down June 1, 2026), the 2.5 generation
+ * (closed to new projects since September 18, 2026, so a fresh key is refused;
+ * ids a user saved stay theirs), `gemini-3.5-pro` (still no API id),
+ * `gemini-3.1-pro-preview` (preview), the Live and TTS models (live dialog and
+ * speech synthesis, not file transcription), and `gemini-3.5-transcribe`,
+ * which takes its own `audioTranscriptionConfig` request and answers in a
+ * shape this engine does not read. See {@link GEMINI_MODELS_DOC_URL} for the
+ * authoritative, current list.
  */
 export const GEMINI_MODEL_SUGGESTIONS = [
+	'gemini-3.8-flash',
 	'gemini-3.6-flash',
-	'gemini-3.5-flash',
 	'gemini-3.5-flash-lite',
-	'gemini-2.5-flash',
-	'gemini-2.5-pro',
-	'gemini-2.5-flash-lite',
-	'gemini-2.0-flash',
+	'gemini-4-argon',
 ];
 
 /** Authoritative, current list of Gemini models. */
@@ -708,6 +700,15 @@ export const GEMINI_MODELS_DOC_URL =
  * labels, so files under this are sent in one piece instead of chunked.
  */
 export const GEMINI_MAX_REQUEST_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * Largest audio, in bytes, sent inline in the `generateContent` body instead
+ * of through the File API. Google caps an inline request at 20 MB in total,
+ * and base64 grows the bytes by a third, so 14 MB of audio encodes to about
+ * 18.7 MB and leaves room for the instruction and the response schema.
+ * See https://ai.google.dev/gemini-api/docs/audio
+ */
+export const GEMINI_INLINE_MAX_BYTES = 14 * 1024 * 1024;
 
 /**
  * Container MIME types the Gemini File API accepts for audio directly. Any
@@ -850,12 +851,11 @@ export const LLM_PROVIDER_IDS = {
 
 /**
  * Default OpenAI-compatible chat model for LLM post-processing. Moved from
- * `gpt-4o-mini` (dropped from the current catalog) to the GPT-5.6 flagship,
- * matching the Anthropic default, which is also that provider's flagship;
- * `gpt-5.6-terra` and `gpt-5.6-luna` stay in the seed list as the cheaper
- * picks.
+ * `gpt-5.6-sol` to `gpt-6.1-sol` (September 2026), which OpenAI describes as
+ * close to the `gpt-6-astra` flagship at a fifth of its price; cleanup and
+ * summaries do not need the flagship, which stays in the seed list.
  */
-export const DEFAULT_LLM_OPENAI_MODEL = 'gpt-5.6-sol';
+export const DEFAULT_LLM_OPENAI_MODEL = 'gpt-6.1-sol';
 
 /** Default endpoint of the Anthropic account. */
 export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
@@ -864,12 +864,26 @@ export const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com/v1';
 export const ANTHROPIC_API_VERSION = '2023-06-01';
 
 /**
- * Default Anthropic model for transcript post-processing. Kept at
- * `claude-opus-4-8` after the July 2026 catalog review: it is still a current
- * model and the provider's recommended default, while `claude-fable-5` above
- * it is priced for the most demanding work rather than everyday cleanup.
+ * Reasoning effort sent to Claude with every request.
+ *
+ * The same reason Gemini gets {@link GEMINI_LOW_THINKING_LEVEL}: cleanup,
+ * summaries, chapter titles and the context agents are deterministic tasks that
+ * gain nothing from reasoning, while Claude Opus 5.5 and Fable cannot turn
+ * thinking off at all and spend it out of the same `max_tokens` the answer
+ * needs. `low` is the floor every model with the control accepts; a model
+ * without it refuses the field, and the provider then drops it.
  */
-export const DEFAULT_LLM_ANTHROPIC_MODEL = 'claude-opus-4-8';
+export const ANTHROPIC_LOW_EFFORT = 'low';
+
+/**
+ * Default Anthropic model for transcript post-processing. Moved from
+ * `claude-opus-4-8`, now a legacy model, to `claude-opus-5-5` (September
+ * 2026): the provider's recommended starting point and cheaper than the Opus
+ * it replaces. It cannot turn thinking off, which is why every request asks
+ * for {@link ANTHROPIC_LOW_EFFORT}; `claude-fable-5-1` above it is priced for
+ * the most demanding work rather than everyday cleanup.
+ */
+export const DEFAULT_LLM_ANTHROPIC_MODEL = 'claude-opus-5-5';
 
 /**
  * Default Mistral chat model for transcript post-processing. Mistral Medium is
@@ -938,35 +952,34 @@ export const LLM_MAX_TOKENS_STEP = 1;
 
 /**
  * Seed OpenAI chat model ids for the LLM model picker on first run; the list
- * is user-editable. The GPT-5.6 family (released July 2026) is the current
- * text-model catalog: `gpt-5.6-sol` is the flagship (alias `gpt-5.6`),
- * `gpt-5.6-terra` balances intelligence and price, and `gpt-5.6-luna` is the
- * cheapest for high volume. The previous `gpt-4o*` / `gpt-4.1*` / `o4-mini`
- * seeds were removed: they no longer appear in the current catalog (`o4-mini`
- * was retired on February 13, 2026, and the 4.x block left the text-model
- * pages with the GPT-5.6 launch), though ids a user saved keep working while
- * the API still serves them. See {@link OPENAI_MODELS_DOC_URL} for the
- * current list.
+ * is user-editable. The GPT-6 generation (September 2026) is the current
+ * catalog: `gpt-6.1-sol` is the everyday pick, `gpt-6-astra` the flagship for
+ * the hardest prompts, and `gpt-6-luna` the cheapest for high volume.
+ * `gpt-6-sol` is left out because `gpt-6.1-sol` supersedes it, and the GPT-5.6
+ * family no longer leads the catalog, though it is not deprecated and ids a
+ * user saved keep working. See {@link OPENAI_MODELS_DOC_URL} for the current
+ * list.
  */
 export const LLM_OPENAI_MODEL_SUGGESTIONS = [
-	'gpt-5.6-sol',
-	'gpt-5.6-terra',
-	'gpt-5.6-luna',
+	'gpt-6.1-sol',
+	'gpt-6-astra',
+	'gpt-6-luna',
 ];
 
 /**
  * Seed Anthropic model ids for the LLM model picker on first run; the list is
- * user-editable. `claude-sonnet-5` (GA June 2026) replaces
- * `claude-sonnet-4-6`, which the catalog moved to the legacy tier;
- * `claude-fable-5` is the most capable current model but is priced above the
- * Opus tier, so it is listed after the everyday picks. See
+ * user-editable. The 5.5 generation (September and October 2026) replaces
+ * Opus 4.8, Sonnet 5 and Haiku 4.5, which the catalog moved to the legacy
+ * tier; `claude-fable-5-1` is the most capable current model but is priced
+ * above the Opus tier, so it is listed after the everyday picks. The Mythos
+ * models are left out because only verified organisations can call them. See
  * {@link ANTHROPIC_MODELS_DOC_URL} for the current list.
  */
 export const LLM_ANTHROPIC_MODEL_SUGGESTIONS = [
-	'claude-opus-4-8',
-	'claude-sonnet-5',
-	'claude-haiku-4-5',
-	'claude-fable-5',
+	'claude-opus-5-5',
+	'claude-sonnet-5-5',
+	'claude-haiku-5-5',
+	'claude-fable-5-1',
 ];
 
 /**
@@ -1095,6 +1108,49 @@ export const DEFAULT_CHAPTER_PROMPT_PROFILE_ID = 'default';
 export const DEFAULT_LLM_CLEANUP_PROFILE_ID = 'default-llm-cleanup';
 export const DEFAULT_LLM_SUMMARY_PROFILE_ID = 'default-llm-summary';
 export const DEFAULT_LLM_CUSTOM_PROFILE_ID = 'default-llm-custom';
+
+/**
+ * Id of the cleanup profile for language lessons, shipped beside the default
+ * one. A stable literal like the defaults' ids, because the migration that
+ * hands it to an install which predates it finds it by this id.
+ */
+export const LANGUAGE_LESSON_CLEANUP_PROFILE_ID =
+	'shipped-llm-cleanup-language-lesson';
+
+/** Name the shipped language lesson cleanup profile carries. */
+export const LANGUAGE_LESSON_CLEANUP_PROFILE_NAME = 'Language lesson';
+
+/**
+ * Cleanup instruction for a recorded language lesson, where a student and a
+ * tutor switch between the language being learned and one they share. It
+ * names no language: which ones a lesson holds is the transcript's to say, and
+ * the clause appended for a transcript that switches language names them.
+ * Built from a profile written for a Polish lesson with a Ukrainian tutor, with
+ * the language pair taken out.
+ */
+export const LANGUAGE_LESSON_CLEANUP_PROMPT = [
+	'You are an expert multilingual transcription editor. The transcript is a recording of a language lesson: a student learning a language talks with a tutor, and both switch between the language being learned and a language they share, between sentences or inside one sentence.',
+	'',
+	'Languages',
+	"- Keep every phrase in the language it was spoken in, written in that language's own script and spelling.",
+	"- Never translate, and never respell a phrase of one language in another language's orthography.",
+	'- A word of one language quoted inside a sentence in the other stays as it was spoken.',
+	'',
+	'Corrections',
+	'- Correct punctuation, capitalization, and clear speech-recognition errors.',
+	'- Do not rebuild a phrase from what a fluent speaker would probably have said, and never add words that were not spoken. When a passage cannot be corrected with confidence, leave it as it is.',
+	'',
+	"The student's mistakes",
+	"- The student's mistakes are the record of the lesson. Keep their grammar, word choice, endings, and word order exactly as spoken, together with hesitations, self-corrections, and unfinished attempts.",
+	"- When the tutor corrects the student, keep both the student's version and the tutor's correction.",
+	'- Keep dictation, repeated words, and spelled-out letters as they were said.',
+	'',
+	'Structure',
+	'- Keep every timestamp, audio link, and speaker label exactly as it appears, each line in its place and in its order.',
+	'- Do not merge, split, reorder, or omit lines, and add no headings, summaries, notes, language tags, or comments.',
+	'',
+	'Return only the cleaned transcript, with no preamble and no code fence.',
+].join('\n');
 
 /**
  * Name every seeded profile carries. A profile the plugin created rather than
@@ -1422,6 +1478,9 @@ export const COMMAND_IDS = {
 	mergeTranscriptLines: 'merge-transcript-lines',
 	generateChapters: 'generate-chapters-from-transcript',
 	deleteRecording: 'delete-recording',
+	deleteRecordingAndLink: 'delete-recording-and-link',
+	copyTimestampLink: 'copy-timestamp-link',
+	transcribeFolder: 'transcribe-folder',
 	togglePlayback: 'toggle-playback',
 	stopPlayback: 'stop-playback',
 	skipPlaybackBack: 'skip-playback-back',
@@ -1435,8 +1494,19 @@ export const COMMAND_IDS = {
 	searchMarkers: 'search-markers',
 	retryFailedParts: 'retry-failed-transcription-parts',
 	openTranscriptionQueue: 'open-transcription-queue',
+	openRecordingPanel: 'open-recording-panel',
 	exportChapters: 'export-chapters-and-markers',
 	addPlaybackBookmark: 'add-playback-bookmark',
 	addPlaybackChapter: 'add-playback-chapter',
 	showReleaseNotes: 'show-release-notes',
 } as const;
+
+/** View type the recording panel is registered under. */
+export const RECORDING_PANEL_VIEW_TYPE = 'advanced-audio-recorder-panel';
+
+/**
+ * Local-storage key recording that the recording panel was placed in the
+ * sidebar on this device, so a panel the user closed is not put back.
+ */
+export const RECORDING_PANEL_PLACED_KEY =
+	'advanced-audio-recorder-panel-placed';

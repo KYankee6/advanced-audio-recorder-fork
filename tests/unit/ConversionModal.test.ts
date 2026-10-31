@@ -51,7 +51,10 @@ jest.mock('src/utils/LinkUpdater', () => ({
 jest.mock('src/audio/AudioFormatConverter', () => ({
 	...require('../mocks/modules/audioFormatConverter'),
 	decodeAudioBlob: jest.fn().mockResolvedValue({}),
-	convertBlobToFormatBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(8)),
+	convertBlobToFormatBuffer: jest.fn().mockResolvedValue({
+		data: new ArrayBuffer(8),
+		sampleRateChange: null,
+	}),
 }));
 
 // Mock AudioEncoder
@@ -86,11 +89,9 @@ describe('ConversionModal', () => {
 		createdFile = { path: 'Recordings/recording.webm' };
 		mockApp = createMockApp({
 			vault: {
+				readBinary: jest.fn().mockResolvedValue(new ArrayBuffer(100)),
 				adapter: {
 					exists: jest.fn().mockResolvedValue(false),
-					readBinary: jest
-						.fn()
-						.mockResolvedValue(new ArrayBuffer(100)),
 				},
 				createBinary: jest.fn().mockResolvedValue(createdFile),
 			},
@@ -283,11 +284,15 @@ describe('ConversionModal', () => {
 		});
 
 		it('shows a background notice when closed mid-conversion', async () => {
-			let resolveConversion: (data: ArrayBuffer) => void = () =>
-				undefined;
+			let resolveConversion = (): void => undefined;
 			jest.mocked(convertBlobToFormatBuffer).mockReturnValueOnce(
-				new Promise<ArrayBuffer>((resolve) => {
-					resolveConversion = resolve;
+				new Promise((resolve) => {
+					resolveConversion = (): void => {
+						resolve({
+							data: new ArrayBuffer(8),
+							sampleRateChange: null,
+						});
+					};
 				}),
 			);
 			const { modal, progressEl } = createModal();
@@ -304,12 +309,32 @@ describe('ConversionModal', () => {
 			expect(background).toBeDefined();
 			expect(background?.timeout).toBe(0);
 
-			resolveConversion(new ArrayBuffer(8));
+			resolveConversion();
 			await conversionPromise;
 
 			// Progress was mirrored into the notice and it was hidden
-			expect(background?.setMessage).toHaveBeenCalled();
+			expect(noticeText(defined(background))).toMatch(
+				/^Converting "recording\.wav": Removing source file\.\.\. Cancel$/,
+			);
 			expect(background?.hide).toHaveBeenCalled();
+		});
+
+		// The failure is told by the service, and the form stays so the user
+		// can change the format and try again.
+		it('stays open on a failed conversion without saying it converted', async () => {
+			jest.mocked(convertBlobToFormatBuffer).mockRejectedValueOnce(
+				new Error('no encoder'),
+			);
+			const { modal, progressEl } = createModal();
+			const close = jest.spyOn(modal, 'close');
+
+			await runConversion(modal, progressEl);
+
+			expect(close).not.toHaveBeenCalled();
+			expect(progressEl.textContent).toBe('Error: no encoder');
+			expect(noticeInstances.map(noticeText)).toEqual([
+				'Conversion failed: no encoder',
+			]);
 		});
 
 		it('does not show a background notice when closed while idle', () => {
@@ -433,9 +458,7 @@ describe('ConversionModal', () => {
 		});
 	});
 
-	// -----------------------------------------------------------------
 	// The controls a user actually touches
-	// -----------------------------------------------------------------
 
 	describe('what the user picked reaches the conversion', () => {
 		/**
@@ -607,15 +630,20 @@ describe('ConversionModal', () => {
 			expect(settingRow('Bitrate').el.style.display).toBe('none');
 		});
 
-		it('locks the button for the length of the conversion', async () => {
-			// A second press mid-run would start a second conversion over the
-			// same file; the disabled button is the only thing stopping it.
+		// A second press mid-run would start a second conversion over the same
+		// file. The disabled button is what a mouse meets, but a press can
+		// still arrive, from the keyboard or a click queued before the
+		// repaint, so the dialog frame's exclusive run is what guarantees one.
+		it('locks the button for the length of the conversion and starts no second one', async () => {
 			let settle = (): void => undefined;
 			jest.mocked(convertBlobToFormatBuffer).mockImplementationOnce(
 				() =>
 					new Promise((resolve) => {
 						settle = (): void => {
-							resolve(new ArrayBuffer(8));
+							resolve({
+								data: new ArrayBuffer(8),
+								sampleRateChange: null,
+							});
 						};
 					}),
 			);
@@ -625,11 +653,83 @@ describe('ConversionModal', () => {
 			convert.click();
 			await tick();
 			expect(convert.disabled).toBe(true);
+			convert.click();
+			await tick();
 
 			settle();
 			await tick();
 			await tick();
 			expect(convert.disabled).toBe(false);
+			expect(
+				jest.mocked(convertBlobToFormatBuffer),
+			).toHaveBeenCalledTimes(1);
+		});
+
+		/**
+		 * A conversion that runs until its cancellation fires, the way the
+		 * real ladder stops, so a test proves the dialog's token reaches it.
+		 */
+		function convertUntilCancelled(): void {
+			jest.mocked(convertBlobToFormatBuffer).mockImplementationOnce(
+				(_blob, _format, _bitrate, _onProgress, options) =>
+					new Promise((_resolve, reject) => {
+						options?.cancellation?.signal?.addEventListener(
+							'abort',
+							() => {
+								reject(new Error('stopped'));
+							},
+						);
+					}),
+			);
+		}
+
+		it('offers Cancel only while the conversion runs, and stops it', async () => {
+			convertUntilCancelled();
+			const { convert } = openDialog();
+			const cancel = defined(
+				allButtons().find((entry) => entry.label === 'Cancel'),
+			);
+			const cancelEl = defined(cancel.buttonEl);
+			expect(cancelEl.style.display).toBe('none');
+
+			convert.click();
+			await tick();
+			expect(cancelEl.style.display).not.toBe('none');
+
+			await cancel.click();
+			await tick();
+			await tick();
+
+			expect(mockApp.vault.createBinary).not.toHaveBeenCalled();
+			expect(jest.mocked(updateLinksInVault)).not.toHaveBeenCalled();
+			expect(noticeInstances.map(noticeText)).toEqual([
+				'Cancelled converting "recording.wav".',
+			]);
+			expect(cancelEl.style.display).toBe('none');
+			expect(convert.disabled).toBe(false);
+		});
+
+		it('leaves a notice whose Cancel stops a conversion the dialog was closed on', async () => {
+			convertUntilCancelled();
+			const { modal, convert } = openDialog();
+			convert.click();
+			await tick();
+
+			modal.onClose();
+			const background = defined(noticeInstances[0]);
+			const message = background.initialMessage as DocumentFragment;
+			el(message, MODAL.noticeAction).click();
+			expect(noticeText(background)).toBe(
+				'Converting "recording.wav": cancelling... Cancel',
+			);
+			await tick();
+			await tick();
+
+			expect(mockApp.vault.createBinary).not.toHaveBeenCalled();
+			expect(background.hide).toHaveBeenCalled();
+			expect(noticeInstances.slice(1).map(noticeText)).toEqual([
+				'Cancelled converting "recording.wav".',
+			]);
 		});
 	});
 });

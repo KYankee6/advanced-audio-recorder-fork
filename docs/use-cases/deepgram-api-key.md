@@ -51,7 +51,7 @@ Open **Settings > Advanced Audio Recorder** and scroll to the **Transcription** 
 2. Set **Transcription engine** to **Deepgram**.
 3. Open **Engines** and then the **Deepgram** page, where the service itself is configured.
 4. In **Base URL**, leave the default `https://api.deepgram.com/v1`. Only change this if Deepgram tells you to use a different endpoint.
-5. Paste the key you copied into **Deepgram API key**.
+5. On the **Deepgram API key** row, click **Link...**. In Obsidian's secret picker choose **Add secret...** (it opens straight away while the keychain is empty), enter an ID such as `deepgram-api-key`, paste your key as the secret, and save. The key is kept in Obsidian's keychain on this device; the plugin stores only the ID.
 6. In **Model**, pick a model. The default is `nova-3`, and the other options are listed under [Choosing a model](#choosing-a-model).
 
 | Field                    | What to enter                              | Where              | Default                       |
@@ -61,7 +61,7 @@ Open **Settings > Advanced Audio Recorder** and scroll to the **Transcription** 
 | **Deepgram API key**     | The key copied from the Deepgram Console   | Engines > Deepgram | (empty)                       |
 | **Model**                | `nova-3` (or a named variant)              | Engines > Deepgram | `nova-3`                      |
 
-![The Deepgram engine page under Engines, with the Base URL, Deepgram API key and Model rows](../images/settings-engine-deepgram.png)
+![The Deepgram engine page under Engines, with the Base URL, Deepgram API key keychain picker and Model rows](../images/settings-engine-deepgram.png)
 
 The **Model** row is a dropdown over the seeded ids, and the **Model catalogue** entry below it is where you add an id Deepgram supports or drop one you do not use. A link to Deepgram's authoritative model catalogue - [https://developers.deepgram.com/docs/model](https://developers.deepgram.com/docs/model) - closes the **Model** row's description.
 
@@ -105,7 +105,7 @@ The **Model catalogue** on the Deepgram engine page is seeded with the families 
 
 | Model family       | Example ids                                                                                   | Notes                                                |
 | ------------------ | --------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| **Nova-3**         | `nova-3`, `nova-3-general`, `nova-3-medical`                                                  | Default; Deepgram's current general-purpose model.   |
+| **Nova-3**         | `nova-3`, `nova-3-general`, `nova-3-medical`, `nova-3-pharma`                                 | Default; Deepgram's current general-purpose model.   |
 | **Nova-2**         | `nova-2`, `nova-2-meeting`, `nova-2-phonecall`, `nova-2-finance`, others                      | Named variants tuned for meetings, phone calls, etc. |
 | **Nova**           | `nova`, `nova-general`, `nova-phonecall`                                                      | Earlier Nova generation.                             |
 | **Enhanced**       | `enhanced`, `enhanced-meeting`, `enhanced-phonecall`, `enhanced-finance`                      | Mid-tier accuracy.                                   |
@@ -128,15 +128,15 @@ The plugin sends one request per transcription job (whole-file, up to 2 GB), so 
 
 ## Privacy
 
-- Your **Deepgram API key** is stored in the plugin's `data.json` on **this device only**. It is never written into the **System info** diagnostics report.
-- Avoid syncing `data.json` to untrusted locations, since it holds your key.
+- Your **Deepgram API key** is kept in Obsidian's keychain (**Settings > Keychain**) on **this device only**, not in the plugin's `data.json`. It is never written into the **System info** diagnostics report.
+- The keychain does not sync, so on another device link the key once more under the same ID.
 - Deepgram is a **cloud** service: your audio is uploaded to Deepgram's servers for transcription. If you need everything to stay offline, use [local whisper.cpp](../use-cases/local-whisper-cpp.md) instead - but note it cannot diarize.
 
 ## Troubleshooting
 
 | Symptom                                        | Likely cause and fix                                                                                                                                                                         |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Authentication / 401 error**                 | The **Deepgram API key** is wrong, has a stray space, or was revoked. Re-copy it from the Console's **API Keys** page and paste it again.                                                    |
+| **Authentication / 401 error**                 | The **Deepgram API key** is wrong, has a stray space, or was revoked. Re-copy it from the Console's **API Keys** page and update the secret on **Settings > Keychain**.                      |
 | **Out of credit / payment error**              | Your free starter credit is used up. Add billing in the **Deepgram Console** to continue.                                                                                                    |
 | **Model not found / invalid model**            | The **Model** id on the Deepgram engine page is not one Deepgram serves. Pick a seeded id (for example `nova-3`) or check the [model catalogue](https://developers.deepgram.com/docs/model). |
 | **Everything is one speaker**                  | **Speaker diarization** is off, or the audio truly has one dominant voice. Confirm the toggle is on (Step 4) and that both voices are audible.                                               |

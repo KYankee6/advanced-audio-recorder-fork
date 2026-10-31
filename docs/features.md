@@ -27,6 +27,7 @@ Advanced Audio Recorder is a recording plugin for [Obsidian](https://obsidian.md
 - [LLM post-processing](#llm-post-processing)
 - [Auto chapters](#auto-chapters)
 - [Quick notes](#quick-notes)
+- [Recording panel](#recording-panel)
 - [Diagnostics](#diagnostics)
 - [Feature matrix](#feature-matrix)
 
@@ -36,17 +37,17 @@ Advanced Audio Recorder is a recording plugin for [Obsidian](https://obsidian.md
 
 ## Recording
 
-Start and stop a recording from the **microphone icon** in the left ribbon or with the `Start/stop recording` command. While recording, the ribbon icon turns red and pulses, and the **status bar** shows `Recording...` with **Pause** and **Stop** buttons. When you stop, the plugin flushes its buffers, assembles the file, writes it to your save location, and inserts an embed link (`![[filename.ext]]`) into the active note. For longer recordings a save-progress bar walks through stages (`Saving...` > `Flushing buffers...` > `Assembling audio...` > `Writing file...` > `Cleaning up...` > `Saved`) while the ribbon shows a save icon.
+Start and stop a recording from the **microphone icon** in the left ribbon or with the `Start/stop recording` command. While recording, the ribbon icon turns red and pulses, and the **status bar** shows `Recording...` with **Pause** and **Stop** buttons. When you stop, the plugin flushes its buffers, assembles the file, writes it to your save location, and inserts an embed link into the active note, written in your vault's link format (`![[filename.ext]]` with the default wikilinks). For longer recordings a save-progress bar walks through stages (`Saving...` > `Flushing buffers...` > `Assembling audio...` > `Writing file...` > `Cleaning up...` > `Saved`) while the ribbon shows a save icon.
 
-To choose which microphone is used, run the `Select audio input device` command. It opens a quick-pick modal listing the detected input devices; choosing one saves it to settings immediately and shows a confirmation notice.
+To choose which microphone is used, run the `Select audio input device` command. It opens a quick-pick list of the detected input devices with the one in use marked, and choosing one saves it to settings immediately and shows a confirmation notice.
 
 Learn more: [Recording](recording.md)
 
 ## Command line (desktop)
 
-On Obsidian 1.12.2 and later the desktop app takes commands from a terminal, and the plugin answers four: `advanced-audio-recorder` reports what the recorder is doing, `:record` starts a session, `:stop` stops and saves it, and `:transcribe --file <path>` transcribes an audio file in the vault. Each answers with one line - the state it left behind, or the reason it did nothing, including the reason a start failed or a transcription cannot run. Nothing here exists on mobile, or on an older desktop build.
+The desktop app takes commands from a terminal, and the plugin answers one for every action it has: recording, the actions on a recording, transcribing into a note, naming speakers, chapters, transcript edits, playback, markers, the queue and the marker search. Every action is defined once and offered in three places at the same time - the command palette (and so a hotkey), its context menu, and the command line - so none of them is missing from any. A command names its recording the way Obsidian's own commands name a file, or a note and the recordings it embeds, and answers with what it did or why it did nothing. Nothing here exists on mobile, or on an older desktop build.
 
-Learn more: [From the command line](recording.md#from-the-command-line)
+Learn more: [Command line](command-line.md)
 
 ## Pause and resume
 
@@ -74,7 +75,7 @@ Learn more: [Splitting](splitting.md#automatic-splitting-during-recording)
 
 ## System audio beside the microphone
 
-Turn on **Include system audio** under **Audio input** and a recording captures two tracks - the microphone as the rows beside that switch describe it, and this computer's own output - mixed into one file. It is how the remote participants of a Zoom, Teams or Meet call reach a recording with nothing installed and nothing else configured. Electron grants the machine's output on Windows only, and the row says so where the build cannot; the switch is off on mobile, which cannot open two captures at once, and it stands down while multi-track recording is on, where a track's own source row says the same thing with every answer left open.
+Turn on **Include system audio** under **Audio input** and a recording captures two tracks - the microphone as the rows beside that switch describe it, and this computer's own output - mixed into one file. It is how the remote participants of a Zoom, Teams or Meet call reach a recording with nothing installed and nothing else configured. Electron grants the machine's output on Windows, and on macOS 14.2 or later once **Obsidian** is allowed under **Screen & System Audio Recording** in System Settings, and the row names the reason where the build cannot; the switch is off on mobile, which cannot open two captures at once, and it stands down while multi-track recording is on, where a track's own source row says the same thing with every answer left open.
 
 Learn more: [Recording this computer's own output](recording.md#recording-this-computers-own-output)
 
@@ -86,19 +87,19 @@ Learn more: [Multi-track recording](multi-track-recording.md)
 
 ## Output formats and encoding
 
-The plugin supports 8 output formats - **WebM** (default), **OGG**, **WAV**, **MP3**, **FLAC**, **MP4**, **M4A**, and **AAC** - with availability detected at runtime from your platform's MediaRecorder support. **Online** formats are written in real time by the browser's MediaRecorder; **offline** formats (MP3, FLAC, and sometimes MP4/M4A/AAC) are captured in an intermediate container and re-encoded after you stop, with packets copied without re-encoding when the codec already matches. The settings tab marks offline formats with an `(offline)` label.
+The plugin supports 8 output formats - **WebM** (default), **OGG**, **WAV**, **MP3**, **FLAC**, **MP4**, **M4A**, and **AAC** - with availability detected at runtime from your platform's MediaRecorder support. **Online** formats are written in real time by the browser's MediaRecorder; **offline** formats (MP3, FLAC, AAC, and sometimes MP4/M4A) are captured in an intermediate container and re-encoded after you stop, with packets copied without re-encoding when the codec already matches. The settings tab marks offline formats with an `(offline)` label.
 
 Learn more: [Formats](formats.md)
 
 ## Format conversion
 
-Right-click any audio file (in the File Explorer, on an embed link, or on an embedded player) and choose **Convert audio format** to transcode it to a different format. The dialog offers a **Target format** (with encoder description), a **Bitrate** selection (24-320 kbps, cut to what the target format can write), a **Delete source file** toggle, and an **Update links in notes** choice (`Do nothing`, `Replace source link`, `Insert after source link`). Conversion runs through the streaming Mediabunny pipeline in chunks and re-encodes at the chosen bitrate; converting to WAV always performs a full decode.
+Right-click any audio file (in the File Explorer, on an embed link, or on an embedded player) and choose **Convert audio format** to transcode it to a different format. The dialog offers a **Target format** (with encoder description), a **Bitrate** selection (24-320 kbps, cut to what the target format can write), a **Delete source file** toggle, and an **Update links in notes** choice (`Do nothing`, `Replace source link`, `Insert after source link`). Conversion runs through the streaming Mediabunny pipeline in chunks and re-encodes at the chosen bitrate, WAV targets included; a full decode is only the fallback for a source the pipeline cannot read.
 
 Learn more: [File operations](file-operations.md#convert-audio-format)
 
 ## Manual splitting
 
-Right-click an audio file and choose **Split audio into parts** to break an existing recording into fixed-duration parts. The dialog offers a **Part duration** (1-180 minutes), a **Part name suffix**, a re-encode **Bitrate** (24-320 kbps, hidden for WAV and FLAC sources), a **Delete source file** toggle, and **Update links in notes**. WAV files are split losslessly at the byte level (so even multi-gigabyte files are handled); compressed formats are decoded once and re-encoded per part. Link updates apply across the whole vault and cover both wikilinks and Markdown links.
+Right-click an audio file and choose **Split audio into parts** to break an existing recording into fixed-duration parts. The dialog offers a **Part duration** (1-180 minutes), a **Part name suffix**, a re-encode **Bitrate** (24-320 kbps, hidden for WAV and FLAC sources), a **Delete source file** toggle, and **Update links in notes**. WAV files are split losslessly at the byte level (so even multi-gigabyte files are handled); compressed formats are decoded in one pass and each part is re-encoded as it is cut, without holding the decoded recording in memory. Link updates apply across the whole vault and cover both wikilinks and Markdown links.
 
 Learn more: [Splitting](splitting.md#manual-splitting-existing-file)
 
@@ -144,7 +145,7 @@ Learn more: [Audio player](audio-player.md#voice-boost)
 
 ## Input processing and live feedback
 
-Control the browser's microphone processing and watch live feedback while recording, all under **Audio processing & feedback**. Toggles for **Noise suppression**, **Echo cancellation**, and **Automatic gain control** (all default On) are applied to the input stream and the diagnostics test recording. The **Input level meter** shows a live VU meter in the status bar, **Recording stats** show live elapsed time and growing total size, and the **Mobile recording banner** marks an in-progress recording where there is no ribbon icon.
+Control the browser's microphone processing and watch live feedback while recording, all under **Audio processing & feedback**. Toggles for **Noise suppression**, **Echo cancellation**, and **Automatic gain control** (all default On) are applied to the input stream and the diagnostics test recording. The **Input level meter** shows a live VU meter in the status bar, **Recording stats** show live elapsed time and growing total size. The mobile app has a settings page of its own, **Mobile**, where **Show recording banner** marks an in-progress recording where there is no ribbon icon. The banner can be dragged to one of six places along the top and bottom edges of the screen, and **Banner position** on the same page sets or resets that place.
 
 Learn more: [Recording](recording.md#live-feedback)
 
@@ -180,9 +181,9 @@ Learn more: [Transcription](transcription.md)
 
 Optionally pass a finished transcript through an LLM to **clean up** punctuation and formatting (preserving wording, timestamps, and speakers), **summarize** it into key points and action items, **translate** it into another language, or apply a **custom instruction**. A translation is written beside the original rather than over it, one line per spoken segment, so it carries the recording's own timings and the SubRip and WebVTT outputs come out translated with matching timecodes. The Whisper API additionally offers its own operation for translating the speech into English during recognition. Each task keeps a catalogue of named prompt profiles, so a standup and a client call can be summarized on their own terms. Five engines are offered, each configured once on its own page and each with its own default model:
 
-- **OpenAI** runs `gpt-5.6-sol` by default.
-- **Anthropic (Claude)** runs `claude-opus-4-8` by default.
-- **Google Gemini** runs `gemini-3.5-flash` by default.
+- **OpenAI** runs `gpt-6.1-sol` by default.
+- **Anthropic (Claude)** runs `claude-opus-5-5` by default.
+- **Google Gemini** runs `gemini-3.8-flash` by default.
 - **Mistral** runs `mistral-medium-latest` by default.
 - **DeepSeek** runs `deepseek-flash` by default.
 
@@ -198,13 +199,19 @@ Learn more: [Transcription](transcription.md#auto-chapters)
 
 ## Quick notes
 
-With **Enable quick notes** on its own settings entry, a waveform button joins the recorder's microphone in the ribbon, together with the **Start/stop quick note** command. Press it, dictate, press it again, and the recognized text is inserted at the cursor of the note you started in. The audio is held in memory only and dropped once the text is ready, so nothing is saved to the vault. While it records and while it is processed, the status bar shows it the way it shows a recording, stage by stage. A selectable **quick note profile** can rewrite the dictation with an LLM before it is inserted, turning it into a tidy paragraph, a bulleted list or a task; with the default **None**, the text goes in as it was recognized. The engine that hears the dictation and the engine that rewrites it are picked on their own rows, independently of the engines recordings use.
+With **Enable quick notes** on its own settings entry, a waveform button joins the recorder's microphone in the ribbon, together with the **Start/stop quick note** command. Press it, dictate, press it again, and the recognized text is inserted in the note you started in, where the cursor stood when you started. The audio is held in memory only and dropped once the text is ready, so nothing is saved to the vault. While it records and while it is processed, the status bar shows it the way it shows a recording, stage by stage. A selectable **quick note profile** can rewrite the dictation with an LLM before it is inserted, turning it into a tidy paragraph, a bulleted list or a task; with the default **None**, the text goes in as it was recognized. The engine that hears the dictation and the engine that rewrites it are picked on their own rows, independently of the engines recordings use. With Google Gemini on both rows, one request hears the dictation and rewrites it.
 
 Learn more: [Quick notes](quick-notes.md)
 
+## Recording panel
+
+A sidebar tab under the plugin's microphone icon, placed in the right sidebar the first time the plugin runs with it on a device, shows what the plugin knows about the recording in front of you: the recording opened on its own, or the one a meeting note embeds or links to. Laid out like Obsidian's Properties block, in sections you can fold, it lists the file's duration, size and format, the engine, language and time it was transcribed, and the participants of the recording, each with the speaker label given to their name. One row of icons at its top runs the recording's file actions, the same ones the file menu offers, and ends with buttons that start and stop a recording, show the transcription queue and open the settings. **Open the recording panel** brings a closed panel back.
+
+Learn more: [Recording panel](recording-panel.md)
+
 ## Diagnostics
 
-Three tools under **Diagnostics** help you verify your setup and report problems. **Test recording** captures a 5-second clip with your current settings and plays it back; nothing is saved. **System info** opens a modal with full diagnostics (Obsidian, Electron and Chromium versions, platform, devices, supported formats and codecs, active configuration, and the recording-related settings) plus a **Copy to clipboard** button. API keys and the transcription, player and cleanup settings are left out of it. **Debug mode** enables verbose console logs prefixed with `[AudioRecorder]`.
+Three tools under **Diagnostics** help you verify your setup and report problems. **Test recording** captures a 5-second clip with your current settings and plays it back; nothing is saved. **System info** opens a modal with full diagnostics (Obsidian, Electron and Chromium versions, platform and operating system version, devices, whether this computer's own output can be captured, supported formats and codecs, active configuration, and the recording-related settings) plus a **Copy to clipboard** button. API keys and the transcription, player and cleanup settings are left out of it. **Debug mode** enables verbose console logs prefixed with `[AudioRecorder]`.
 
 ![The System diagnostics modal with the Copy to clipboard button above the JSON snapshot of plugin settings and environment](images/modal-system-info.png)
 
@@ -219,8 +226,8 @@ Learn more: [Troubleshooting](troubleshooting.md) and [Bug reporting guide](BUG_
 | Feature                       | What it does                                                               | Where to configure                              | Deep-dive link                                                 |
 | ----------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------- |
 | Recording                     | Start/stop capture; ribbon, status bar, save-progress feedback             | Ribbon icon / command palette                   | [Recording](recording.md)                                      |
-| Switch input device           | Quick-pick modal to change the microphone                                  | Command palette                                 | [Recording](recording.md#switching-the-input-device)           |
-| Command line (desktop)        | Start, stop, report state, transcribe a file from a terminal               | Obsidian CLI (1.12.2+)                          | [Recording](recording.md#from-the-command-line)                |
+| Switch input device           | Dialog to change the microphone                                            | Command palette                                 | [Recording](recording.md#switching-the-input-device)           |
+| Command line (desktop)        | Every action of the plugin from a terminal, for scripts                    | Obsidian CLI                                    | [Command line](command-line.md)                                |
 | Pause and resume              | Pause and continue a session without losing progress                       | Command palette / status bar                    | [Recording](recording.md#pausing-and-resuming)                 |
 | Markers while recording       | Drop a bookmark or chapter at the live position                            | Status bar / command palette (markers enabled)  | [Recording](recording.md#marking-moments-while-recording)      |
 | Crash recovery                | Recover audio after a crash, power loss, or mid-recording disable          | Automatic modal on next launch                  | [Recording](recording.md#crash-recovery)                       |
@@ -237,11 +244,13 @@ Learn more: [Troubleshooting](troubleshooting.md) and [Bug reporting guide](BUG_
 | Markers and chapters          | Per-file bookmarks and chapters stored in a sidecar                        | Settings > Audio player                         | [Audio player](audio-player.md#markers-and-chapters)           |
 | On-demand audio cleanup       | Offline noise removal and loudness leveling to a new copy                  | Context menu / palette > Clean up audio         | [Audio cleanup](audio-cleanup.md)                              |
 | Live voice boost              | Cleanup stages applied to a recording as it plays                          | Settings > Audio cleanup defaults               | [Audio player](audio-player.md#voice-boost)                    |
-| Input processing and feedback | Noise/echo/AGC toggles, input meter, stats, mobile banner                  | Settings > Audio processing & feedback          | [Recording](recording.md#live-feedback)                        |
+| Input processing and feedback | Noise/echo/AGC toggles, input meter, stats                                 | Settings > Audio processing & feedback          | [Recording](recording.md#live-feedback)                        |
+| Mobile recording banner       | Floating timer and stop button, draggable to six places on screen          | Settings > Mobile                               | [Recording](recording.md#mobile-recording-banner)              |
 | Transcription                 | Speech-to-text via 5 engines, diarization, output formats                  | Settings > Transcription                        | [Transcription](transcription.md)                              |
 | LLM post-processing           | Clean up, summarize, or custom-process a transcript with an LLM            | Settings > Transcription > LLM post-processing  | [LLM post-processing](llm-post-processing.md)                  |
 | Auto chapters                 | LLM-generated titled chapters from an existing transcript                  | Settings > Transcription > Auto chapters        | [Transcription](transcription.md#auto-chapters)                |
 | Quick notes                   | Dictate text at the cursor, optionally rewritten by an LLM profile         | Settings > Quick notes                          | [Quick notes](quick-notes.md)                                  |
+| Recording panel               | Sidebar tab with a recording's details, participants and actions           | Palette > Open the recording panel              | [Recording panel](recording-panel.md)                          |
 | Diagnostics                   | Test recording, system info, debug mode                                    | Settings > Diagnostics                          | [Troubleshooting](troubleshooting.md)                          |
 
 ---

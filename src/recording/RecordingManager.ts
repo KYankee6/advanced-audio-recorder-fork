@@ -70,6 +70,7 @@ import {
 	MediaRecorderCaptureTrack,
 	PcmCaptureTrack,
 } from './CaptureTrack';
+import { errorMessage } from '../errors';
 
 /** File-name part standing in for a device on a system-audio track. */
 const SYSTEM_AUDIO_SOURCE_NAME = 'SystemAudio';
@@ -303,13 +304,13 @@ export class RecordingManager {
 
 	/**
 	 * Toggles recording on/off.
+	 * @returns The reason the start or the stop did not complete, or null
+	 *   once it has, as {@link startRecording} and {@link stopRecording} say
 	 */
-	async toggleRecording(): Promise<void> {
-		if (this.status === RecordingStatus.Idle) {
-			await this.startRecording();
-		} else {
-			await this.stopRecording();
-		}
+	toggleRecording(): Promise<string | null> {
+		return this.status === RecordingStatus.Idle
+			? this.startRecording()
+			: this.stopRecording();
 	}
 
 	/**
@@ -556,14 +557,7 @@ export class RecordingManager {
 	 * one, instead of whichever path its author happened to edit.
 	 */
 	private releaseSessionResources(): void {
-		this.stopLevelMonitor();
-		this.captureLoss.release();
-		for (const track of this.captureTracks) {
-			track.release('while releasing the session');
-		}
-		this.captureTracks = [];
-		stopAllStreams(this.streams);
-		this.streams = [];
+		this.releaseCapture('while releasing the session');
 		this.chunkTargets = [];
 		this.trackOrder = [];
 		this.recordingTimestamp = null;
@@ -572,6 +566,30 @@ export class RecordingManager {
 		this.insertionContext = null;
 		this.session = IDLE_CAPTURE_SESSION;
 		this.markers.clearBuffer();
+	}
+
+	/**
+	 * Gives back the capture half of a session: the microphones, the bridges
+	 * and the meter, with the AudioContexts they hold. Safe to call twice.
+	 *
+	 * A stop calls it as soon as the recorders have delivered their last
+	 * data, ahead of the save. Held until the save was over, the device and
+	 * those contexts stayed open while a long recording was mixed and
+	 * encoded, which can take minutes, and a quick note started meanwhile
+	 * opened the same microphone and contexts of its own on top of the
+	 * decode. Nothing in the save reads them: it works from the files the
+	 * recorders wrote.
+	 * @param when - Names the path, for the log when a track refuses to go
+	 */
+	private releaseCapture(when: string): void {
+		this.stopLevelMonitor();
+		this.captureLoss.release();
+		for (const track of this.captureTracks) {
+			track.release(when);
+		}
+		this.captureTracks = [];
+		stopAllStreams(this.streams);
+		this.streams = [];
 	}
 
 	/**
@@ -829,9 +847,14 @@ export class RecordingManager {
 	 */
 	async stopRecording(): Promise<string | null> {
 		// Block new part rotations from starting while stopping; a
-		// false return means another stop is already in flight
+		// false return means another stop is already in flight. Said as a
+		// Notice, because every button that lands here drops the answer, and
+		// the status reads Recording until the save reports progress, so a
+		// press refused in silence looked like a dead button.
 		if (!this.rotation.requestStop()) {
-			return 'A stop is already in progress.';
+			const busy = 'The last recording is still being saved.';
+			new Notice(busy);
+			return busy;
 		}
 		// The watch belongs to the capture, not to the session, and this is
 		// where the capture ends. Left running for the save that follows, it
@@ -858,6 +881,7 @@ export class RecordingManager {
 			await Promise.all(this.captureTracks.map((track) => track.stop()));
 
 			await this.writeQueue.drain(this.chunkTargets);
+			this.releaseCapture('after the recorders stopped');
 
 			this.finalizer.reportProgress(0, 'Saving...');
 
@@ -897,8 +921,7 @@ export class RecordingManager {
 			this.finalizer.reportProgress(100, 'Saved');
 			new Notice('Recording stopped');
 		} catch (error) {
-			const message =
-				error instanceof Error ? error.message : String(error);
+			const message = errorMessage(error);
 			stopFailure = `Error stopping recording: ${message}`;
 			new Notice(stopFailure);
 			console.error(

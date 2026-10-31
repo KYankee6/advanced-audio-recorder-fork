@@ -19,6 +19,7 @@ import type { AutoChapterService } from 'src/chapters/AutoChapterService';
 import type { TranscriptLinesSource } from 'src/chapters/transcriptSources';
 import { at, defined } from '../helpers/assertions';
 import { flushMicrotasks } from '../helpers/async';
+import { modalInstances } from '../mocks/obsidian';
 
 const loadTranscriptLines = jest.fn();
 jest.mock('src/chapters/transcriptSources', () => ({
@@ -227,14 +228,14 @@ describe('ChapterGenerationModal run settings', () => {
 		await Promise.resolve();
 
 		const model = at(dropdowns(modal), 2);
-		model.value = 'claude-sonnet-5';
+		model.value = 'claude-sonnet-5-5';
 		model.dispatchEvent(new Event('change'));
 		await Promise.resolve();
 		await Promise.resolve();
 
 		at(buttons(modal), 0).click();
 
-		expect(settings.llmAnthropicModel).toBe('claude-sonnet-5');
+		expect(settings.llmAnthropicModel).toBe('claude-sonnet-5-5');
 		expect(settings.geminiModel).toBe('gemini-2.5-pro');
 	});
 
@@ -338,6 +339,38 @@ describe('ChapterGenerationModal with existing chapters', () => {
 		expect(at(buttons(modal), 0).textContent).toBe('Regenerate');
 		at(buttons(modal), 0).click();
 		// Generation waits behind the confirmation dialog.
+		expect(generate).not.toHaveBeenCalled();
+	});
+
+	it('replaces them once the user confirms', async () => {
+		const { modal, hasExistingChapters, generate } = build();
+		hasExistingChapters.mockResolvedValue(true);
+		generate.mockResolvedValue(true);
+		await open(modal);
+		at(buttons(modal), 0).click();
+
+		const confirm = modalInstances.at(-1);
+		// Obsidian's confirmation dialog draws its buttons outside the content.
+		[...defined(confirm).modalEl.querySelectorAll('button')]
+			.find((button) => button.textContent === 'Continue')
+			?.click();
+		await flushMicrotasks();
+
+		expect(generate).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('closing the chapter dialog', () => {
+	it('closes on Cancel without generating', async () => {
+		const { modal, generate } = build();
+		await open(modal);
+		const close = jest.spyOn(modal, 'close');
+
+		defined(
+			buttons(modal).find((button) => button.textContent === 'Cancel'),
+		).click();
+
+		expect(close).toHaveBeenCalledTimes(1);
 		expect(generate).not.toHaveBeenCalled();
 	});
 });

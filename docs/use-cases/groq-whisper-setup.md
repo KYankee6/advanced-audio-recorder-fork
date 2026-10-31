@@ -67,7 +67,7 @@ The free tier is active immediately; you do not need to add billing to start tra
 4. Open **Engines** and then the **Whisper API (OpenAI-compatible)** page.
 5. In **Base URL**, replace the default OpenAI URL with Groq's:
     - `https://api.groq.com/openai/v1`
-6. Paste your Groq key (the `gsk_…` value) into **OpenAI API key**.
+6. On the **OpenAI API key** row, click **Link...**. In Obsidian's secret picker choose **Add secret...** (it opens straight away while the keychain is empty), enter an ID such as `groq-api-key`, paste your Groq key (the `gsk_…` value) as the secret, and save. The key is kept in Obsidian's keychain on this device; the plugin stores only the ID.
 7. Set the **model** (next step) and choose your **Language** and **Transcript output** options as usual.
 
 > **One account, two engines.** The Whisper API and OpenAI engines share a single account, so the **Base URL** and **OpenAI API key** you enter here are the ones OpenAI post-processing reads as well. Pointing them at Groq points both, which is why the key row is named after the account rather than after the engine.
@@ -89,13 +89,12 @@ The exact field labels, order, and conditional rows are described in the [Transc
 
 The **Model** dropdown offers the saved ids, and the **Model catalogue** entry below it is where one is added or deleted. For Groq, choose one of the large Whisper models - they support `verbose_json` with segment timestamps, which the plugin requires.
 
-| Model                        | Use it for                                                 | Trade-off                                |
-| ---------------------------- | ---------------------------------------------------------- | ---------------------------------------- |
-| `whisper-large-v3`           | Best accuracy, full multilingual support.                  | Slightly slower than the turbo variant.  |
-| `whisper-large-v3-turbo`     | Fast multilingual transcription at near-large-v3 accuracy. | Marginally lower accuracy on hard audio. |
-| `distil-whisper-large-v3-en` | English-only, smallest/fastest distilled model.            | English only; not for other languages.   |
+| Model                    | Use it for                                                 | Trade-off                                |
+| ------------------------ | ---------------------------------------------------------- | ---------------------------------------- |
+| `whisper-large-v3`       | Best accuracy, full multilingual support.                  | Slightly slower than the turbo variant.  |
+| `whisper-large-v3-turbo` | Fast multilingual transcription at near-large-v3 accuracy. | Marginally lower accuracy on hard audio. |
 
-The catalogue already holds four ids - `whisper-1`, `whisper-large-v3`, `whisper-large-v3-turbo`, and `distil-whisper-large-v3-en` - so for Groq you can usually select one directly. If a model you want is not listed, use the add button on the **Model catalogue** page, type the exact id (for example `whisper-large-v3-turbo`), and then tap its row to put it to work. If Groq later renames or adds a model, add the new id the same way. The **Whisper API models** link at the end of the **Model** row's description opens the OpenAI speech-to-text reference (<https://developers.openai.com/api/docs/guides/speech-to-text>) for the API shape, while Groq's own model list is on the Groq Console.
+The catalogue already holds three ids - `whisper-1`, `whisper-large-v3`, and `whisper-large-v3-turbo` - so for Groq you can usually select one directly. If a model you want is not listed, use the add button on the **Model catalogue** page, type the exact id (for example `whisper-large-v3-turbo`), and then tap its row to put it to work. If Groq later renames or adds a model, add the new id the same way. The **Whisper API models** link at the end of the **Model** row's description opens the OpenAI speech-to-text reference (<https://developers.openai.com/api/docs/guides/speech-to-text>) for the API shape, while Groq's own model list is on the Groq Console.
 
 > **Important:** The model must return `verbose_json` **with timestamps**. The plugin relies on timed segments to build clickable timecode links and sidecar files. The large Whisper models above all qualify; OpenAI's newer `gpt-4o-transcribe` family does **not** and is intentionally not offered.
 
@@ -153,8 +152,8 @@ If a problem persists, see the [Troubleshooting](../troubleshooting.md) guide an
 
 ## Security and privacy
 
-- Your Groq key is stored in the plugin's `data.json` on this device and is **never** written into the **System info** diagnostics report.
-- Avoid syncing `data.json` to untrusted locations, since it holds your key.
+- Your Groq key is kept in Obsidian's keychain (**Settings > Keychain**) on this device, not in the plugin's `data.json`, and is **never** written into the **System info** diagnostics report.
+- The keychain does not sync, so on another device link the key once more under the same ID.
 - Groq is a cloud service: audio you transcribe is uploaded to Groq's servers. For fully offline transcription that never touches the network, use the [Local whisper.cpp](local-whisper-cpp.md) engine instead.
 
 ---

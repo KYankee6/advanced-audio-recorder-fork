@@ -114,6 +114,8 @@ export const MARKER = {
 export const PLAYBACK = {
 	controls: '.aar-playback-controls',
 	toggle: '.aar-playback-toggle',
+	skipBack: '.aar-playback-skip-back',
+	skipForward: '.aar-playback-skip-forward',
 	mute: '.aar-playback-mute',
 	volume: '.aar-playback-volume',
 	markerControls: '.aar-playback-marker-controls',
@@ -127,14 +129,20 @@ export const STATUS = {
 	recordingControls: '.aar-recording-controls',
 	recordingButtons: '.aar-recording-buttons',
 	recordingLabel: '.aar-recording-label',
+	/** The save or background-task progress bar, which carries its value. */
 	saveProgress: '.aar-save-progress',
-	saveProgressBar: '.aar-save-progress-bar',
 	actionableProgress: '.aar-status-progress-actionable',
 	live: '.aar-recording-live',
 	elapsed: '.aar-recording-time',
 	recordedSize: '.aar-recording-size',
 	inputMeter: '.aar-input-meter',
 	inputMeterFill: '.aar-input-meter-fill',
+} as const;
+
+/** Markup Obsidian's own components render, read where a test checks what they draw. */
+export const OBSIDIAN = {
+	/** The fill of a ProgressBarComponent, whose width is its value. */
+	progressFill: '.setting-progress-bar-inner',
 } as const;
 
 /** The banner the mobile build shows while recording. */
@@ -153,9 +161,15 @@ export const SETTING = {
 	checkbox: '.checkbox-container',
 	/** A toggle rendered in its on state. */
 	toggleOn: '.checkbox-container.is-enabled',
+	/** A row Obsidian draws as a section heading. */
+	heading: '.setting-item-heading',
+	/** The icon-only button a row adds with addExtraButton. */
+	extraButton: '.extra-setting-button',
 	root: '.aar-settings-root',
-	searchInput: '.aar-search-row input',
-	addItemButton: '.aar-add-item-row button',
+	searchInput: '.mock-setting-search-row input',
+	addItemButton: '.mock-setting-add-item-row button',
+	/** The linked secret's ID, as the stand-in for the keychain picker shows it. */
+	secretValue: '.mock-setting-secret-value',
 	custom: '.aar-custom',
 	docCallout: '.aar-doc-callout',
 	docCalloutLink: '.aar-doc-callout-link',
@@ -164,6 +178,40 @@ export const SETTING = {
 	speakerPreview: 'button.aar-speaker-preview',
 	silentChannelConvert: '.aar-silent-channel-convert',
 	formatFallbackNote: '.aar-format-fallback-note',
+} as const;
+
+/** The recording panel, built from the classes of Obsidian's Properties block. */
+export const RECORDING_PANEL = {
+	/** One of the panel's own buttons at the end of its toolbar, by its label. */
+	button: (label: string): string =>
+		`.aar-recording-panel-tools [aria-label="${label}"]`,
+	/** The panel's own buttons, in order. */
+	buttons: '.aar-recording-panel-tools .extra-setting-button',
+	/** The icon button of a file action, by its label. */
+	action: (label: string): string =>
+		`.aar-recording-panel-toolbar > [aria-label="${label}"]`,
+	/** Every file action button, in order. */
+	actions: '.aar-recording-panel-toolbar > .extra-setting-button',
+	/** Every button of the toolbar, file actions first, in order. */
+	toolbarButtons: '.aar-recording-panel-toolbar .extra-setting-button',
+	/** A foldable section. */
+	section: '.metadata-container',
+	/** The heading that folds a section. */
+	sectionHeading: '.metadata-properties-heading',
+	/** A section's title. */
+	sectionTitle: '.metadata-properties-title',
+	/** A section's fold arrow. */
+	foldArrow: '.collapse-indicator',
+	/** One property row. */
+	property: '.metadata-property',
+	/** A property row's key field. */
+	propertyKey: '.metadata-property-key-input',
+	/** A property row's value. */
+	propertyValue: '.metadata-property-value',
+	/** A link in a property value. */
+	propertyLink: '.metadata-property-value .internal-link',
+	/** The hint shown in place of the sections. */
+	hint: '.pane-empty',
 } as const;
 
 /** Modal bodies this plugin renders. */
@@ -175,7 +223,11 @@ export const MODAL = {
 	/** The bar of a transcript line with the handles of the split selection. */
 	timeSpan: '.aar-time-span',
 	recoverySession: '.aar-recovery-session',
+	/** The running clock of a transcription in flight. */
+	transcribeElapsed: '.aar-transcribe-elapsed',
 	silentChannelConvert: '.aar-silent-channel-convert',
+	/** An action inside a Notice, such as Convert to mono or Cancel. */
+	noticeAction: '.aar-notice-action',
 	/**
 	 * The body the release notes are rendered into. Obsidian's own class for
 	 * rendered Markdown rather than one of the plugin's: the dialog adds no

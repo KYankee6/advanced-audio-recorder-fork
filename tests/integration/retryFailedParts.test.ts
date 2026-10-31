@@ -33,6 +33,21 @@ const HEARD: TranscriptSegment[] = [
 	{ start: 120, end: 150, text: 'the closing' },
 ];
 
+/** The lines of {@link HEARD} with the default recovered middle spliced in. */
+const COMPLETED = ['the opening', 'the middle', 'the closing'];
+
+/**
+ * The lines of the JSON transcript a top-up wrote back.
+ * @param written - What the top-up wrote, by path
+ * @returns The text of every segment, in order
+ */
+function rewrittenTexts(written: Map<string, string>): string[] {
+	const transcript = JSON.parse(
+		written.get('rec.transcript.json') ?? '{}',
+	) as Transcript;
+	return transcript.segments.map((s) => s.text);
+}
+
 /** What the engine reported for a top-up run. */
 const RUN_COST: TranscribeRunCost = {
 	engineId: TRANSCRIPTION_PROVIDER_IDS.DEEPGRAM,
@@ -91,11 +106,12 @@ function createSut(
 	const unwritable = new Set(options.unwritable ?? []);
 	const app = createMockApp({
 		vault: {
-			getAbstractFileByPath: (path: string) =>
+			getFileByPath: (path: string) =>
 				path in files
 					? Object.assign(Object.create(TFile.prototype), { path })
 					: null,
-			read: (file: TFile) => Promise.resolve(files[file.path] ?? ''),
+			cachedRead: (file: TFile) =>
+				Promise.resolve(files[file.path] ?? ''),
 			modify: (file: TFile, data: string) => {
 				if (unwritable.has(file.path)) {
 					return Promise.reject(new Error('the file is read-only'));
@@ -215,6 +231,30 @@ describe('splicing recovered segments into a transcript', () => {
 		expect(spliced).toBe(1);
 	});
 
+	it('names the language most of the completed transcript is in', () => {
+		// The stored language was measured over the parts that succeeded, so
+		// the recovered Polish parts outweigh the Ukrainian opening once back.
+		const { transcript } = spliceSegments(
+			{
+				...transcriptOf([
+					{ start: 0, end: 30, text: 'Добрий день', language: 'uk' },
+				]),
+				language: 'uk',
+			},
+			[
+				{
+					start: 60,
+					end: 90,
+					text: 'Możemy od razu po polsku, dobrze?',
+					language: 'pl',
+				},
+			],
+			ASKED,
+		);
+
+		expect(transcript.language).toBe('pl');
+	});
+
 	it('keeps everything else about the transcript', () => {
 		const { transcript } = spliceSegments(transcriptOf(HEARD), [], ASKED);
 
@@ -239,14 +279,7 @@ describe('topping up a transcript', () => {
 
 		expect(outcome.recovered).toBe(1);
 		expect(outcome.rewritten).toBe(1);
-		const rewritten = JSON.parse(
-			written.get('rec.transcript.json') ?? '{}',
-		) as Transcript;
-		expect(rewritten.segments.map((s) => s.text)).toEqual([
-			'the opening',
-			'the middle',
-			'the closing',
-		]);
+		expect(rewrittenTexts(written)).toEqual(COMPLETED);
 	});
 
 	it('rewrites every recorded output, each in its own format', async () => {
@@ -279,6 +312,44 @@ describe('topping up a transcript', () => {
 		const clean = createSut();
 		await clean.retry.retry();
 		expect(at(clean.recorded, 0)).toEqual([]);
+	});
+
+	// A part whose model-written timecodes did not fit it is recorded as
+	// failed and keeps the lines that fit in the transcript. A top-up that
+	// gets nothing back for it must not trade those billed lines for nothing.
+	it('keeps what a stretch held when it fails again with nothing back', async () => {
+		const kept = { start: 40, end: 50, text: 'what the first run kept' };
+		const { retry, written } = createSut({
+			files: {
+				'rec.transcript.json': JSON.stringify(
+					transcriptOf([...HEARD, kept]),
+				),
+			},
+			recovered: [],
+			stillMissing: [{ ...LOST, message: 'refused again' }],
+		});
+
+		await retry.retry();
+
+		expect(rewrittenTexts(written)).toContain(kept.text);
+	});
+
+	it('replaces a stretch that fails again with the lines it brought back', async () => {
+		const { retry, written } = createSut({
+			files: {
+				'rec.transcript.json': JSON.stringify(
+					transcriptOf([
+						...HEARD,
+						{ start: 40, end: 50, text: 'an earlier attempt' },
+					]),
+				),
+			},
+			stillMissing: [{ ...LOST, message: 'stopped short again' }],
+		});
+
+		await retry.retry();
+
+		expect(rewrittenTexts(written)).toEqual(COMPLETED);
 	});
 
 	it('keeps a part it had no bounds to ask for on the record', async () => {

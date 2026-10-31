@@ -5,6 +5,7 @@
  * @module tests/unit/ConversionService.test
  */
 
+import { CancellationSource, NEVER_CANCELLED } from 'src/utils/cancellation';
 import { ConversionService } from 'src/recording/ConversionService';
 import type {
 	ConversionOutcome,
@@ -18,22 +19,16 @@ import {
 	MOBILE_MAX_DECODE_BYTES,
 	WAVEFORM_MAX_DECODE_BYTES,
 } from 'src/constants';
-import {
-	convertBlobToFormatBuffer,
-	decodeAudioBlob,
-} from 'src/audio/AudioFormatConverter';
-import { encodeAudioBuffer } from 'src/audio/AudioEncoder';
-import { downmixAudioBuffer } from 'src/audio/downmix';
-
-jest.mock('src/audio/AudioEncoder', () => ({
-	encodeAudioBuffer: jest
-		.fn()
-		.mockResolvedValue(new Blob(['encoded'], { type: 'audio/wav' })),
-}));
+import { convertBlobToFormatBuffer } from 'src/audio/AudioFormatConverter';
+import type { EncodingWorkerClient } from 'src/audio/EncodingWorkerClient';
+import { partial } from '../helpers/doubles';
+import { updateLinksInVault } from 'src/utils/LinkUpdater';
 
 jest.mock('src/audio/AudioFormatConverter', () => ({
-	decodeAudioBlob: jest.fn().mockResolvedValue({}),
-	convertBlobToFormatBuffer: jest.fn().mockResolvedValue(new ArrayBuffer(8)),
+	convertBlobToFormatBuffer: jest.fn().mockResolvedValue({
+		data: new ArrayBuffer(8),
+		sampleRateChange: null,
+	}),
 }));
 
 jest.mock('src/utils/LinkUpdater', () => ({
@@ -43,14 +38,6 @@ jest.mock('src/utils/LinkUpdater', () => ({
 		frontmatterReferences: 0,
 	}),
 }));
-
-jest.mock('src/audio/downmix', () => {
-	const actual: object = jest.requireActual('src/audio/downmix');
-	return {
-		...actual,
-		downmixAudioBuffer: jest.fn((buffer: AudioBuffer) => buffer),
-	};
-});
 
 const createSourceFile = (extension = 'wav'): TFile => {
 	const file = new TFile();
@@ -90,6 +77,7 @@ describe('ConversionService', () => {
 						.fn()
 						.mockResolvedValue(new ArrayBuffer(64)),
 				},
+				readBinary: jest.fn().mockResolvedValue(new ArrayBuffer(64)),
 				createBinary: jest.fn((path: string) => {
 					const file = new TFile();
 					Object.assign(file, { path });
@@ -117,8 +105,51 @@ describe('ConversionService', () => {
 		);
 	});
 
-	it('uses the decode-and-encode path for WAV targets', async () => {
-		await service.convert(
+	describe('a file written at another rate than its source', () => {
+		beforeEach(() => {
+			jest.mocked(convertBlobToFormatBuffer).mockResolvedValueOnce({
+				data: new ArrayBuffer(8),
+				sampleRateChange: { from: 16000, to: 44100 },
+			});
+		});
+
+		it('says which rate the file was resampled to, and why', async () => {
+			await service.convert(
+				createRequest({ targetFormat: 'm4a' }),
+				jest.fn(),
+			);
+
+			expect(getNotices()).toContain(
+				'"recording.m4a" was resampled from 16 kHz to 44.1 kHz, because the M4A encoder on this device does not take 16 kHz.',
+			);
+		});
+
+		it('says nothing about a file that was never written', async () => {
+			jest.mocked(mockApp.vault.createBinary).mockRejectedValueOnce(
+				new Error('disk full'),
+			);
+
+			await service.convert(
+				createRequest({ targetFormat: 'm4a' }),
+				jest.fn(),
+			);
+
+			expect(
+				getNotices().some((message) => message.includes('resampled')),
+			).toBe(false);
+		});
+	});
+
+	it('converts a WAV target through the same ladder as a compressed one', async () => {
+		// The streaming Conversion writes WAV too. Decoding the whole file
+		// into an AudioBuffer first held the recording as 32-bit floats
+		// beside the WAV being written, and skipped the worker entirely.
+		const workerClient = partial<EncodingWorkerClient>({
+			isAvailable: (): boolean => true,
+		});
+		const withWorker = new ConversionService(mockApp, () => workerClient);
+
+		await withWorker.convert(
 			createRequest({
 				sourceFile: createSourceFile('webm'),
 				targetFormat: 'wav',
@@ -126,28 +157,28 @@ describe('ConversionService', () => {
 			jest.fn(),
 		);
 
-		expect(jest.mocked(decodeAudioBlob)).toHaveBeenCalled();
-		expect(jest.mocked(encodeAudioBuffer)).toHaveBeenCalledWith(
-			expect.anything(),
-			{ format: 'wav', bitrate: 128000 },
+		expect(jest.mocked(convertBlobToFormatBuffer)).toHaveBeenCalledWith(
+			expect.any(Blob),
+			'wav',
+			128000,
 			expect.any(Function),
+			{
+				workerClient,
+				channelMode: 'source',
+				cancellation: NEVER_CANCELLED,
+			},
 		);
 	});
 
-	it('downmixes on the WAV decode path when a mono mode is requested', async () => {
-		await service.convert(
-			createRequest({
-				sourceFile: createSourceFile('webm'),
-				targetFormat: 'wav',
-				channelMode: 'mono-left',
-			}),
-			jest.fn(),
-		);
+	it('reads the source through the vault, not its adapter', async () => {
+		const request = createRequest();
 
-		expect(jest.mocked(downmixAudioBuffer)).toHaveBeenCalledWith(
-			expect.anything(),
-			'mono-left',
+		await service.convert(request, jest.fn());
+
+		expect(mockApp.vault.readBinary).toHaveBeenCalledWith(
+			request.sourceFile,
 		);
+		expect(mockApp.vault.adapter.readBinary).not.toHaveBeenCalled();
 	});
 
 	it('passes the channel mode to the streaming conversion', async () => {
@@ -196,6 +227,48 @@ describe('ConversionService', () => {
 			expect.any(ArrayBuffer),
 		);
 	});
+
+	// TFile.parent is null for a file Obsidian holds no folder for, and the
+	// converted file then lands at the vault root rather than under "/".
+	it.each([
+		{
+			targetFormat: 'webm',
+			channelMode: undefined,
+			path: 'recording.webm',
+		},
+		{
+			targetFormat: 'wav',
+			channelMode: 'mono-mix',
+			path: 'recording-mono.wav',
+		},
+	] as const)(
+		'writes $path at the vault root for a source with no parent folder',
+		async ({ targetFormat, channelMode, path }) => {
+			const sourceFile = Object.assign(createSourceFile(), {
+				path: 'recording.wav',
+				parent: null,
+			});
+
+			const outcome = await service.convert(
+				createRequest({
+					sourceFile,
+					targetFormat,
+					...(channelMode ? { channelMode } : {}),
+				}),
+				jest.fn(),
+			);
+
+			expect(outcome).toEqual({
+				status: 'completed',
+				newFileName: path,
+				newPath: path,
+			});
+			expect(mockApp.vault.createBinary).toHaveBeenCalledWith(
+				path,
+				expect.any(ArrayBuffer),
+			);
+		},
+	);
 
 	it('treats an uppercase source extension as the same format', async () => {
 		// A .WAV source converting to wav differs from the source path
@@ -259,7 +332,7 @@ describe('ConversionService', () => {
 		useMobilePlatform();
 
 		expect(await convertOversized()).toEqual({ status: 'aborted' });
-		expect(mockApp.vault.adapter.readBinary).not.toHaveBeenCalled();
+		expect(mockApp.vault.readBinary).not.toHaveBeenCalled();
 		expect(getNotices()).toContain(
 			'File is too large to convert on this device. Convert or split ' +
 				'it on desktop instead.',
@@ -310,7 +383,7 @@ describe('ConversionService', () => {
 	});
 
 	it('aborts with a notice when the pipeline fails', async () => {
-		jest.mocked(mockApp.vault.adapter.readBinary).mockRejectedValue(
+		jest.mocked(mockApp.vault.readBinary).mockRejectedValue(
 			new Error('missing'),
 		);
 		const onProgress = jest.fn();
@@ -324,6 +397,27 @@ describe('ConversionService', () => {
 				message.includes('Conversion failed'),
 			),
 		).toBe(true);
+	});
+
+	it('keeps the source and reports partial success when the links cannot be updated', async () => {
+		// The converted file already exists by then, so this is not a failed
+		// conversion; deleting the source on top of it would leave every link
+		// that was not rewritten pointing at nothing.
+		const { updateLinksInVault } = jest.requireMock<{
+			updateLinksInVault: jest.Mock;
+		}>('src/utils/LinkUpdater');
+		updateLinksInVault.mockRejectedValueOnce(new Error('index busy'));
+
+		const outcome = await service.convert(
+			createRequest({ linkAction: 'replace', deleteSource: true }),
+			jest.fn(),
+		);
+
+		expect(outcome).toEqual({ status: 'partial' });
+		expect(mockApp.fileManager.trashFile).not.toHaveBeenCalled();
+		expect(getNotices()).toContain(
+			'"recording.webm" was created, but updating links failed: index busy. The source file was kept.',
+		);
 	});
 
 	it('reports partial success when the source cannot be deleted', async () => {
@@ -341,46 +435,90 @@ describe('ConversionService', () => {
 
 	it.each([
 		{
-			name: 'encoding a WAV target',
+			name: 'a WAV target',
 			request: {
 				sourceFile: createSourceFile('webm'),
 				targetFormat: 'wav' as const,
 			},
-			collaborator: (): jest.Mock => jest.mocked(encodeAudioBuffer),
-			reportArg: 2,
-			expected: 'Encoding... 40%',
 		},
-		{
-			name: 'streaming a compressed target',
-			request: {},
-			collaborator: (): jest.Mock =>
-				jest.mocked(convertBlobToFormatBuffer),
-			reportArg: 3,
-			expected: 'Converting... 40%',
-		},
-	])(
-		'relays the percentage while $name',
-		async ({ request, collaborator, reportArg, expected }) => {
-			// The dialog shows this text and nothing else while a long
-			// conversion runs. It is a one-line closure the encoder calls
-			// back into, so no test had ever executed it - a wrong format
-			// string here is a progress line that reads "Encoding...
-			// [object Object]" for the whole run.
-			collaborator().mockImplementationOnce(
-				(...args: unknown[]): Promise<unknown> => {
-					(args[reportArg] as (percent: number) => void)(40);
+		{ name: 'a compressed target', request: {} },
+	])('relays the percentage while converting $name', async ({ request }) => {
+		// The dialog shows this text and nothing else while a long
+		// conversion runs. It is a one-line closure the converter calls
+		// back into, so no test had ever executed it - a wrong format
+		// string here is a progress line that reads "Converting...
+		// [object Object]" for the whole run.
+		jest.mocked(convertBlobToFormatBuffer).mockImplementationOnce(
+			(_blob, _format, _bitrate, report) => {
+				report?.(40);
+				return Promise.resolve({
+					data: new ArrayBuffer(8),
+					sampleRateChange: null,
+				});
+			},
+		);
+		const onProgress = jest.fn();
+
+		await service.convert(createRequest(request), onProgress);
+
+		expect(onProgress).toHaveBeenCalledWith('Converting... 40%');
+	});
+
+	describe('a cancel that arrives while the converted file is written', () => {
+		/** Cancels the conversion from inside the write, as a click would. */
+		function cancelDuringWrite(): CancellationSource {
+			const source = new CancellationSource();
+			jest.mocked(mockApp.vault.createBinary).mockImplementationOnce(
+				(path: string) => {
+					source.cancel();
 					return Promise.resolve(
-						reportArg === 2
-							? new Blob(['encoded'])
-							: new ArrayBuffer(8),
+						Object.assign(new TFile(), { path }),
 					);
 				},
 			);
-			const onProgress = jest.fn();
+			return source;
+		}
 
-			await service.convert(createRequest(request), onProgress);
+		it('trashes the file and touches no link', async () => {
+			const source = cancelDuringWrite();
 
-			expect(onProgress).toHaveBeenCalledWith(expected);
-		},
-	);
+			const outcome = await service.convert(
+				createRequest({ linkAction: 'replace', deleteSource: true }),
+				jest.fn(),
+				source.token,
+			);
+
+			expect(outcome).toEqual({ status: 'cancelled' });
+			expect(mockApp.fileManager.trashFile).toHaveBeenCalledTimes(1);
+			expect(mockApp.fileManager.trashFile).toHaveBeenCalledWith(
+				expect.objectContaining({ path: 'Audio/recording.webm' }),
+			);
+			expect(jest.mocked(updateLinksInVault)).not.toHaveBeenCalled();
+			expect(getNotices()).toEqual([]);
+		});
+
+		// The cancel still stands: the user asked to stop, and a file that
+		// would not go is a cleanup failure for the log, not a failed
+		// conversion to report.
+		it('logs a file that cannot be trashed and still answers cancelled', async () => {
+			const source = cancelDuringWrite();
+			const error = jest.spyOn(console, 'error').mockImplementation();
+			jest.mocked(mockApp.fileManager.trashFile).mockRejectedValueOnce(
+				new Error('locked'),
+			);
+
+			const outcome = await service.convert(
+				createRequest(),
+				jest.fn(),
+				source.token,
+			);
+
+			expect(outcome).toEqual({ status: 'cancelled' });
+			expect(error).toHaveBeenCalledWith(
+				expect.stringContaining('after a cancel'),
+				expect.objectContaining({ path: 'Audio/recording.webm' }),
+			);
+			expect(getNotices()).toEqual([]);
+		});
+	});
 });

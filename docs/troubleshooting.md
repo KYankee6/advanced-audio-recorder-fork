@@ -8,6 +8,7 @@ This guide helps you diagnose and fix problems with Advanced Audio Recorder. It 
     - [Debug mode](#debug-mode)
 - [Common problems and fixes](#common-problems-and-fixes)
     - [No sound is recorded](#no-sound-is-recorded)
+    - [This computer's output is not recorded](#this-computers-output-is-not-recorded)
     - [Voice only in one channel (hard-panned left or right)](#voice-only-in-one-channel-hard-panned-left-or-right)
     - [A recording format is not available](#a-recording-format-is-not-available)
     - [Conversion fails](#conversion-fails)
@@ -16,6 +17,7 @@ This guide helps you diagnose and fix problems with Advanced Audio Recorder. It 
     - [Transcription errors](#transcription-errors)
     - [Audio cleanup errors](#audio-cleanup-errors)
     - [Settings not saving](#settings-not-saving)
+    - [The recording panel is gone](#the-recording-panel-is-gone)
 - [Collecting diagnostics for a bug report](#collecting-diagnostics-for-a-bug-report)
 - [Where to report](#where-to-report)
 
@@ -59,13 +61,13 @@ The test uses exactly the same input device, sample rate, bitrate, and browser i
 
 The snapshot contains the following groups:
 
-| Group                       | What it includes                                                                                                                                                                                                                                             |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Plugin settings**         | Recording format, bitrate, sample rate, bit depth, save folder, save-near-active-file, active-file subfolder, file prefix, multi-track on/off, max tracks, output mode, per-track sources, selected input device id, and debug flag.                         |
-| **Environment**             | Obsidian (API) version, Electron, Chromium and Node versions, platform, architecture, and user agent.                                                                                                                                                        |
-| **Audio devices**           | Every detected audio input and output device, with id, label, group id, and kind.                                                                                                                                                                            |
-| **Audio capabilities**      | Supported formats, sample rates and bitrates, the bitrates each compressed format's encoder really accepts on this device at the rate an offline encode runs at, the per-codec support matrix, and whether `MediaRecorder` and `getUserMedia` are available. |
-| **Active recording config** | The format actually handed to the recorder, the resolved MIME type, the expected codec, whether that MIME type is supported, and the pre-recording validation result.                                                                                        |
+| Group                       | What it includes                                                                                                                                                                                                                                                                                                                                          |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Plugin settings**         | Recording format, bitrate, sample rate, bit depth, save folder, save-near-active-file, active-file subfolder, file prefix, multi-track on/off, max tracks, output mode, per-track sources, selected input device id, and debug flag.                                                                                                                      |
+| **Environment**             | Obsidian (API) version, Electron, Chromium and Node versions, platform, operating system version, architecture, and user agent.                                                                                                                                                                                                                           |
+| **Audio devices**           | Every detected audio input and output device, with id, label, group id, and kind.                                                                                                                                                                                                                                                                         |
+| **Audio capabilities**      | Supported formats, sample rates and bitrates, the bitrates each compressed format's encoder really accepts on this device at the rate an offline encode runs at, the per-codec support matrix, whether `MediaRecorder` and `getUserMedia` are available, and whether this computer's own output can be captured directly, with the reason when it cannot. |
+| **Active recording config** | The format actually handed to the recorder, the resolved MIME type, the expected codec, whether that MIME type is supported, and the pre-recording validation result.                                                                                                                                                                                     |
 
 The snapshot never contains your API keys, transcripts, or note contents - only the technical configuration listed above. It is safe to share in a public issue.
 
@@ -97,7 +99,7 @@ The recording finishes but the file is silent, or **Test recording** plays back 
 1. Run **Test recording** (see [above](#test-recording)) to isolate the problem to capture rather than playback.
 2. Check the **input device** through either surface - both write your choice to settings:
     - **Settings > Audio input** is the settings UI; pick the correct microphone from the dropdown. A freshly plugged-in device may need the dropdown to refresh - it auto-refreshes on device changes.
-    - **Select audio input device** is a command that opens a _separate_ quick-pick modal listing detected microphones; choosing one saves it immediately and shows a confirmation notice.
+    - **Select audio input device** is a command that opens a _separate_ quick-pick list of the detected microphones, and choosing one saves it immediately and shows a confirmation notice.
 
     See [Switching the input device](recording.md#switching-the-input-device) for details.
 
@@ -106,9 +108,21 @@ The recording finishes but the file is silent, or **Test recording** plays back 
 5. With **Input level meter** enabled (**Settings > Audio processing & feedback**), watch the meter move when you speak - a flat meter means no signal is reaching the plugin.
 6. If a `Test recording failed:` message mentions a denied permission, grant access and restart Obsidian.
 
-If the recording holds your own voice but not the other participants of a call, nothing is broken: a recording captures an input device by default, and the remote side of a Zoom or Teams call goes to an output device. On Windows, turn on **Include system audio** under **Audio input**, which records the machine's own output beside the microphone and mixes both into one file; on a session that configures its tracks by hand, set that track's **Track N source** to **System audio (this computer)** instead. Elsewhere, route the output back in as an input and record it on a second track. See [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
+If the recording holds your own voice but not the other participants of a call, nothing is broken: a recording captures an input device by default, and the remote side of a Zoom or Teams call goes to an output device. On Windows, and on macOS 14.2 or later, turn on **Include system audio** under **Audio input**, which records the machine's own output beside the microphone and mixes both into one file; on a session that configures its tracks by hand, set that track's **Track N source** to **System audio (this computer)** instead. Elsewhere, route the output back in as an input and record it on a second track. See [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
 
 See also: [Recording](recording.md), [Settings reference](settings-reference.md#audio-input).
+
+### This computer's output is not recorded
+
+**Include system audio** and a track whose **Track N source** is **System audio (this computer)** ask the host for the machine's own output. When that cannot be had, the recording does not start, and the notice says why; the same sentence is under the setting itself and in **System info**, so it can be read before a call rather than during one.
+
+- **Granted on Windows and on macOS only** - Electron offers no direct capture of the output on Linux. Record the `Monitor of ...` input PipeWire or PulseAudio publishes for every output instead.
+- **Needs macOS 14.2 or later** - the capture goes through an Apple API that macOS 14.2 introduced. Update macOS, or route the output through [BlackHole](https://existential.audio/blackhole/) and record that input.
+- **Needs an Obsidian installer built on Electron 39.6 or later** - Electron is the runtime the Obsidian installer ships, and Obsidian's in-app updates do not replace it. Download and run the current installer from [obsidian.md](https://obsidian.md/download). **System info** shows the Electron version under **Environment**.
+- **Names System Settings > Privacy & Security > Screen & System Audio Recording** - macOS has not allowed Obsidian to record its output. Turn **Obsidian** on in that pane (**Screen Recording** on macOS 14), then quit and reopen Obsidian, since macOS reads the answer only when an app starts. macOS may never have asked and may not list Obsidian there at all, because Electron raises no prompt for the source the plugin picks itself ([electron/electron#52738](https://github.com/electron/electron/issues/52738)). Add it with the **+** button below the list, choosing **Obsidian** in **Applications**. A Mac without that permission would otherwise hand over a track that never carries a sound, which is why the plugin refuses it rather than recording silence.
+- **Granted only in answer to a user action in a focused Obsidian window** - the operating system grants the output only to a click or a key press in Obsidian, so a session started from the command line cannot ask for it. Start it from the ribbon icon, the command palette or a hotkey.
+
+See also: [Recording this computer's own output](recording.md#recording-this-computers-own-output), [Recording a call with its remote participants](use-cases/meeting-notes-workflow.md#recording-a-call-with-its-remote-participants).
 
 ### Voice only in one channel (hard-panned left or right)
 
@@ -123,8 +137,8 @@ The recording plays back entirely in one ear. This is the normal result of recor
 The format dropdown is missing an option, **Test recording** reports `Format "<format>" is not supported in this browser.`, or a recording produces an empty file.
 
 - Format availability depends on your platform and the Electron/Chromium build Obsidian ships. Not every format can be captured everywhere.
-- **Online** formats (WebM, OGG, WAV, MP4, M4A, AAC) are written in real time by `MediaRecorder`; if the browser does not support a format's MIME type it cannot be used.
-- **Offline** formats (MP3, FLAC, and the offline paths for MP4/M4A) are re-encoded after the recording stops and do not depend on `MediaRecorder` support; the settings dropdown marks them **(offline)**.
+- **Online** formats (WebM, OGG, WAV, MP4, M4A) are written in real time by `MediaRecorder`; if the browser does not support a format's MIME type it cannot be used.
+- **Offline** formats (MP3, FLAC, AAC, and the offline paths for MP4/M4A) are re-encoded after the recording stops and do not depend on `MediaRecorder` support; the settings dropdown marks them **(offline)**.
 - Open **System info** and look at **Audio capabilities > supported formats** and **codec support** to see exactly what this environment offers, and at **Active recording config** to see the resolved MIME type and whether it is supported.
 - If your preferred format is unavailable, record in a supported one (WebM is the reliable default; WAV is the most robust for long recordings) and then **Convert audio format** afterwards from the right-click menu.
 
@@ -183,7 +197,8 @@ Transcription stops with an error, or the progress dialog reports a failure.
 
 | Symptom                                                        | Cause and fix                                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Set the … API key in settings to transcribe.`                 | The selected engine has no API key. Open **Settings > Transcription**, select your engine, and paste the key. See the per-engine setup guides below.                                                                                                                                                                                                                                 |
+| `Set the … API key in settings to transcribe.`                 | The selected engine has no API key on this device. Open the engine's page under **Settings > Advanced Audio Recorder > Transcription > Engines** and use **Link...** on its **API key** row to pick a secret from Obsidian's keychain or add one. See the per-engine setup guides below.                                                                                             |
+| An engine reads **No key** on a second device                  | The vault synced the link to the key but not the key, because Obsidian's keychain keeps each secret on the device it was entered on, and on the desktop in the vault it was entered in. On this device, open **Settings > Keychain** and add a secret with the same ID the **API key** row names (for example `openai-api-key`) and the key as its value, or use **Link...** on that row to add one. This is needed once per device, and on the desktop once per vault.            |
 | `Authentication failed.` / 401 / 403                           | The API key is wrong, expired, or not authorized for this provider/model. Re-copy the key from the provider console and confirm your account has access.                                                                                                                                                                                                                             |
 | `Rate limit reached. Wait a moment and try again.`             | You hit the provider's rate limit. Wait and retry; for free tiers, consider a paid plan or a different engine.                                                                                                                                                                                                                                                                       |
 | `Request … timed out after … ms.`                              | The request exceeded the configured **Request timeout** (default 10 minutes, range 1-60). Raise the timeout for long files, or split the recording first.                                                                                                                                                                                                                            |
@@ -202,7 +217,8 @@ Transcription stops with an error, or the progress dialog reports a failure.
 Other tips:
 
 - The progress dialog has **Cancel** and **Minimize**. Minimizing sends the job to the status bar so you can keep working; click the status bar to reopen it. Closing the dialog cancels the job.
-- **API keys** are stored in the plugin's `data.json` on this device and are never written into diagnostics. Avoid syncing `data.json` to untrusted locations. The local `whisper.cpp` engine keeps everything offline.
+- **API keys** are kept in Obsidian's keychain (**Settings > Keychain**) on this device, not in the plugin's `data.json`, and are never written into diagnostics. `data.json` holds only the ID of each linked secret. The local `whisper.cpp` engine keeps everything offline.
+- **A key you edit or delete on the Keychain page** takes effect on the next run without restarting. A deleted secret leaves the engine reading **No key** until another is linked.
 
 See also: [Transcription](transcription.md), [LLM post-processing](llm-post-processing.md), and the per-engine guides: [OpenAI / Whisper API](use-cases/openai-whisper-api-key.md), [Groq](use-cases/groq-whisper-setup.md), [Deepgram](use-cases/deepgram-api-key.md), [Gemini](use-cases/gemini-api-key.md), [Anthropic / Claude](use-cases/anthropic-api-key.md), [Local whisper.cpp](use-cases/local-whisper-cpp.md).
 
@@ -231,6 +247,19 @@ What to do:
 3. Avoid editing `data.json` by hand and avoid syncing it to a location that may write a partial file.
 
 See also: [Settings reference](settings-reference.md).
+
+### The recording panel is gone
+
+The microphone icon of the [recording panel](recording-panel.md) is no longer among the sidebar tabs.
+
+The plugin puts the panel in the right sidebar only once per device, the first time it runs there. A panel that was closed, by its tab's close button or by **Close** in the tab's right-click menu, stays closed, just as a closed **Outline** or **Backlinks** pane does. Nothing is lost: the panel reads everything it shows from the recordings and their stored data.
+
+To bring it back:
+
+1. Open the command palette with `Ctrl+P` (`Cmd+P` on macOS).
+2. Run **Open the recording panel**.
+
+The panel opens in the right sidebar and is shown. From then on Obsidian keeps it in the layout of that device, wherever you drag it.
 
 ---
 

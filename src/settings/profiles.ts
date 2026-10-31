@@ -19,7 +19,7 @@
  * @module settings/profiles
  */
 
-import type { AudioRecorderSettings } from './settingsSchema';
+import type { Refusable } from '../utils/refusal';
 
 /**
  * Every kind of profile the plugin stores, as a stored entry names itself.
@@ -82,6 +82,18 @@ export interface Profile {
  */
 export type SelectedProfileIds = Record<ProfileKindId, string>;
 
+/**
+ * The two settings fields the selection helpers read and write. Structural,
+ * so callers pass the full plugin settings without this module depending on
+ * the settings schema, which itself builds on the types declared here.
+ */
+export interface ProfileSettings {
+	/** Every stored profile, of every kind. */
+	profiles: Profile[];
+	/** The profile each kind applies. */
+	selectedProfileIds: SelectedProfileIds;
+}
+
 /** Name a freshly created profile starts out under, numbered when taken. */
 export const NEW_PROFILE_NAME = 'New profile';
 
@@ -125,6 +137,39 @@ export function profilesOfKind(
 	kind: ProfileKindId,
 ): Profile[] {
 	return profiles.filter((profile) => profile.kind === kind);
+}
+
+/** The name a picker typed on the command line uses for "no profile". */
+export const NO_PROFILE_NAME = 'none';
+
+/**
+ * The profile a typed name selects, matched without regard to case, the way
+ * a picker on the command line names one: by the name the dialogs show.
+ * @param profiles - All stored profiles
+ * @param kind - Kind the profile must be of
+ * @param name - The typed name, or {@link NO_PROFILE_NAME}
+ * @returns The id to select ('' for none), or the sentence listing the names
+ *   that would have been accepted
+ */
+export function profileIdNamed(
+	profiles: readonly Profile[],
+	kind: ProfileKindId,
+	name: string,
+): Refusable<string> {
+	const wanted = name.trim().toLowerCase();
+	if (wanted === NO_PROFILE_NAME) {
+		return { value: '' };
+	}
+	const ofKind = profilesOfKind(profiles, kind);
+	const profile = ofKind.find((p) => p.name.toLowerCase() === wanted);
+	return profile
+		? { value: profile.id }
+		: {
+				refusal: `No profile named "${name}". The ones to choose from: ${[
+					NO_PROFILE_NAME,
+					...ofKind.map((p) => p.name),
+				].join(', ')}.`,
+			};
 }
 
 /**
@@ -259,7 +304,7 @@ export function effectiveProfileId(
  * @returns The selected profile, or undefined
  */
 export function selectedProfile(
-	settings: AudioRecorderSettings,
+	settings: ProfileSettings,
 	kind: ProfileKindId,
 ): Profile | undefined {
 	const selected = findProfile(
@@ -280,7 +325,7 @@ export function selectedProfile(
  * @returns The effective selection
  */
 export function selectedProfileId(
-	settings: AudioRecorderSettings,
+	settings: ProfileSettings,
 	kind: ProfileKindId,
 ): string {
 	return selectedProfile(settings, kind)?.id ?? '';
@@ -294,7 +339,7 @@ export function selectedProfileId(
  * @param id - Id to select ('' for none)
  */
 export function setSelectedProfileId(
-	settings: AudioRecorderSettings,
+	settings: ProfileSettings,
 	kind: ProfileKindId,
 	id: string,
 ): void {
@@ -320,7 +365,7 @@ export function setSelectedProfileId(
  * @param id - Id of the profile to remove
  */
 export function removeAndReselectProfile(
-	settings: AudioRecorderSettings,
+	settings: ProfileSettings,
 	kind: ProfileKindId,
 	id: string,
 ): void {

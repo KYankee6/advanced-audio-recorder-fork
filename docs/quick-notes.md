@@ -1,6 +1,6 @@
 # Quick notes
 
-A **quick note** is a dictation that lands in the note you are writing. Press the quick note button, say what you want to write down, press it again, and the recognized text is inserted at the cursor. The audio is never saved: it exists only while it is being recorded and transcribed, and it is dropped as soon as the text is ready. A **quick note profile** can rewrite the text with an LLM before it is inserted, so a stream of thoughts comes out as a tidy paragraph, a bulleted list, or a task.
+A **quick note** is a dictation that lands in the note you are writing. Press the quick note button, say what you want to write down, press it again, and the recognized text is inserted where the cursor stood when you started. The audio is never saved: it exists only while it is being recorded and transcribed, and it is dropped as soon as the text is ready. A **quick note profile** can rewrite the text with an LLM before it is inserted, so a stream of thoughts comes out as a tidy paragraph, a bulleted list, or a task.
 
 - [How it works](#how-it-works)
 - [Enabling quick notes](#enabling-quick-notes)
@@ -19,8 +19,8 @@ Quick notes reuse the plugin's own pipeline rather than a second one:
 
 1. The microphone is opened with the same device, channel and encoding settings a recording uses, and the audio is kept in memory rather than written to the vault.
 2. When you stop, the audio is sent to the **Quick note transcription engine**, with the language of the Transcription page and, when the advanced settings are on, its dictionary profile.
-3. When a quick note profile is selected, the recognized text is sent to the **Quick note rewrite engine** with the profile's instruction.
-4. The final text is inserted at the cursor, and the audio is discarded.
+3. When a quick note profile is selected, the recognized text is sent to the **Quick note rewrite engine** with the profile's instruction. When both engine rows name the same service and it can rewrite while it listens, as Google Gemini can, the instruction travels with the audio instead, and one request returns the rewritten text.
+4. The final text is inserted where the cursor stood when the dictation began, and the audio is discarded.
 
 A quick note asks for plain text in the language it was spoken in. Speaker labels, word timings, **Translate speech to English**, the advanced two-pass mode, the transcript output format and the LLM post-processing of recordings are left to recordings, so a dictation is never billed for them and never comes back translated.
 
@@ -46,6 +46,8 @@ A quick note passes through two engines, and the Quick notes page picks each of 
 
 Both engines are set up once, with their endpoint, key and model, on their pages under **Transcription > Engines**. For example, with **Transcription engine** set to `Whisper API`, **Quick note transcription engine** set to `Deepgram` and **Quick note rewrite engine** set to `DeepSeek`, a recording is sent to Whisper API, a dictation is sent to Deepgram, and a dictation with a profile selected is then rewritten by DeepSeek. The session total in the Transcribe dialog counts the dictation under Deepgram.
 
+With both rows set to `Google Gemini` and a profile selected, a dictation costs one request rather than two. Gemini serves both jobs with the one model picked on its page, so the request that hears the audio also carries the profile's instruction and answers with the rewritten text, and the text is inserted without a second round trip. The dictation is sent in two requests as before when the rows name different services, when the transcription engine cannot rewrite while it listens, or when a long dictation is sent in parts, because a rewrite of each part would rewrite fragments of what was said.
+
 On a setup saved by a version before the transcription engine of quick notes could be picked, it starts on the engine recordings already use, so dictation keeps working with the key that is already there.
 
 ## Dictating a note
@@ -53,8 +55,8 @@ On a setup saved by a version before the transcription engine of quick notes cou
 1. Put the cursor where the text should go.
 2. Click the waveform button in the ribbon, or run **Start/stop quick note**. The button turns red and pulses, and the status bar shows `Quick note...` with a stop button, the elapsed time, the recorded size and the input level meter, the way it shows a recording.
 3. Speak.
-4. Click the button again, click the stop button in the status bar, or run the command again. The ribbon button pulses in the accent colour, and the status bar follows the processing stage by stage with a progress bar: `Quick note: stopping...`, `Quick note: Preparing audio...`, `Quick note: Transcribing...` (with the part being sent for a long dictation), `Quick note: Rewriting with LLM...` when a profile is selected, and `Quick note: Done`.
-5. The text appears at the cursor, and the status bar clears.
+4. Click the button again, click the stop button in the status bar, or run the command again. The ribbon button pulses in the accent colour, and the status bar follows the processing stage by stage with a progress bar: `Quick note: stopping...`, `Quick note: Preparing audio...`, `Quick note: Transcribing...` (with the part being sent for a long dictation), `Quick note: Rewriting with LLM...` when a profile is selected, and `Quick note: Done`. When the rewrite rides in the transcription request, the two middle stages are one, `Quick note: Transcribing and rewriting...`.
+5. The text appears where the cursor stood in step 1, and the status bar clears.
 
 The elapsed time, the size and the meter follow the **Recording stats** and **Input level meter** switches under **Audio processing & feedback**, like those of a recording.
 
@@ -70,9 +72,9 @@ The same rule holds the other way round. While a dictation is recording, a recor
 
 ## Where the text goes
 
-The text is inserted into the note that was active when you started the dictation, at that note's cursor as it stands when the text arrives. You can keep typing while a dictation is transcribed, and the text follows your cursor. You can also switch to another note: the text still goes into the note you dictated for, as long as it is open in a pane.
+The text is inserted into the note that was active when you started the dictation, at the place the cursor stood when you started. That place moves with the note's text: you can keep typing while a dictation is recorded and transcribed, above it, below it or right at it, and the dictation still lands where you began it, before anything you typed at that spot afterwards. When the cursor has not moved, it ends up after the inserted text, as if you had typed it.
 
-When that note has been closed, the text goes into the note that is active instead. When no note is open at all, the text is copied to the clipboard and a notice says so, because a dictation you have already paid for is never thrown away for want of a cursor. When the clipboard refuses it too, as a window without focus does, a notice that stays until it is closed shows the text itself.
+You can also switch to another note. The text still goes into the note you dictated for, and a notice names that note, `Quick note inserted into Notes/today.md.`, because you are looking somewhere else. When that note has been closed, the text is written into its file at the place the cursor stood, and the same notice names it. When the dictation was started with no note active, the text goes to the cursor of the note that is active when it arrives. When no note is open at all, or the note was deleted, the text is copied to the clipboard and a notice says so, because a dictation you have already paid for is never thrown away for want of a cursor. When the clipboard refuses it too, as a window without focus does, a notice that stays until it is closed shows the text itself.
 
 The text is inserted exactly as it comes back. A profile that should produce a heading, a list or a checkbox says so in its instruction.
 
@@ -82,7 +84,7 @@ Without a profile, a quick note is inserted as it was recognized. That is the de
 
 A **quick note profile** is a named instruction the dictated text is rewritten with. Profiles are created, renamed and deleted in the **Quick note profiles** catalogue of the Quick notes page, which works exactly like the prompt catalogues of [LLM post-processing](llm-post-processing.md#prompt-profiles): each profile is a page of its own with its instruction, a switch that makes it the profile in use, and rename and delete. The **Quick note profile** row above the catalogue picks the profile in use, and **None** switches the rewrite off. A profile's instruction can also be read from a note, by setting its **Source** row to **Note**.
 
-The instruction is sent to the model verbatim as the system prompt, with the recognized text as the message. Nothing is added to it, so ask for the rewritten text alone and name the language when it matters. A few instructions that work well:
+The instruction is sent to the model verbatim as the system prompt, with the recognized text as the message. Nothing is added to it, so ask for the rewritten text alone and name the language when it matters. In the single Gemini request the transcription rules stay in the system prompt, and the instruction is quoted verbatim, last, after a sentence asking the model to transcribe the audio, rewrite it as the instruction asks and return an empty text when nothing was said. A few instructions that work well:
 
 ```text
 Clean up this dictation: fix punctuation and capitalization, remove filler words and false starts, and keep my wording. Reply with the cleaned text only, in the language it was dictated in.
@@ -113,10 +115,10 @@ There is no limit on how long a dictation can be. A typical quick note lasts und
 ## Behavior and reliability
 
 - **The audio is never saved.** It is held in memory while you speak and while it is transcribed, and dropped as soon as the text is ready, whether the dictation succeeded, failed, or was cancelled. Nothing is written to the vault, so nothing reaches a sync service.
-- **The rewrite is best-effort.** When the LLM call fails, the text is inserted as it was recognized, and a notice says `Quick note rewrite failed; inserting the text as dictated.`
+- **The rewrite is best-effort.** When the LLM call fails, the text is inserted as it was recognized, and a notice says `Quick note rewrite failed; inserting the text as dictated.` A rewrite that rides in the transcription request has no recognized text to fall back on, so when that one request fails, the quick note fails the way a failed transcription does, with `Quick note failed:` and the reason.
 - **One dictation at a time.** Pressing the button while the last dictation is still being transcribed only shows `The last quick note is still being transcribed.`, however many presses land while the microphone is opening.
 - **Disabling cancels.** Turning quick notes off, turning transcription off, or disabling the plugin closes the microphone and cancels a dictation in flight, which then inserts nothing.
-- **Costs are counted.** The transcription and the rewrite are added to the session total shown in the Transcribe dialog, like any other run.
+- **Costs are counted.** The transcription and the rewrite are added to the session total shown in the Transcribe dialog, like any other run. A single Gemini request is counted once, under Google Gemini, with the tokens it reported.
 - **Privacy.** The audio is sent to the quick note transcription engine, and the recognized text to the quick note rewrite engine when a profile is selected. With the local whisper.cpp engine and no profile, a quick note never leaves the computer.
 
 ## Settings summary

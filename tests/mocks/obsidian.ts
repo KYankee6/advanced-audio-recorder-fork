@@ -46,6 +46,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- the real API types
    each event name separately; the mock only has to accept any handler. */
 
+import { StateField } from '@codemirror/state';
+
 /** A subscriber registered through {@link Events.on}. */
 export type EventCallback = (...args: any[]) => void;
 
@@ -198,6 +200,26 @@ export class Plugin {
 		this.settingTabs.push(settingTab);
 	}
 
+	/** View factories the plugin registered, by view type. */
+	readonly registeredViews = new Map<
+		string,
+		(leaf: WorkspaceLeaf) => ItemView
+	>();
+
+	registerView(
+		type: string,
+		factory: (leaf: WorkspaceLeaf) => ItemView,
+	): void {
+		this.registeredViews.set(type, factory);
+	}
+
+	/** CodeMirror extensions the plugin added to every Markdown editor. */
+	readonly editorExtensions: unknown[] = [];
+
+	registerEditorExtension(extension: unknown): void {
+		this.editorExtensions.push(extension);
+	}
+
 	addStatusBarItem(): HTMLElement {
 		const el = addObsidianDomExtensions(document.createElement('div'));
 		this.statusBarItems.push(el);
@@ -295,13 +317,77 @@ export class Plugin {
 }
 
 /**
+ * The message the real keychain refuses a malformed ID with, word for word, so
+ * a test asserting on what the user is told reads the app's own sentence.
+ */
+export const SECRET_ID_INVALID_MESSAGE =
+	'Secret ID is invalid. Use only lowercase letters, numbers and dashes. 64 characters max.';
+
+/**
+ * Mock SecretStorage: Obsidian's keychain, the per-device store a plugin keeps
+ * credentials in instead of its data.json.
+ *
+ * Modelled on the app's own implementation rather than on the typings alone,
+ * because the plugin depends on the parts the typings leave unsaid: an ID is
+ * checked against the same pattern and length, a stored value is returned as
+ * stored, an unknown ID answers null rather than throwing, and every write
+ * announces itself with a `changed` event, which is how the keychain page
+ * learns of a secret a plugin created and how a plugin learns of one the user
+ * edited there. `deleteSecret` is internal API in the real app - the keychain
+ * page calls it - and is modelled because a deletion is one of the changes a
+ * plugin has to survive.
+ */
+export class SecretStorage extends Events {
+	private readonly secrets = new Map<string, string>();
+
+	/**
+	 * Whether an ID is one the keychain accepts.
+	 * @param id - Candidate ID
+	 */
+	validateId(id: string): boolean {
+		return /^[a-z0-9-]+$/.test(id) && id.length <= 64;
+	}
+
+	setSecret(id: string, secret: string): void {
+		if (!this.validateId(id)) {
+			throw new Error(SECRET_ID_INVALID_MESSAGE);
+		}
+		this.secrets.set(id, secret);
+		this.trigger('changed');
+	}
+
+	getSecret(id: string): string | null {
+		return this.secrets.get(id) ?? null;
+	}
+
+	listSecrets(): string[] {
+		return [...this.secrets.keys()];
+	}
+
+	/**
+	 * Removes a secret, as the keychain page does.
+	 * @param id - The secret to remove
+	 * @returns Whether there was one to remove
+	 */
+	deleteSecret(id: string): boolean {
+		if (!this.secrets.delete(id)) {
+			return false;
+		}
+		this.trigger('changed');
+		return true;
+	}
+}
+
+/**
  * Mock App class.
  */
 export class App {
 	vault: Vault = new Vault();
 	workspace: Workspace = new Workspace();
+
 	metadataCache: MetadataCache = new MetadataCache();
 	fileManager: FileManager = new FileManager(this.vault);
+	secretStorage: SecretStorage = new SecretStorage();
 	/**
 	 * The settings dialog, which is internal API in the real app and absent
 	 * unless a test stands one up (see obsidian/settingsNavigation).
@@ -311,6 +397,26 @@ export class App {
 		open?: () => void;
 		openTabById?: (id: string) => void;
 	};
+
+	constructor() {
+		// The workspace builds leaves, and a leaf hands its view the app.
+		this.workspace.app = this;
+	}
+
+	/** What the app keeps in this device's local storage for the vault. */
+	readonly localStorage = new Map<string, unknown>();
+
+	loadLocalStorage = jest.fn(
+		(key: string): unknown => this.localStorage.get(key) ?? null,
+	);
+
+	saveLocalStorage = jest.fn((key: string, data: unknown): void => {
+		if (data === null) {
+			this.localStorage.delete(key);
+		} else {
+			this.localStorage.set(key, data);
+		}
+	});
 }
 
 /**
@@ -446,17 +552,37 @@ export class Vault extends Events {
 		}),
 	};
 
+	// Both refuse a path that is taken, as the real ones do ("@throws Error
+	// if file already exists"), so code that creates over an existing file
+	// fails here as it fails in Obsidian instead of silently overwriting.
 	createBinary = jest.fn(
 		async (path: string, data: ArrayBuffer): Promise<TFile> => {
+			this.refuseTaken(path);
 			this.binary.set(path, data);
 			return this.registerFile(path, data.byteLength);
 		},
 	);
 
 	create = jest.fn(async (path: string, data: string): Promise<TFile> => {
+		this.refuseTaken(path);
 		this.text.set(path, data);
 		return this.registerFile(path, data.length);
 	});
+
+	/**
+	 * Throws the error the real vault's create methods throw for a path that
+	 * already holds a file, indexed or only on disk.
+	 * @param path - Vault-relative path about to be created
+	 */
+	private refuseTaken(path: string): void {
+		if (
+			this.files.has(path) ||
+			this.text.has(path) ||
+			this.binary.has(path)
+		) {
+			throw new Error('File already exists.');
+		}
+	}
 
 	read = jest.fn(
 		async (file: TFile): Promise<string> => this.text.get(file.path) ?? '',
@@ -529,8 +655,78 @@ export class Vault extends Events {
 		this.trigger('delete', file);
 	}
 
+	/**
+	 * Moves a file as the real vault does: a destination that is taken is
+	 * refused, the TFile keeps its identity with its path and names rewritten
+	 * and its folder changed, and `rename` fires with the old path.
+	 *
+	 * The event is the point. Code that mirrors a rename onto a companion
+	 * file is driven by it, and its own move fires it again, so a vault that
+	 * moved files silently could never show that second event reaching the
+	 * handler that caused it.
+	 * @param file - The file to move
+	 * @param newPath - Vault-relative destination
+	 */
+	rename = jest.fn(
+		async (file: TAbstractFile, newPath: string): Promise<void> => {
+			const oldPath = file.path;
+			if (!(file instanceof TFile) || this.files.get(oldPath) !== file) {
+				throw new Error(`Vault.rename: no file at ${oldPath}.`);
+			}
+			if (this.files.has(newPath)) {
+				throw new Error('Destination file already exists!');
+			}
+			for (const store of [this.text, this.binary] as Map<
+				string,
+				unknown
+			>[]) {
+				if (store.has(oldPath)) {
+					store.set(newPath, store.get(oldPath));
+					store.delete(oldPath);
+				}
+			}
+			this.files.delete(oldPath);
+			this.detachFromFolder(file);
+			const renamed = new TFile(newPath);
+			file.path = newPath;
+			file.name = renamed.name;
+			file.basename = renamed.basename;
+			file.extension = renamed.extension;
+			const parent = this.registerFolders(newPath);
+			file.parent = parent;
+			parent.children.push(file);
+			this.files.set(newPath, file);
+			this.trigger('rename', file, oldPath);
+		},
+	);
+
+	/**
+	 * Deletes a file for good. In the mock that is what trashing does too -
+	 * the difference between the two lives in the user's trash, which the
+	 * mock does not model - so a test tells them apart by which was called.
+	 * @param file - The file to delete
+	 */
+	delete = jest.fn(async (file: TAbstractFile): Promise<void> => {
+		this.forget(file.path);
+	});
+
+	/**
+	 * Takes a file out of the folder holding it, so a move can file it under
+	 * its new folder without the old one still listing it.
+	 * @param file - The file leaving its folder
+	 */
+	private detachFromFolder(file: TFile): void {
+		const siblings = file.parent?.children ?? [];
+		const index = siblings.indexOf(file);
+		if (index >= 0) {
+			siblings.splice(index, 1);
+		}
+	}
+
+	// A folder is found by its path as well as a file is, as in Obsidian.
 	getAbstractFileByPath = jest.fn(
-		(path: string): TAbstractFile | null => this.files.get(path) ?? null,
+		(path: string): TAbstractFile | null =>
+			this.files.get(path) ?? this.folders.get(path) ?? null,
 	);
 
 	getResourcePath = jest.fn(
@@ -670,9 +866,34 @@ export class Workspace extends Events {
 
 	getLeaf = jest.fn((_newLeaf?: unknown) => this.leaf);
 
+	/** Obsidian's debounced layout save, recorded rather than run. */
+	requestSaveLayout = jest.fn((): void => {
+		// Nothing is saved in a test
+	});
+
 	iterateAllLeaves = jest.fn((_callback: (leaf: unknown) => void): void => {
 		// No leaves unless a test seeds them
 	});
+
+	ensureSideLeaf = jest.fn(
+		async (
+			type: string,
+			_side: 'left' | 'right',
+			options: { active?: boolean; reveal?: boolean } = {},
+		): Promise<WorkspaceLeaf> => {
+			const leaf = new WorkspaceLeaf(this.app);
+			await leaf.setViewState({
+				type,
+				...(options.active === undefined
+					? {}
+					: { active: options.active }),
+			});
+			return leaf;
+		},
+	);
+
+	/** The app this workspace belongs to, set by the mock App. */
+	app: App | null = null;
 
 	/**
 	 * Sets what getActiveViewOfType answers with.
@@ -984,17 +1205,113 @@ export class Component {
 		el: EventTarget,
 		type: string,
 		callback: EventListenerOrEventListenerObject,
+		options?: boolean | AddEventListenerOptions,
 	): void {
 		// Faithful enough for tests: attach the listener and auto-remove it on
 		// unload, so delegated handlers actually fire when events are dispatched.
+		// The options travel to both calls, as they do in Obsidian: a capture
+		// listener is only removed by a call that names capture as well.
 		if (el && typeof el.addEventListener === 'function') {
-			el.addEventListener(type, callback);
-			this.register(() => el.removeEventListener(type, callback));
+			el.addEventListener(type, callback, options);
+			this.register(() => {
+				el.removeEventListener(type, callback, options);
+			});
 		}
 	}
 
-	registerInterval(_id: number): void {
-		// Mock implementation
+	registerInterval(id: number): number {
+		// Obsidian clears the interval on unload and hands the id back, so a
+		// caller can write `this.registerInterval(window.setInterval(...))`.
+		this.register(() => {
+			window.clearInterval(id);
+		});
+		return id;
+	}
+}
+
+/** Mock WorkspaceSidedock: a sidebar that can be collapsed and expanded. */
+/**
+ * Mock WorkspaceLeaf: holds the view state it was given, the way a sidebar
+ * tab the plugin opened would.
+ */
+export class WorkspaceLeaf {
+	/** The view this leaf shows, when a test or setViewState put one there. */
+	view: unknown = null;
+	/** The last state set on the leaf. */
+	viewState: { type: string; active?: boolean } | null = null;
+
+	constructor(readonly app: App | null = null) {}
+
+	setViewState = jest.fn(
+		(state: { type: string; active?: boolean }): Promise<void> => {
+			this.viewState = state;
+			return Promise.resolve();
+		},
+	);
+}
+
+/**
+ * Mock ItemView: a Component over a leaf, with the container Obsidian gives a
+ * view and its content element, and the header actions it adds recorded so a
+ * test can click them.
+ */
+export abstract class ItemView extends Component {
+	app: App;
+	containerEl: HTMLElement = addObsidianDomExtensions(
+		document.createElement('div'),
+	);
+	contentEl: HTMLElement = addObsidianDomExtensions(
+		document.createElement('div'),
+	);
+	/** Header actions added through addAction, in order. */
+	readonly actions: { icon: string; title: string; el: HTMLElement }[] = [];
+
+	constructor(readonly leaf: WorkspaceLeaf) {
+		super();
+		this.app = leaf.app ?? new App();
+		this.containerEl.appendChild(this.contentEl);
+	}
+
+	abstract getViewType(): string;
+	abstract getDisplayText(): string;
+
+	getIcon(): string {
+		return '';
+	}
+
+	onOpen(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	onClose(): Promise<void> {
+		return Promise.resolve();
+	}
+
+	getState(): Record<string, unknown> {
+		return {};
+	}
+
+	setState(_state: unknown, _result: unknown): Promise<void> {
+		return Promise.resolve();
+	}
+
+	addAction(
+		icon: string,
+		title: string,
+		callback: (event: MouseEvent) => unknown,
+	): HTMLElement {
+		const el = addObsidianDomExtensions(document.createElement('a'));
+		el.setAttribute('aria-label', title);
+		el.setAttribute('data-icon', icon);
+		el.addEventListener('click', (event) => {
+			callback(event);
+		});
+		this.actions.push({ icon, title, el });
+		return el;
+	}
+
+	onPaneMenu(_menu: Menu, _source: string): void {
+		// Obsidian adds its own pane entries here; none matter to a test
 	}
 }
 
@@ -1051,9 +1368,142 @@ export const MarkdownRenderer = {
  */
 export const modalInstances: Modal[] = [];
 
+/** A modifier a hotkey names, as Obsidian spells it. */
+export type Modifier = 'Mod' | 'Ctrl' | 'Meta' | 'Shift' | 'Alt';
+
+/** What a keymap listener is told about the keys that reached it. */
+export interface KeymapContext {
+	modifiers: string | null;
+	key: string | null;
+	vkey: string;
+}
+
+/** A listener registered on a scope; returning false prevents the default. */
+export type KeymapEventListener = (
+	evt: KeyboardEvent,
+	ctx: KeymapContext,
+) => unknown;
+
+/** The handle {@link Scope.register} returns, for {@link Scope.unregister}. */
+export interface KeymapEventHandler {
+	scope: Scope;
+	modifiers: string | null;
+	key: string | null;
+}
+
+/** One registration, with what it answers to. */
+interface ScopeEntry {
+	handler: KeymapEventHandler;
+	modifiers: Modifier[] | null;
+	func: KeymapEventListener;
+}
+
+/**
+ * Mock Scope: the keymap scope a modal makes active while it is open.
+ *
+ * Obsidian's keymap hears every keydown and hands it to the active scope,
+ * which runs the first listener whose key and modifiers match, or defers to
+ * its parent when none does; a listener that returns false has the default
+ * prevented. {@link Scope.handleKey} is that step, and the mock Modal calls it
+ * for keydowns inside the dialog while it is open. A key matches regardless
+ * of case, and `Mod` is Ctrl, as on Windows and Linux. A listener receives
+ * the event as it is, IME composition included: whether Obsidian's keymap
+ * filters composition keystrokes is not part of its documented API, so the
+ * double leaves that to the listener.
+ */
+export class Scope {
+	private readonly entries: ScopeEntry[] = [];
+
+	constructor(private readonly parent?: Scope) {}
+
+	register(
+		modifiers: Modifier[] | null,
+		key: string | null,
+		func: KeymapEventListener,
+	): KeymapEventHandler {
+		const handler: KeymapEventHandler = {
+			scope: this,
+			modifiers: modifiers === null ? null : modifiers.join(','),
+			key,
+		};
+		this.entries.push({ handler, modifiers, func });
+		return handler;
+	}
+
+	unregister(handler: KeymapEventHandler): void {
+		const index = this.entries.findIndex(
+			(entry) => entry.handler === handler,
+		);
+		if (index >= 0) {
+			this.entries.splice(index, 1);
+		}
+	}
+
+	/**
+	 * Mock-only: what the keymap does with a keydown while this scope is
+	 * active. Runs the first matching listener, or the parent's, and
+	 * prevents the default when the listener returns false.
+	 * @param evt - The keydown
+	 * @returns Whether a listener of this scope or a parent answered it
+	 */
+	handleKey(evt: KeyboardEvent): boolean {
+		const entry = this.entries.find((candidate) =>
+			Scope.matches(candidate, evt),
+		);
+		if (!entry) {
+			return this.parent?.handleKey(evt) ?? false;
+		}
+		const result = entry.func(evt, {
+			modifiers: entry.handler.modifiers,
+			key: entry.handler.key,
+			vkey: evt.key,
+		});
+		if (result === false) {
+			evt.preventDefault();
+		}
+		return true;
+	}
+
+	/** Whether a registration answers to a keydown. */
+	private static matches(entry: ScopeEntry, evt: KeyboardEvent): boolean {
+		const { key } = entry.handler;
+		if (key !== null && key.toLowerCase() !== evt.key.toLowerCase()) {
+			return false;
+		}
+		if (entry.modifiers === null) {
+			return true;
+		}
+		const wanted = new Set<Modifier>(
+			entry.modifiers.map((modifier) =>
+				modifier === 'Mod' ? 'Ctrl' : modifier,
+			),
+		);
+		const pressed: [Modifier, boolean][] = [
+			['Ctrl', evt.ctrlKey],
+			['Meta', evt.metaKey],
+			['Shift', evt.shiftKey],
+			['Alt', evt.altKey],
+		];
+		return pressed.every(
+			([modifier, down]) => wanted.has(modifier) === down,
+		);
+	}
+}
+
 export class Modal {
 	app: App;
 	contentEl: HTMLElement;
+
+	/**
+	 * The keymap scope that is active while the dialog is open, as in
+	 * Obsidian. Keydowns inside the dialog reach it from open() to close().
+	 */
+	scope: Scope = new Scope();
+
+	/** Routes keydowns to {@link scope} while the dialog is open. */
+	private readonly routeKeys = (evt: KeyboardEvent): void => {
+		this.scope.handleKey(evt);
+	};
 
 	/**
 	 * The dialog's own element, holding the title and the body the way
@@ -1086,17 +1536,32 @@ export class Modal {
 	// and an instance-level jest.fn would put neither within reach of spyOn.
 	open(): void {
 		modalInstances.push(this);
+		// Mirrors Obsidian: an open dialog's scope is the active one. Obsidian
+		// hears keys on the window; the mock hears them on the dialog, in the
+		// capture phase, so every keydown inside it reaches the scope.
+		this.modalEl.addEventListener('keydown', this.routeKeys, true);
 		// Mirrors Obsidian: opening renders the modal contents
 		this.onOpen();
 	}
 
 	close(): void {
+		this.modalEl.removeEventListener('keydown', this.routeKeys, true);
 		// Mirrors Obsidian: closing tears the contents down
 		this.onClose();
 	}
 
 	setTitle(title: string): this {
 		this.titleEl.setText(title);
+		return this;
+	}
+
+	setContent(content: string | DocumentFragment): this {
+		this.contentEl.empty();
+		if (typeof content === 'string') {
+			this.contentEl.setText(content);
+		} else {
+			this.contentEl.appendChild(content);
+		}
 		return this;
 	}
 
@@ -1182,6 +1647,19 @@ export class ButtonComponent {
 		document.createElement('button'),
 	);
 
+	/**
+	 * @param containerEl - Where the button goes, as in Obsidian; optional
+	 *   here because the mock Setting places the buttons it builds itself
+	 */
+	constructor(containerEl?: HTMLElement) {
+		containerEl?.appendChild(this.buttonEl);
+	}
+
+	setClass(cls: string): this {
+		this.buttonEl.classList.add(cls);
+		return this;
+	}
+
 	setButtonText(text: string): this {
 		this.buttonEl.textContent = text;
 		return this;
@@ -1200,7 +1678,11 @@ export class ButtonComponent {
 	}
 
 	setDestructive(): this {
-		this.buttonEl.classList.add('mod-destructive');
+		// obsidian.d.ts does not say which class this applies. The mock reuses
+		// the one setWarning() applies, so a test can still find a destructive
+		// button in the DOM; a test telling the two methods apart watches the
+		// calls instead.
+		this.buttonEl.classList.add('mod-warning');
 		return this;
 	}
 
@@ -1219,10 +1701,83 @@ export class ButtonComponent {
 		return this;
 	}
 
-	onClick(callback: () => void): this {
-		// Clicking buttonEl triggers the handler, as in Obsidian
-		this.buttonEl.addEventListener('click', callback);
+	onClick(callback: (evt: MouseEvent) => unknown): this {
+		// Clicking buttonEl triggers the handler with the click, as in Obsidian
+		this.buttonEl.addEventListener('click', (evt) => {
+			callback(evt);
+		});
 		return this;
+	}
+}
+
+/**
+ * Mock ConfirmationButton: a button in a {@link ConfirmationModal}'s row.
+ * Clicking it closes the modal once the handler resolves, unless the handler
+ * returns a truthy value, as in Obsidian.
+ */
+export class ConfirmationButton extends ButtonComponent {
+	handler: ((evt: MouseEvent) => unknown) | null = null;
+
+	override onClick(handler: (evt: MouseEvent) => unknown): this {
+		this.handler = handler;
+		return this;
+	}
+
+	setInitialFocus(): this {
+		return this;
+	}
+
+	setSecondary(): this {
+		return this;
+	}
+
+	setCancel(): this {
+		return this;
+	}
+}
+
+/**
+ * Mock ConfirmationModal: Obsidian's confirm dialog. The buttons go into
+ * `buttonContainerEl`, which sits under the body as Obsidian lays it out.
+ */
+export class ConfirmationModal extends Modal {
+	buttonContainerEl: HTMLElement = addObsidianDomExtensions(
+		document.createElement('div'),
+	);
+
+	constructor(app: App) {
+		super(app);
+		this.buttonContainerEl.addClass('modal-button-container');
+		this.modalEl.appendChild(this.buttonContainerEl);
+	}
+
+	addClass(cls: string): this {
+		this.modalEl.addClass(cls);
+		return this;
+	}
+
+	addCheckbox(_label: string, _cb: (value: boolean) => unknown): this {
+		return this;
+	}
+
+	addButton(cb: (btn: ConfirmationButton) => unknown): this {
+		const button = new ConfirmationButton();
+		cb(button);
+		this.buttonContainerEl.appendChild(button.buttonEl);
+		button.buttonEl.addEventListener('click', (evt) => {
+			void Promise.resolve(button.handler?.(evt)).then((keepOpen) => {
+				if (!keepOpen) {
+					this.close();
+				}
+			});
+		});
+		return this;
+	}
+
+	addCancelButton(text = 'Cancel'): this {
+		return this.addButton((button) =>
+			button.setButtonText(text).setCancel(),
+		);
 	}
 }
 
@@ -1278,6 +1833,9 @@ export class Setting {
 	}
 
 	setHeading(): this {
+		// Obsidian's own heading row class, so a test can tell a heading from
+		// a row with a value.
+		this.settingEl.classList.add('setting-item-heading');
 		return this;
 	}
 
@@ -1366,36 +1924,109 @@ export class Setting {
 }
 
 /**
- * Mock PluginSettingTab class.
+ * What renders a tab's definitions once the tab is open: the stand-in for
+ * Obsidian's settings framework in `tests/mocks/settingsFramework.ts`.
  */
-export class PluginSettingTab {
+export interface SettingTabRenderer {
+	render(containerEl: HTMLElement, items: readonly unknown[]): void;
+	refreshState(): void;
+	release(): void;
+}
+
+/**
+ * Mock SettingTab: the declarative half of Obsidian's settings tab. `update()`
+ * re-reads `getSettingDefinitions()` into `settingItems`, as the real one
+ * does, and while the tab is open (see {@link __openSettingTab}) the stand-in
+ * renderer draws them into `containerEl`.
+ */
+export class SettingTab {
 	app: App;
 	containerEl: HTMLElement = addObsidianDomExtensions(
 		document.createElement('div'),
 	);
-	plugin: Plugin;
+	settingItems: unknown[] = [];
 
-	constructor(app: App, plugin: Plugin) {
+	/** The renderer drawing the tab while it is open, null while it is not. */
+	renderer: SettingTabRenderer | null = null;
+
+	constructor(app: App) {
 		this.app = app;
-		this.plugin = plugin;
 	}
 
+	getSettingDefinitions(): unknown[] {
+		return [];
+	}
+
+	update(): void {
+		this.settingItems = this.getSettingDefinitions();
+		this.renderer?.render(this.containerEl, this.settingItems);
+	}
+
+	getControlValue(_key: string): unknown {
+		// The real default reads the vault config, which no test reads.
+		return undefined;
+	}
+
+	setControlValue(_key: string, _value: unknown): void | Promise<void> {
+		// The real default writes the vault config, which no test reads.
+	}
+
+	refreshDomState(): void {
+		this.renderer?.refreshState();
+	}
+
+	/** Deprecated since 1.13 and never called for a declarative tab. */
 	display(): void {
 		// Mock implementation
 	}
 
+	/**
+	 * Hides the tab: the framework releases the rows it rendered, running the
+	 * cleanup each render definition returned.
+	 */
 	hide(): void {
-		// Mock implementation
+		this.renderer?.release();
+		this.renderer = null;
+	}
+}
+
+/**
+ * Opens a settings tab the way the user does from the settings window: the
+ * framework renders the tab's definitions and keeps the rows until the tab is
+ * hidden. The renderer is passed in by `tests/helpers/declarativeSettings.ts`,
+ * which is what keeps this module free of an import cycle with it.
+ * @param tab - The tab to open, an instance of this mock's SettingTab
+ * @param createRenderer - Builds the renderer bound to the tab's value hooks
+ */
+export function __openSettingTab(
+	tab: unknown,
+	createRenderer: (host: SettingTab) => SettingTabRenderer,
+): void {
+	if (!(tab instanceof SettingTab)) {
+		throw new TypeError('__openSettingTab expects a mock SettingTab');
+	}
+	tab.renderer?.release();
+	tab.renderer = createRenderer(tab);
+	tab.update();
+}
+
+/**
+ * Mock PluginSettingTab: a SettingTab whose values default to the plugin's
+ * `settings` object, as the real one's do.
+ */
+export class PluginSettingTab extends SettingTab {
+	plugin: Plugin;
+
+	constructor(app: App, plugin: Plugin) {
+		super(app);
+		this.plugin = plugin;
 	}
 
-	/**
-	 * Obsidian 1.13's declarative re-render, which re-reads
-	 * getSettingDefinitions() and renders the tab from it. Present here because
-	 * the plugin builds against 1.13; a test that models an older Obsidian
-	 * deletes it from this prototype before constructing its tab.
-	 */
-	update(): void {
-		// Mock implementation
+	override getControlValue(key: string): unknown {
+		const settings: unknown = Reflect.get(this.plugin, 'settings');
+		return typeof settings === 'object' && settings !== null
+			? Reflect.get(settings, key)
+			: undefined;
 	}
 }
 
@@ -1425,6 +2056,28 @@ export class Editor {
 	}
 }
 
+/** The part of Obsidian's MarkdownFileInfo the editor field carries here. */
+export interface MockMarkdownFileInfo {
+	file: TFile | null;
+	editor?: unknown;
+}
+
+/**
+ * Obsidian's `editorInfoField`: the CodeMirror state field through which an
+ * editor's view names the Obsidian editor and note it belongs to.
+ *
+ * It is a real `StateField`, because what reads it is a real CodeMirror view.
+ * CodeMirror runs in jsdom, so a test mounts an actual `EditorView` and seeds
+ * the field with `editorInfoField.init(() => info)`, the way Obsidian seeds it
+ * for every Markdown editor; the DOM-to-position mapping under test then runs
+ * for real instead of through a stubbed `posAtDOM`. A view built without
+ * seeding it holds null, which reads as an editor Obsidian does not own.
+ */
+export const editorInfoField = StateField.define<MockMarkdownFileInfo | null>({
+	create: () => null,
+	update: (value) => value,
+});
+
 /**
  * Mock TAbstractFile class.
  */
@@ -1448,6 +2101,14 @@ export class TAbstractFile {
  */
 export class TFolder extends TAbstractFile {
 	children: TAbstractFile[] = [];
+
+	/**
+	 * Whether this is the vault's root. Obsidian's root has the path `/`;
+	 * this mock's has an empty one, and both read as the root here.
+	 */
+	isRoot(): boolean {
+		return this.path === '' || this.path === '/';
+	}
 }
 
 /**
@@ -1475,7 +2136,10 @@ export class TFile extends TAbstractFile {
 }
 
 /**
- * Mock DropdownComponent class.
+ * Mock DropdownComponent: a `select.dropdown`, appended to the container it
+ * is constructed with, as Obsidian's own is. The app also appends a hidden
+ * second select it measures option widths with; nothing the plugin does
+ * reads it, so it is left out.
  */
 export class DropdownComponent {
 	selectEl: HTMLSelectElement = addObsidianDomExtensions(
@@ -1486,6 +2150,15 @@ export class DropdownComponent {
 
 	/** Change handler, stored as Obsidian does for test triggering. */
 	changeCallback: ((value: string) => void) | null = null;
+
+	/**
+	 * @param containerEl - Where Obsidian puts the dropdown when it is built
+	 *   on its own; a Setting row attaches it itself
+	 */
+	constructor(containerEl?: HTMLElement) {
+		this.selectEl.classList.add('dropdown');
+		containerEl?.appendChild(this.selectEl);
+	}
 
 	addOption(value: string, display: string): this {
 		const option = document.createElement('option');
@@ -1645,13 +2318,24 @@ export class ExtraButtonComponent {
 		document.createElement('div'),
 	);
 	disabled = false;
+	private clickCallback: (() => void) | null = null;
 
-	constructor() {
+	/**
+	 * @param containerEl - Where Obsidian puts the button when it is built on
+	 *   its own; a Setting row attaches it itself
+	 */
+	constructor(containerEl?: HTMLElement) {
+		containerEl?.appendChild(this.extraSettingsEl);
 		this.extraSettingsEl.classList.add(
 			'clickable-icon',
 			'extra-setting-button',
 		);
 		this.extraSettingsEl.setAttribute('tabindex', '0');
+		this.extraSettingsEl.addEventListener('click', () => {
+			if (!this.disabled) {
+				this.clickCallback?.();
+			}
+		});
 	}
 
 	setIcon(icon: string): this {
@@ -1679,8 +2363,13 @@ export class ExtraButtonComponent {
 		return this;
 	}
 
+	/**
+	 * Obsidian's own onClick: one handler, replaced by the next call, and not
+	 * called while the button is disabled.
+	 * @param callback - What a click runs
+	 */
 	onClick(callback: () => void): this {
-		this.extraSettingsEl.addEventListener('click', callback);
+		this.clickCallback = callback;
 		return this;
 	}
 }
@@ -1731,6 +2420,10 @@ export class ToggleComponent {
 		return this;
 	}
 
+	getValue(): boolean {
+		return this.value;
+	}
+
 	setDisabled(disabled: boolean): this {
 		this.disabled = disabled;
 		// Obsidian marks a disabled toggle with is-disabled rather than a DOM
@@ -1750,33 +2443,114 @@ export class ToggleComponent {
 }
 
 /**
- * Mock SliderComponent class.
+ * Mock SliderComponent, built the way Obsidian 1.14 builds it: a
+ * `span.slider-value` that shows the value inline, followed by an
+ * `input[type=range].slider`, both appended to the container it is given.
+ *
+ * The parts the plugin depends on are modelled after the app's own code:
+ *
+ * - The track fill: every change of value writes `--slider-fill-ratio`,
+ *   which the app's slider class paints the accent up to.
+ * - When the change callback fires. Dragging fires `input`, releasing fires
+ *   `change`; the callback runs on the first only after `setInstant(true)`,
+ *   and on the second only without it.
+ * - `setValue` calls the change callback too, whenever the value differs
+ *   from the one shown. That is easy to miss and matters: code that pushes
+ *   an outside value into the slider hears it back as though the user moved
+ *   it.
  */
 export class SliderComponent {
-	sliderEl: HTMLInputElement = addObsidianDomExtensions(
+	readonly valueEl: HTMLElement = addObsidianDomExtensions(
+		document.createElement('span'),
+	);
+	readonly sliderEl: HTMLInputElement = addObsidianDomExtensions(
 		document.createElement('input'),
 	);
-	value = 0;
 	disabled = false;
+	instant = false;
 
 	/** Change handler, stored as Obsidian does for test triggering. */
 	changeCallback: ((value: number) => void) | null = null;
 
-	setLimits(_min: number, _max: number, _step: number): this {
+	private displayFormat: ((value: number) => string) | null = null;
+
+	constructor(containerEl?: HTMLElement) {
+		this.valueEl.classList.add('slider-value');
+		this.sliderEl.type = 'range';
+		this.sliderEl.classList.add('slider');
+		// The app keeps a drag on the slider from opening a sidebar on mobile
+		this.sliderEl.dataset['ignoreSwipe'] = 'true';
+		containerEl?.append(this.valueEl, this.sliderEl);
+		this.sliderEl.addEventListener('input', () => {
+			this.updateDisplay();
+			if (this.instant) {
+				this.changeCallback?.(this.getValue());
+			}
+		});
+		this.sliderEl.addEventListener('change', () => {
+			if (!this.instant) {
+				this.changeCallback?.(this.getValue());
+			}
+		});
+		this.updateDisplay();
+	}
+
+	setLimits(
+		min: number | null,
+		max: number | null,
+		step: number | 'any',
+	): this {
+		this.sliderEl.setAttribute('min', String(min));
+		this.sliderEl.setAttribute('max', String(max));
+		this.sliderEl.setAttribute('step', String(step));
+		this.updateDisplay();
 		return this;
+	}
+
+	getValue(): number {
+		return Number(this.sliderEl.value);
 	}
 
 	setValue(value: number): this {
-		this.value = value;
+		if (this.getValue() !== value) {
+			this.sliderEl.value = String(value);
+			this.updateDisplay();
+			this.changeCallback?.(value);
+		}
 		return this;
 	}
 
+	setInstant(instant: boolean): this {
+		this.instant = instant;
+		return this;
+	}
+
+	setDisplayFormat(format: (value: number) => string): this {
+		this.displayFormat = format;
+		this.updateDisplay();
+		return this;
+	}
+
+	/** The text the inline value shows, formatted as the app formats it. */
+	getValuePretty(): string {
+		const value = this.getValue();
+		if (this.displayFormat) {
+			return this.displayFormat(value);
+		}
+		const step = this.sliderEl.getAttribute('step') ?? '1';
+		return step === 'any' || parseFloat(step) < 1
+			? value.toFixed(2)
+			: value.toString();
+	}
+
+	/** Deprecated in Obsidian, which now always shows the value inline. */
 	setDynamicTooltip(): this {
 		return this;
 	}
 
 	setDisabled(disabled: boolean): this {
 		this.disabled = disabled;
+		this.sliderEl.disabled = disabled;
 		return this;
 	}
 
@@ -1784,13 +2558,75 @@ export class SliderComponent {
 		this.changeCallback = callback;
 		return this;
 	}
+
+	private updateDisplay(): void {
+		this.valueEl.textContent = this.getValuePretty();
+		const min = parseFloat(this.sliderEl.getAttribute('min') ?? '');
+		const max = parseFloat(this.sliderEl.getAttribute('max') ?? '');
+		const low = Number.isFinite(min) ? min : 0;
+		const high = Number.isFinite(max) ? max : 100;
+		const ratio = high > low ? (this.getValue() - low) / (high - low) : 0;
+		this.sliderEl.style.setProperty('--slider-fill-ratio', String(ratio));
+	}
 }
 
 /**
- * Mock normalizePath function.
+ * Mock ProgressBarComponent, built as Obsidian builds it: a
+ * `div.setting-progress-bar` appended to its container, holding a
+ * `div.setting-progress-bar-inner` whose inline width is the value. The value
+ * is clamped into 0..100 the way the app clamps it, and a NaN passes through
+ * unclamped there as well, which is why callers sanitise it first.
+ */
+export class ProgressBarComponent {
+	readonly progressBar: HTMLElement;
+	readonly lineEl: HTMLElement;
+	private value = 0;
+
+	constructor(containerEl: HTMLElement) {
+		this.progressBar = addObsidianDomExtensions(
+			document.createElement('div'),
+		);
+		this.progressBar.classList.add('setting-progress-bar');
+		this.lineEl = addObsidianDomExtensions(document.createElement('div'));
+		this.lineEl.classList.add('setting-progress-bar-inner');
+		this.progressBar.appendChild(this.lineEl);
+		containerEl.appendChild(this.progressBar);
+	}
+
+	getValue(): number {
+		return this.value;
+	}
+
+	setValue(value: number): this {
+		const clamped = Math.min(100, Math.max(0, value));
+		this.value = clamped;
+		this.lineEl.style.width = `${String(clamped)}%`;
+		return this;
+	}
+
+	setVisibility(visible: boolean): this {
+		this.progressBar.hidden = !visible;
+		return this;
+	}
+}
+
+/**
+ * Mock normalizePath, doing what Obsidian's does to a path: backslashes become
+ * slashes, runs of slashes collapse, and the slashes at either end go, the
+ * vault root being "/". A path joined onto the root's "" directory comes out
+ * relative, as it does in the app.
  */
 export function normalizePath(path: string): string {
-	return path.replace(/\\/g, '/').replace(/\/+/g, '/');
+	const normalized = path
+		.replace(/\\/g, '/')
+		.replace(/\/+/g, '/')
+		.replace(/^\/|\/$/g, '');
+	return normalized === '' ? '/' : normalized;
+}
+
+/** Mock arrayBufferToBase64, the standard base64 of the bytes. */
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+	return Buffer.from(buffer).toString('base64');
 }
 
 /**
@@ -1803,6 +2639,41 @@ export function normalizePath(path: string): string {
 export const setIcon = jest.fn((el: HTMLElement, iconId: string): void => {
 	el.setAttribute('data-icon', iconId);
 });
+
+/** The options Obsidian's setTooltip takes, as far as the mock records them. */
+export interface TooltipOptions {
+	placement?: 'bottom' | 'right' | 'left' | 'top';
+	classes?: string[];
+	gap?: number;
+	delay?: number;
+}
+
+/**
+ * Mock setTooltip, doing what Obsidian's does to the element: the tooltip
+ * text becomes the element's `aria-label`, which is also what a screen reader
+ * announces, and each option lands in the `data-tooltip-*` attribute the app's
+ * tooltip reads it from. Bottom is the app's default placement and is not
+ * written, as in Obsidian.
+ */
+export function setTooltip(
+	el: HTMLElement,
+	tooltip: string,
+	options: TooltipOptions = {},
+): void {
+	el.setAttribute('aria-label', tooltip);
+	if (options.placement && options.placement !== 'bottom') {
+		el.setAttribute('data-tooltip-position', options.placement);
+	}
+	if (options.classes) {
+		el.setAttribute('data-tooltip-classes', options.classes.join(' '));
+	}
+	if (options.delay) {
+		el.setAttribute('data-tooltip-delay', String(options.delay));
+	}
+	if (options.gap) {
+		el.setAttribute('data-tooltip-gap', String(options.gap));
+	}
+}
 
 /**
  * Mock getFrontMatterInfo: locates the frontmatter block a note opens with the
@@ -1845,6 +2716,35 @@ export function getFrontMatterInfo(content: string): {
 export function getLinkpath(linktext: string): string {
 	const hashIndex = linktext.indexOf('#');
 	return hashIndex >= 0 ? linktext.slice(0, hashIndex) : linktext;
+}
+
+/**
+ * Mock prepareSimpleSearch: every space-separated word of the query must
+ * occur in the text, in any order and without regard to case, as Obsidian's
+ * simple search reads a query. The score is the negated count of characters
+ * between the matches, so a tighter match scores higher.
+ */
+export function prepareSimpleSearch(
+	query: string,
+): (text: string) => { score: number; matches: [number, number][] } | null {
+	const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+	return (text: string) => {
+		const lower = text.toLowerCase();
+		const matches: [number, number][] = [];
+		for (const word of words) {
+			const start = lower.indexOf(word);
+			if (start < 0) {
+				return null;
+			}
+			matches.push([start, start + word.length]);
+		}
+		const span =
+			matches.length === 0
+				? 0
+				: Math.max(...matches.map(([, end]) => end)) -
+					Math.min(...matches.map(([start]) => start));
+		return { score: span === 0 ? 0 : -span, matches };
+	};
 }
 
 /**
@@ -1935,7 +2835,7 @@ export const Platform = {
  * answers from: a test that models an older Obsidian moves it (through
  * __setApiVersion) rather than keeping a second version beside this one.
  */
-export const DEFAULT_MOCK_API_VERSION = '1.13.0';
+export const DEFAULT_MOCK_API_VERSION = '1.14.4';
 
 export let apiVersion: string = DEFAULT_MOCK_API_VERSION;
 
@@ -2019,27 +2919,42 @@ export abstract class AbstractInputSuggest<T> {
 }
 
 /**
- * Debounced function type returned by the debounce mock.
+ * Debounced function type returned by the debounce mock. A call and
+ * `cancel()` hand the debouncer back, as Obsidian's typings declare.
  */
-export type Debouncer<T extends unknown[], V> = ((...args: T) => void) & {
-	cancel: () => void;
+export type Debouncer<T extends unknown[], V> = ((
+	...args: T
+) => Debouncer<T, V>) & {
+	cancel: () => Debouncer<T, V>;
 	run: () => V | undefined;
 };
 
 /**
  * Mock debounce function. Defers the callback to a timer like the real
  * implementation so tests can flush it with fake timers or run().
+ *
+ * `resetTimer` decides what a call made while one is pending does, as it does
+ * in Obsidian. With it, the wait starts over from that call, so the callback
+ * runs once the calls stop. Without it (the default) the wait keeps running
+ * from the first call of the burst, so a steady stream of calls still runs
+ * the callback once per window. Either way the callback gets the arguments of
+ * the latest call. Obsidian moves a deadline rather than replacing the timer,
+ * which fires at the same moment; replacing it keeps the double independent
+ * of whether a suite fakes Date.
  */
 export function debounce<T extends unknown[], V>(
 	cb: (...args: T) => V,
 	timeout?: number,
-	_resetTimer?: boolean,
+	resetTimer = false,
 ): Debouncer<T, V> {
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	let pendingArgs: T | null = null;
 
-	const debounced = ((...args: T): void => {
+	const debounced = ((...args: T): Debouncer<T, V> => {
 		pendingArgs = args;
+		if (timer !== null && !resetTimer) {
+			return debounced;
+		}
 		if (timer !== null) {
 			clearTimeout(timer);
 		}
@@ -2051,14 +2966,16 @@ export function debounce<T extends unknown[], V>(
 				cb(...callArgs);
 			}
 		}, timeout ?? 0);
+		return debounced;
 	}) as Debouncer<T, V>;
 
-	debounced.cancel = (): void => {
+	debounced.cancel = (): Debouncer<T, V> => {
 		if (timer !== null) {
 			clearTimeout(timer);
 			timer = null;
 		}
 		pendingArgs = null;
+		return debounced;
 	};
 
 	debounced.run = (): V | undefined => {

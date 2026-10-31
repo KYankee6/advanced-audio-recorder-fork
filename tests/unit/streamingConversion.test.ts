@@ -9,28 +9,27 @@ import {
 	extractChannelSample,
 	runStreamingConversion,
 } from 'src/audio/streamingConversion';
+import { ChannelMode } from 'src/audio/downmix';
 
 const mockConversionExecute = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('mediabunny', () => require('../mocks/modules/mediabunny'));
 import {
+	audioTrack,
 	conversionInit,
 	getPrimaryAudioTrack,
 	inputDispose,
 	convertedBuffer,
 } from '../mocks/modules/mediabunny';
 import { BufferTarget } from 'mediabunny';
+import { encodableSampleRate } from 'src/audio/AudioEncoder';
 import { partial } from '../helpers/doubles';
+import { CancellationSource } from 'src/utils/cancellation';
+import { flushMicrotasks, outcomeOf, waitFor } from '../helpers/async';
 
-jest.mock('src/audio/AudioEncoder', () => ({
-	ensureEncoderRegistered: jest.fn().mockResolvedValue(undefined),
-	createOutputFormat: jest.fn().mockReturnValue({}),
-	FORMAT_CODEC_MAP: {
-		webm: 'opus',
-		mp3: 'mp3',
-		wav: 'pcm-s16',
-	},
-}));
+jest.mock('src/audio/AudioEncoder', () =>
+	require('../mocks/modules/streamingAudioEncoder'),
+);
 
 const inputBlob = new Blob(['audio'], { type: 'audio/webm' });
 
@@ -52,11 +51,7 @@ describe('runStreamingConversion', () => {
 		conversionInit.mockImplementation(() =>
 			Promise.resolve(conversionStub),
 		);
-		getPrimaryAudioTrack.mockResolvedValue({
-			getCodec: jest.fn().mockResolvedValue('opus'),
-			isAudioTrack: (): boolean => true,
-			getNumberOfChannels: jest.fn().mockResolvedValue(2),
-		});
+		getPrimaryAudioTrack.mockResolvedValue(audioTrack());
 	});
 
 	it('returns the converted buffer', async () => {
@@ -67,8 +62,107 @@ describe('runStreamingConversion', () => {
 			false,
 		);
 
-		expect(result).toBe(convertedBuffer);
+		expect(result).toEqual({
+			data: convertedBuffer,
+			sampleRateChange: null,
+		});
 		expect(mockConversionExecute).toHaveBeenCalledTimes(1);
+	});
+
+	describe('a cancel while mediabunny converts', () => {
+		/**
+		 * A conversion that runs until mediabunny's own cancel() stops it,
+		 * which then rejects execute the way mediabunny does.
+		 * @param cancel - What cancel() answers with
+		 */
+		function convertingUntilCancelled(cancel: jest.Mock): jest.Mock {
+			let stop = (): void => undefined;
+			const execute = jest.fn(
+				() =>
+					new Promise((_resolve, reject) => {
+						stop = (): void => {
+							reject(new Error('Conversion was canceled.'));
+						};
+					}),
+			);
+			conversionInit.mockResolvedValueOnce({
+				...conversionStub,
+				execute,
+				cancel: jest.fn(() => {
+					stop();
+					return cancel();
+				}),
+			});
+			return execute;
+		}
+
+		it('stops the conversion inside mediabunny', async () => {
+			const cancel = jest.fn().mockResolvedValue(undefined);
+			const execute = convertingUntilCancelled(cancel);
+			const source = new CancellationSource();
+
+			const conversion = runStreamingConversion(
+				inputBlob,
+				'mp3',
+				128000,
+				false,
+				undefined,
+				ChannelMode.Source,
+				source.token,
+			);
+			await waitFor(() => execute.mock.calls.length > 0);
+			source.cancel();
+
+			await expect(conversion).rejects.toThrow('canceled');
+			expect(cancel).toHaveBeenCalledTimes(1);
+		});
+
+		// A cancel() that fails leaves nothing for the caller to do, since the
+		// conversion it was asked to stop has stopped answering already, so it
+		// is logged rather than left as an unhandled rejection.
+		it('logs a cancel that mediabunny could not carry out', async () => {
+			const warn = jest.spyOn(console, 'warn').mockImplementation();
+			const execute = convertingUntilCancelled(
+				jest.fn().mockRejectedValue(new Error('busy')),
+			);
+			const source = new CancellationSource();
+
+			const conversion = runStreamingConversion(
+				inputBlob,
+				'mp3',
+				128000,
+				false,
+				undefined,
+				ChannelMode.Source,
+				source.token,
+			);
+			await waitFor(() => execute.mock.calls.length > 0);
+			source.cancel();
+			await outcomeOf(conversion);
+			await flushMicrotasks();
+
+			const [[logged, reason]] = warn.mock.calls as [[string, Error]];
+			expect(logged).toContain('could not be stopped');
+			expect(reason.message).toBe('busy');
+		});
+
+		it('never starts a conversion cancelled before it began', async () => {
+			const source = new CancellationSource();
+			source.cancel();
+
+			await expect(
+				runStreamingConversion(
+					inputBlob,
+					'mp3',
+					128000,
+					false,
+					undefined,
+					ChannelMode.Source,
+					source.token,
+				),
+			).rejects.toMatchObject({ name: 'AbortError' });
+			expect(mockConversionExecute).not.toHaveBeenCalled();
+		});
 	});
 
 	it('throws for a format without codec mapping', async () => {
@@ -106,16 +200,16 @@ describe('runStreamingConversion', () => {
 
 		expect(conversionInit).toHaveBeenCalledWith(
 			expect.objectContaining({
-				audio: { codec: 'mp3', bitrate: 96000 },
+				audio: {
+					codec: 'mp3',
+					quality: { options: { bitrate: 96000 } },
+				},
 			}),
 		);
 	});
 
 	it('omits the bitrate for a codec-matching remux', async () => {
-		getPrimaryAudioTrack.mockResolvedValue({
-			getCodec: jest.fn().mockResolvedValue('mp3'),
-			isAudioTrack: (): boolean => true,
-		});
+		getPrimaryAudioTrack.mockResolvedValue(audioTrack({ codec: 'mp3' }));
 
 		await runStreamingConversion(inputBlob, 'mp3', 96000, true);
 
@@ -127,16 +221,16 @@ describe('runStreamingConversion', () => {
 	});
 
 	it('res-encode a codec match when remux is not allowed', async () => {
-		getPrimaryAudioTrack.mockResolvedValue({
-			getCodec: jest.fn().mockResolvedValue('mp3'),
-			isAudioTrack: (): boolean => true,
-		});
+		getPrimaryAudioTrack.mockResolvedValue(audioTrack({ codec: 'mp3' }));
 
 		await runStreamingConversion(inputBlob, 'mp3', 96000, false);
 
 		expect(conversionInit).toHaveBeenCalledWith(
 			expect.objectContaining({
-				audio: { codec: 'mp3', bitrate: 96000 },
+				audio: {
+					codec: 'mp3',
+					quality: { options: { bitrate: 96000 } },
+				},
 			}),
 		);
 	});
@@ -233,7 +327,7 @@ describe('runStreamingConversion', () => {
 				conversionInit.mock.calls[0][0] as {
 					audio: {
 						codec: string;
-						bitrate?: number;
+						quality?: { options: { bitrate: number } };
 						process?: (sample: unknown) => unknown;
 						processedNumberOfChannels?: number;
 						numberOfChannels?: number;
@@ -241,7 +335,7 @@ describe('runStreamingConversion', () => {
 				}
 			).audio;
 			expect(audio.codec).toBe('mp3');
-			expect(audio.bitrate).toBe(96000);
+			expect(audio.quality?.options.bitrate).toBe(96000);
 			expect(audio.processedNumberOfChannels).toBe(1);
 			expect(typeof audio.process).toBe('function');
 			// mediabunny's own remixing (Web Audio speaker rules) is not
@@ -250,11 +344,9 @@ describe('runStreamingConversion', () => {
 		});
 
 		it('sends the bitrate for a mono mix even on a codec match', async () => {
-			getPrimaryAudioTrack.mockResolvedValue({
-				getCodec: jest.fn().mockResolvedValue('mp3'),
-				isAudioTrack: (): boolean => true,
-				getNumberOfChannels: jest.fn().mockResolvedValue(2),
-			});
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ codec: 'mp3' }),
+			);
 
 			await runStreamingConversion(
 				inputBlob,
@@ -270,35 +362,14 @@ describe('runStreamingConversion', () => {
 			// mediabunny's default quality
 			const audio = (
 				conversionInit.mock.calls[0][0] as {
-					audio: { bitrate?: number; process?: unknown };
+					audio: {
+						quality?: { options: { bitrate: number } };
+						process?: unknown;
+					};
 				}
 			).audio;
-			expect(audio.bitrate).toBe(96000);
+			expect(audio.quality?.options.bitrate).toBe(96000);
 			expect(typeof audio.process).toBe('function');
-		});
-
-		it('keeps remux eligibility for a mono mix of already-mono input', async () => {
-			getPrimaryAudioTrack.mockResolvedValue({
-				getCodec: jest.fn().mockResolvedValue('mp3'),
-				isAudioTrack: (): boolean => true,
-				getNumberOfChannels: jest.fn().mockResolvedValue(1),
-			});
-
-			await runStreamingConversion(
-				inputBlob,
-				'mp3',
-				96000,
-				true,
-				undefined,
-				'mono-mix',
-			);
-
-			// Nothing to mix: the packets can be copied untouched
-			expect(conversionInit).toHaveBeenCalledWith(
-				expect.objectContaining({
-					audio: { codec: 'mp3' },
-				}),
-			);
 		});
 
 		it('averages all channels inside the mix hook', async () => {
@@ -375,14 +446,12 @@ describe('runStreamingConversion', () => {
 			},
 		);
 
-		it.each(['mono-left', 'mono-right'] as const)(
-			'keeps remux eligibility for a %s pick on already-mono input',
+		it.each(['mono-mix', 'mono-left', 'mono-right'] as const)(
+			'keeps remux eligibility for %s on already-mono input',
 			async (mode) => {
-				getPrimaryAudioTrack.mockResolvedValue({
-					getCodec: jest.fn().mockResolvedValue('mp3'),
-					isAudioTrack: (): boolean => true,
-					getNumberOfChannels: jest.fn().mockResolvedValue(1),
-				});
+				getPrimaryAudioTrack.mockResolvedValue(
+					audioTrack({ codec: 'mp3', numberOfChannels: 1 }),
+				);
 
 				await runStreamingConversion(
 					inputBlob,
@@ -393,8 +462,8 @@ describe('runStreamingConversion', () => {
 					mode,
 				);
 
-				// Picking either side of a mono source is a no-op: the
-				// only channel is already the required mono output.
+				// Mixing or picking either side of a mono source is a no-op:
+				// the only channel is already the required mono output.
 				expect(conversionInit).toHaveBeenCalledWith(
 					expect.objectContaining({
 						audio: { codec: 'mp3' },
@@ -402,6 +471,132 @@ describe('runStreamingConversion', () => {
 				);
 			},
 		);
+	});
+
+	describe('the sample rate a transcode is written at', () => {
+		let warn: jest.SpyInstance;
+
+		beforeEach(() => {
+			warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			warn.mockRestore();
+		});
+
+		it.each([
+			{ why: 'the encoder takes the source rate', answer: 16000 },
+			// No rate at all at this channel count: Conversion decides.
+			{ why: 'no rate works', answer: null },
+		])('leaves the rate alone when $why', async ({ answer }) => {
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ sampleRate: 16000, numberOfChannels: 1 }),
+			);
+			jest.mocked(encodableSampleRate).mockResolvedValueOnce(answer);
+
+			const { sampleRateChange } = await runStreamingConversion(
+				inputBlob,
+				'm4a',
+				96000,
+				false,
+			);
+
+			expect(
+				jest.mocked(conversionInit).mock.calls[0]?.[0],
+			).not.toHaveProperty('audio.sampleRate');
+			expect(sampleRateChange).toBeNull();
+		});
+
+		// Conversion then writes its own fallback layout, stereo at 48 kHz,
+		// which is the silent change this pipeline exists to prevent, so the
+		// log is the only trace of it.
+		it('says in the log when no rate works and mediabunny picks the layout', async () => {
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ sampleRate: 16000, numberOfChannels: 4 }),
+			);
+			jest.mocked(encodableSampleRate).mockResolvedValueOnce(null);
+
+			await runStreamingConversion(inputBlob, 'm4a', 96000, false);
+
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining(
+					'takes no standard rate for a 4-channel layout',
+				),
+			);
+		});
+
+		it('writes at the rate the encoder takes and returns the change with the bytes', async () => {
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ sampleRate: 16000, numberOfChannels: 1 }),
+			);
+			jest.mocked(encodableSampleRate).mockResolvedValueOnce(44100);
+
+			const result = await runStreamingConversion(
+				inputBlob,
+				'm4a',
+				96000,
+				false,
+			);
+
+			expect(conversionInit).toHaveBeenCalledWith(
+				expect.objectContaining({
+					audio: expect.objectContaining({ sampleRate: 44100 }),
+				}),
+			);
+			expect(result).toEqual({
+				data: convertedBuffer,
+				sampleRateChange: { from: 16000, to: 44100 },
+			});
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining('does not take 16000 Hz'),
+			);
+		});
+
+		it('asks about the source rate and the source channel count', async () => {
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ sampleRate: 22050, numberOfChannels: 2 }),
+			);
+
+			await runStreamingConversion(inputBlob, 'm4a', 96000, false);
+
+			expect(encodableSampleRate).toHaveBeenCalledWith('aac', {
+				numberOfChannels: 2,
+				sampleRate: 22050,
+				quality: expect.objectContaining({
+					options: { bitrate: 96000 },
+				}),
+			});
+		});
+
+		it('asks about the one channel a mono hook hands the encoder', async () => {
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ sampleRate: 16000, numberOfChannels: 2 }),
+			);
+
+			await runStreamingConversion(
+				inputBlob,
+				'm4a',
+				96000,
+				false,
+				undefined,
+				ChannelMode.MonoMix,
+			);
+
+			expect(encodableSampleRate).toHaveBeenCalledWith(
+				'aac',
+				expect.objectContaining({ numberOfChannels: 1 }),
+			);
+		});
+
+		it('asks nothing about a packet copy', async () => {
+			getPrimaryAudioTrack.mockResolvedValue(
+				audioTrack({ codec: 'aac', sampleRate: 16000 }),
+			);
+
+			await runStreamingConversion(inputBlob, 'm4a', 96000, true);
+
+			expect(encodableSampleRate).not.toHaveBeenCalled();
+		});
 	});
 });
 

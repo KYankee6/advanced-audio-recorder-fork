@@ -10,6 +10,7 @@
 import type { Menu, MenuItem } from 'obsidian';
 import { AAR_MENU_SECTION } from '../constants';
 import type { PluginCommand } from './PluginAction';
+import { runReported } from './registerActionCommands';
 
 /**
  * Adds every available action to the menu, skipping ones already
@@ -36,10 +37,12 @@ export function renderActionsIntoMenu<TContext>(
 		}
 		rendered.add(action.commandId);
 		menu.addItem((item: MenuItem) => {
-			item.setTitle(action.title)
+			item.setTitle(action.menuTitle ?? action.title)
 				.setIcon(action.icon)
 				.setSection(AAR_MENU_SECTION)
-				.onClick(() => void action.run(context));
+				.onClick(() => {
+					runReported(action, context, 'a menu');
+				});
 		});
 	}
 }

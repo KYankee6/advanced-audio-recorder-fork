@@ -16,6 +16,7 @@ import type {
 } from '../settingsSchema';
 import {
 	type DeviceOptions,
+	FILTER_LINE_LIST_CLASS,
 	SETTINGS_ROOT_CLASS,
 	SETTINGS_SECTION_CLASS,
 } from './context';
@@ -147,6 +148,19 @@ export function deviceRowDesc(
 }
 
 /**
+ * The classes of a list of named entries declared without a heading: the
+ * block every group carries, and the one that puts the add button on the
+ * filter's line while the list has entries to filter.
+ * @param count - How many entries the list holds
+ * @returns The list's class string
+ */
+export function listClass(count: number): string {
+	return count > 0
+		? `${SETTINGS_SECTION_CLASS} ${FILTER_LINE_LIST_CLASS}`
+		: SETTINGS_SECTION_CLASS;
+}
+
+/**
  * The filter a list of named entries carries in its header. Every collection
  * here is a flat list of names, so they all narrow the same way: the framework
  * draws the field, keeps the query across re-renders, and reapplies it.
@@ -161,29 +175,6 @@ export function nameFilter(placeholder: string): {
 		placeholder,
 		match: (definition, query): boolean =>
 			definition.name.toLowerCase().includes(query.toLowerCase()),
-	};
-}
-
-/**
- * A labelled row repeating a list's add affordance, declared where the renderer
- * draws only a plus icon in the list header. It sits beside the list rather
- * than in it, since a row inside would be filtered away by the list's own
- * search exactly when an empty result makes adding one the obvious next move.
- * @param name - The label, which is also the icon's tooltip
- * @param desc - What the row creates
- * @param action - The list's own add action
- */
-export function addItemRow(
-	name: string,
-	desc: string,
-	action: () => void,
-): SettingDefinition {
-	return {
-		name,
-		desc,
-		action: (): void => {
-			action();
-		},
 	};
 }
 

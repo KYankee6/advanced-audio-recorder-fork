@@ -8,14 +8,18 @@ import { noticeMessages } from '../mocks/obsidian';
 import { DEFAULT_SETTINGS } from 'src/settings/settingsSchema';
 import type { Profile, ProfileKindId } from 'src/settings/profiles';
 import { TRANSCRIPTION_PROVIDER_IDS } from 'src/constants';
-import { TranscriptionModal } from 'src/ui/TranscriptionModal';
+import {
+	TranscriptionModal,
+	type TranscriptionModalOptions,
+} from 'src/ui/TranscriptionModal';
 import {
 	transcribeFile,
 	TranscriptionCancelledError,
 } from 'src/transcription/api';
 import type { AudioRecorderSettings } from 'src/settings/settingsSchema';
 import { createFile } from '../helpers/createApp';
-import { allEls, maybeEl } from '../helpers/dom';
+import { allEls, control, el, maybeEl } from '../helpers/dom';
+import { OBSIDIAN } from '../helpers/selectors';
 import {
 	hasSettingRow,
 	settingNames,
@@ -30,6 +34,7 @@ import { setPlatform, useDesktopPlatform } from '../helpers/platform';
 import { tick } from '../helpers/async';
 import { internalsOf } from '../helpers/doubles';
 import { asMockVault } from '../helpers/obsidianMock';
+import { MODAL } from '../helpers/selectors';
 
 // The run itself has its own suites (runTranscription, the providers); what
 // this dialog owes is what it does with the outcome, so the run is recorded
@@ -207,7 +212,9 @@ describe('TranscriptionModal platform gating', () => {
 		);
 	}
 
-	function createLocalWhisperModal(): TranscriptionModal {
+	function createLocalWhisperModal(
+		options: Partial<TranscriptionModalOptions> = {},
+	): TranscriptionModal {
 		return new TranscriptionModal(
 			new App(),
 			createAudioFile(),
@@ -215,7 +222,10 @@ describe('TranscriptionModal platform gating', () => {
 				...DEFAULT_SETTINGS,
 				transcriptionProvider: TRANSCRIPTION_PROVIDER_IDS.LOCAL_WHISPER,
 			}),
-			{ backgroundProgress: { show: jest.fn(), clear: jest.fn() } },
+			{
+				backgroundProgress: { show: jest.fn(), clear: jest.fn() },
+				...options,
+			},
 		);
 	}
 
@@ -247,6 +257,21 @@ describe('TranscriptionModal platform gating', () => {
 		expect(notice).toHaveBeenCalledWith(
 			expect.stringContaining('not available on this device'),
 		);
+	});
+
+	it('tells the one that started it why the run never began', async () => {
+		setPlatform({ isMobile: true });
+		const onRunSettled = jest.fn();
+		const modal = createLocalWhisperModal({ onRunSettled });
+		modal.onOpen();
+
+		await internalsOf<TranscriptionModalInternals>(modal).startRun();
+
+		expect(onRunSettled).toHaveBeenCalledWith({
+			status: 'failed',
+			message:
+				'The selected engine is not available on this device. Pick a cloud engine to transcribe here.',
+		});
 	});
 
 	it('leaves the Transcribe button enabled on desktop', () => {
@@ -1331,6 +1356,26 @@ describe('TranscriptionModal running the job', () => {
 
 		expect(internals.minimized).toBe(false);
 	});
+
+	it('counts the elapsed time up while the run is in flight', () => {
+		// Driven by fake timers: on the real clock the counter only ticks in a
+		// test that happens to run longer than a second.
+		jest.useFakeTimers();
+		try {
+			jest.mocked(transcribeFile).mockReturnValue(new Promise(() => {}));
+			const { modal } = openRunnable();
+			const elapsed = (): string | null | undefined =>
+				maybeEl(modal.contentEl, MODAL.transcribeElapsed)?.textContent;
+			void internalsOf<TranscriptionModalInternals>(modal).startRun();
+			expect(elapsed()).toBe('Elapsed 0:00');
+
+			jest.advanceTimersByTime(2000);
+
+			expect(elapsed()).toBe('Elapsed 0:02');
+		} finally {
+			jest.useRealTimers();
+		}
+	});
 });
 
 describe('TranscriptionModal buttons', () => {
@@ -1419,5 +1464,55 @@ describe('TranscriptionModal buttons', () => {
 		button(modal, 'Cancel').click();
 
 		expect(internals.cancellation.token.isCancelled()).toBe(true);
+	});
+});
+
+describe('TranscriptionModal progress', () => {
+	/** An opened dialog and the internals that report progress into it. */
+	function openWithProgress(fraction: number): TranscriptionModal {
+		const modal = createModal({ show: jest.fn(), clear: jest.fn() });
+		modal.onOpen();
+		internalsOf<TranscriptionModalInternals>(modal).updateProgress(
+			fraction,
+			'Uploading audio...',
+		);
+		return modal;
+	}
+
+	it('announces the run as a progress bar at the percentage reached', () => {
+		const modal = openWithProgress(0.42);
+
+		const bar = control(modal.contentEl, 'Transcription progress');
+
+		expect(bar.getAttribute('role')).toBe('progressbar');
+		expect(bar.getAttribute('aria-valuenow')).toBe('42');
+	});
+
+	it("fills Obsidian's progress bar to the same percentage", () => {
+		const modal = openWithProgress(0.42);
+
+		const bar = control(modal.contentEl, 'Transcription progress');
+
+		expect(el(bar, OBSIDIAN.progressFill).style.width).toBe('42%');
+	});
+
+	it('shows a full bar for an engine that reports past the end', () => {
+		const modal = openWithProgress(1.2);
+
+		const bar = control(modal.contentEl, 'Transcription progress');
+
+		expect(bar.getAttribute('aria-valuenow')).toBe('100');
+	});
+
+	it('starts the bar at zero before the run reports anything', () => {
+		const modal = createModal({ show: jest.fn(), clear: jest.fn() });
+
+		modal.onOpen();
+
+		expect(
+			control(modal.contentEl, 'Transcription progress').getAttribute(
+				'aria-valuenow',
+			),
+		).toBe('0');
 	});
 });

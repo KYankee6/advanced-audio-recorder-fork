@@ -9,15 +9,27 @@
  */
 
 import {
+	LANGUAGE_LESSON_CLEANUP_PROFILE_ID,
 	MODEL_SEED_GENERATION,
 	LLM_PROVIDER_IDS,
 	TRANSCRIPTION_PROVIDER_IDS,
 } from 'src/constants';
 import {
 	DEFAULT_SETTINGS,
+	RecordingBannerAnchor,
+	shippedProfiles,
 	type AudioRecorderSettings,
 	type AudioSource,
 } from 'src/settings/settingsSchema';
+
+/**
+ * What a stored config holds once it has been given every shipped profile.
+ * Spread into a stored config by a suite whose subject is a profile list of
+ * its own, so the load does not add the shipped ones to it.
+ */
+export const SHIPPED_PROFILES_GIVEN = {
+	shippedProfileIds: shippedProfiles().map((profile) => profile.id),
+};
 
 /**
  * Copies a settings value all the way down, Maps included. jsdom exposes no
@@ -153,22 +165,34 @@ export function fullyPopulatedSettings(): Omit<
 		transcriptionChunkMb: 10,
 		transcriptionTimeoutMinutes: 15,
 		localWhisperTimeoutMinutes: 90,
+		unconfirmedApiKeySecrets: {
+			openai: {
+				id: 'whisper-test-key',
+				key: 'sk-test',
+				device: 'test-device',
+			},
+		},
 		whisperApiBaseUrl: 'https://api.groq.com/openai/v1',
 		whisperApiKey: 'sk-test',
+		whisperApiKeySecret: 'whisper-test-key',
 		whisperApiModel: 'whisper-large-v3',
 		whisperApiModels: ['whisper-large-v3', 'whisper-1'],
 		deepgramBaseUrl: 'https://api.deepgram.com/v1',
 		deepgramApiKey: 'dg-test',
+		deepgramApiKeySecret: 'deepgram-test-key',
 		deepgramModel: 'nova-3',
 		deepgramModels: ['nova-3', 'nova-2'],
 		geminiBaseUrl: 'https://generativelanguage.googleapis.com',
 		geminiApiKey: 'gm-test',
+		geminiApiKeySecret: 'gemini-test-key',
 		geminiModel: 'gemini-2.5-flash',
 		geminiModels: ['gemini-2.5-flash', 'gemini-2.5-pro'],
 		mistralBaseUrl: 'https://api.mistral.ai/v1',
 		mistralApiKey: 'ml-test',
+		mistralApiKeySecret: 'mistral-test-key',
 		deepSeekBaseUrl: 'https://api.deepseek.com',
 		deepSeekApiKey: 'ds-test',
+		deepSeekApiKeySecret: 'deepseek-test-key',
 		voxtralModel: 'voxtral-mini-latest',
 		voxtralModels: ['voxtral-mini-latest'],
 		localWhisperBinaryPath: '/usr/bin/whisper',
@@ -213,6 +237,12 @@ export function fullyPopulatedSettings(): Omit<
 				body: 'Tidy the dictation.',
 			},
 		],
+		// Every shipped profile already given, plus an id from a release this
+		// one does not ship, so nothing is added back over the list above.
+		shippedProfileIds: [
+			'shipped-retired-profile',
+			LANGUAGE_LESSON_CLEANUP_PROFILE_ID,
+		],
 		selectedProfileIds: {
 			participants: '',
 			dictionary: 'p1',
@@ -229,6 +259,7 @@ export function fullyPopulatedSettings(): Omit<
 		quickNoteLlmProvider: LLM_PROVIDER_IDS.ANTHROPIC,
 		anthropicBaseUrl: 'https://api.anthropic.com/v1',
 		anthropicApiKey: 'ak-test',
+		anthropicApiKeySecret: 'anthropic-test-key',
 		llmOpenAiModel: 'gpt-4o',
 		llmOpenAiModels: ['gpt-4o', 'gpt-4o-mini'],
 		llmAnthropicModel: 'claude-opus-4-8',
@@ -250,6 +281,7 @@ export function fullyPopulatedSettings(): Omit<
 		detectSilentChannelOnSave: false,
 		showRecordingStats: false,
 		mobileRecordingBanner: false,
+		mobileRecordingBannerPosition: RecordingBannerAnchor.BottomRight,
 		cleanupHighPassEnabled: false,
 		cleanupHighPassHz: 100,
 		cleanupNoiseGateEnabled: true,
